@@ -93,7 +93,7 @@ final class ViewerResolver
 
     /**
      * 'ok', 'disabled' (IMAP host policy), 'host_mismatch', 'no_mailbox', 'db_down', 'db_error',
-     * 'role_too_broad', 'invalid_login' or 'unresolved'.
+     * 'config_invalid', 'column_missing', 'role_too_broad', 'invalid_login' or 'unresolved'.
      */
     public function status(): string
     {
@@ -145,7 +145,15 @@ final class ViewerResolver
         try {
             $viewer = $this->lookup($login);
         } catch (GalBridgeException $e) {
-            $this->status = $e->getReason() === 'db_down' ? 'db_down' : 'db_error';
+            $this->status = match ($e->getReason()) {
+                'db_down' => 'db_down',
+                'config_invalid' => 'config_invalid',
+                default => 'db_error',
+            };
+            if ($this->status === 'config_invalid') {
+                // Dsn messages never contain the password (the role name at most)
+                Log::once('error', 'config', 'config_invalid', $e->getMessage());
+            }
             return $this->memo = null; // never cached as an entitlement decision
         }
 
@@ -163,9 +171,12 @@ final class ViewerResolver
     }
 
     /**
+     * Look a (normalised) login up in vmail: probe, home domain, address set. No IMAP-host binding
+     * and no caching - resolve() adds both; bin/galbridge.sh diag --user uses this directly.
+     *
      * @throws GalBridgeException
      */
-    private function lookup(string $login): ?Viewer
+    public function lookup(string $login): ?Viewer
     {
         $conn = ($this->connection)();
         $columns = $conn->visibleColumns();
@@ -176,10 +187,25 @@ final class ViewerResolver
             return null;
         }
 
+        $hideExpired = $this->config->bool('galbridge_hide_expired');
+        $required = ['mailbox' => ['username', 'domain', 'active'], 'domain' => ['domain', 'active', 'backupmx'], 'forwardings' => ['address', 'forwarding', 'is_alias', 'active']];
+        if ($hideExpired) {
+            $required['mailbox'][] = 'expired';
+            $required['domain'][] = 'expired';
+        }
+        foreach ($required as $table => $cols) {
+            $missing = array_diff($cols, $columns[$table] ?? []);
+            if ($missing !== []) {
+                $this->status = 'column_missing';
+                Log::once('error', 'schema', 'column_missing', 'required vmail columns not readable: ' . $table . '.' . implode(', ' . $table . '.', $missing) . ' (see bin/galbridge.sh diag)');
+                return null;
+            }
+        }
+
         $sql = 'SELECT m.username, m.`domain` FROM `mailbox` m JOIN `domain` d ON d.`domain` = m.`domain`'
             . ' WHERE m.username = ? AND m.active = 1 AND d.active = 1 AND d.backupmx = 0';
         $params = [$login];
-        if ($this->config->bool('galbridge_hide_expired')) {
+        if ($hideExpired) {
             $sql .= ' AND m.expired > ? AND d.expired > ?';
             $now = gmdate('Y-m-d H:i:s');
             $params[] = $now;

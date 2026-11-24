@@ -282,17 +282,23 @@ final class AddressBook extends \rcube_addressbook
         if (!$this->groups) {
             return [];
         }
+        $decoded = IdCodec::decodeContact($id);
+        if ($decoded === null || $decoded['kind'] !== IdCodec::PERSON) {
+            return []; // group members are persons only
+        }
         try {
             $record = $this->fetchRecord($id);
             if ($record === null) {
                 return [];
             }
             $address = (string) ($record['email:work'][0] ?? '');
-            $key = $this->repository->grouping() === 'domain'
+            $domainGrouping = $this->repository->grouping() === 'domain';
+            $key = $domainGrouping
                 ? substr($address, (int) strrpos($address, '@') + 1)
                 : mb_strtolower(trim((string) ($record['department'] ?? '')));
             foreach ($this->repository->groups() as $g) {
-                if ($g['key'] === $key) {
+                // group keys come from SQL LOWER(); compare case-insensitively in PHP as well
+                if ($domainGrouping ? $g['key'] === $key : mb_strtolower($g['key']) === $key) {
                     return [$g['id'] => $g['label']];
                 }
             }
@@ -316,7 +322,12 @@ final class AddressBook extends \rcube_addressbook
             return $empty;
         }
 
-        $fullSet = $this->list_page === 1 && $this->requestedSize > $this->limits->corePageCap;
+        // a full-set request: core asks for 999/9999/99999 rows; compose-to-group and group expansion
+        // are recipient sets whatever page size they use (core passes max_group_members for mailto)
+        $fullSet = $this->list_page === 1 && (
+            $this->requestedSize > $this->limits->corePageCap
+            || ($this->groupKey !== null && $this->filter === null && in_array($this->action, ['mailto', 'group-expand'], true))
+        );
 
         if ($this->filter !== null && $this->filter->type === SearchSpec::IDS) {
             // search() already refused more than galbridge_max_ids IDs
@@ -405,8 +416,16 @@ final class AddressBook extends \rcube_addressbook
             return $this->book->searchonly;
         }
         if ($this->searchonlyResolved === null) {
+            // decided once per Viewer TTL (cached next to the Viewer, bound to the fingerprint)
+            $cacheKey = $this->book->id . ':' . $this->fingerprint;
+            $cached = $_SESSION['galbridge_searchonly'][$cacheKey] ?? null;
+            if (is_array($cached) && is_bool($cached['v'] ?? null) && is_int($cached['at'] ?? null)
+                && time() - $cached['at'] < $this->limits->scopeTtl) {
+                return $this->searchonlyResolved = $cached['v'];
+            }
             $threshold = $this->limits->searchonlyThreshold;
             $this->searchonlyResolved = $this->repository->count(null, null, $threshold + 1) > $threshold;
+            $_SESSION['galbridge_searchonly'] = [$cacheKey => ['v' => $this->searchonlyResolved, 'at' => time()]];
         }
         return $this->searchonlyResolved;
     }

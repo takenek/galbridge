@@ -70,6 +70,12 @@ final class Dsn
         }
 
         if ($driver !== 'sqlite') {
+            // a socket next to a host name: which one the driver uses differs (PostgreSQL prefers the
+            // host, MySQL uses TCP for a non-localhost host), so refuse the ambiguity
+            $hasHost = (string) ($parsed['hostspec'] ?? '') !== '';
+            if ($hasHost && (!empty($parsed['socket']) || ($parsed['protocol'] ?? 'tcp') === 'unix')) {
+                throw new GalBridgeException('config_invalid', 'the DSN names both a host and a socket');
+            }
             $user = strtolower((string) ($parsed['username'] ?? ''));
             if ($user === '') {
                 throw new GalBridgeException('config_invalid', 'the DSN has no user name');
@@ -95,10 +101,18 @@ final class Dsn
             }
         }
 
-        if (empty($parsed['timeout']) && $driver !== 'sqlite') {
-            $timeout = $config->int('galbridge_db_connect_timeout', 1, 30);
-            $dsn .= (str_contains($dsn, '?') ? '&' : '?') . 'timeout=' . $timeout;
-            $parsed['timeout'] = $timeout;
+        if ($driver !== 'sqlite') {
+            if (array_key_exists('timeout', $parsed)) {
+                // rcube_db never lets a later parameter overwrite an earlier one: validate, never append
+                $t = (string) $parsed['timeout'];
+                if (!ctype_digit($t) || (int) $t < 1 || (int) $t > 30) {
+                    throw new GalBridgeException('config_invalid', 'the DSN timeout must be 1..30 seconds');
+                }
+            } else {
+                $timeout = $config->int('galbridge_db_connect_timeout', 1, 30);
+                $dsn .= (str_contains($dsn, '?') ? '&' : '?') . 'timeout=' . $timeout;
+                $parsed['timeout'] = $timeout;
+            }
         }
 
         $this->parsed = $parsed;
@@ -155,10 +169,12 @@ final class Dsn
      */
     public static function isLoopback(array $parsed): bool
     {
-        if (($parsed['protocol'] ?? 'tcp') === 'unix' || !empty($parsed['socket'])) {
+        $hostspec = (string) ($parsed['hostspec'] ?? '');
+        if ($hostspec === '' && (($parsed['protocol'] ?? 'tcp') === 'unix' || !empty($parsed['socket']))) {
             return true;
         }
-        $host = strtolower(trim((string) ($parsed['hostspec'] ?? 'localhost'), '[]'));
+        // a host name always decides (a socket parameter next to it must not make it "local")
+        $host = strtolower(trim($hostspec !== '' ? $hostspec : 'localhost', '[]'));
         if ($host === 'localhost' || $host === '::1') {
             return true;
         }

@@ -33,6 +33,8 @@ final class Limits
         public readonly int $maxExport,
         public readonly int $maxCount,
         public readonly int $searchonlyThreshold,
+        /** galbridge_scope_ttl: lifetime of per-session decisions (Viewer, search-only 'auto') */
+        public readonly int $scopeTtl = 300,
     ) {
     }
 
@@ -53,6 +55,7 @@ final class Limits
             maxExport: $config->int('galbridge_max_export', 1, 100000),
             maxCount: $config->int('galbridge_max_count', 100, 1000000),
             searchonlyThreshold: $config->int('galbridge_searchonly_threshold', 1, 1000000),
+            scopeTtl: $config->int('galbridge_scope_ttl', 30, 3600),
         );
     }
 }

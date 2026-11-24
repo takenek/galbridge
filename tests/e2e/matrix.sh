@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+#
+# GAL Bridge - E2E matrix (TEST ONLY). Runs tests/e2e/test_e2e.py sequentially (the Dovecot test
+# mailboxes and the vmail databases are shared) for every Roundcube x PHP x vmail-database
+# combination below that exists on this machine. Entries starting with / are Roundcube directories
+# (e.g. an unpacked official release tarball), anything else is a version under rc_base_dir.
+#
+#   matrix.sh [rc_base_dir]     (default /opt/rcrun, containing 1.7.7 with vendor/)
+#
+# Requirements: tests/e2e/dovecot.sh install; tests/fixtures/vmail/load.sh mysql|pgsql.
+#
+# @license GPL-3.0-or-later
+set -u
+BASE="${1:-/opt/rcrun}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+LOG="$HERE/run/matrix-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$LOG"
+runs=(
+  # rc     php     vmail db
+  "1.7.7 php8.4 mysql"
+  "1.7.7 php8.4 pgsql"
+  "1.7.7 php8.3 mysql"
+  "1.7.7 php8.5 pgsql"
+)
+total=0; bad=0
+for r in "${runs[@]}"; do
+  read -r ver php db <<< "$r"
+  case "$ver" in /*) rc="$ver"; tag="release-$(basename "$ver" | sed 's/roundcubemail-//')" ;; *) rc="$BASE/$ver"; tag="$ver" ;; esac
+  [ -d "$rc" ] || { echo "skip $rc (not present)"; continue; }
+  command -v "$php" >/dev/null || { echo "skip $php (not installed)"; continue; }
+  name="$tag-$php-$db"
+  python3 "$HERE/test_e2e.py" --rc "$rc" --php "$php" --db "$db" --port 8181 > "$LOG/$name.log" 2>&1
+  res=$(tail -1 "$LOG/$name.log")
+  printf '%-24s %s\n' "$name" "$res" | tee -a "$LOG/summary.txt"
+  total=$((total+1)); case "$res" in *" 0 failed"*) ;; *) bad=$((bad+1));; esac
+done
+echo "MATRIX: $((total-bad))/$total combinations green (logs: $LOG)" | tee -a "$LOG/summary.txt"
+[ "$total" -gt 0 ] && [ "$bad" -eq 0 ]

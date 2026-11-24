@@ -65,7 +65,8 @@ lib/GalBridge/
 bin/galbridge.sh                 CLI wrapper (Roundcube clisetup)
 config.inc.php.dist              every option documented
 localization/en_US.inc, pl_PL.inc
-SQL/grants.mysql.sql, SQL/grants.postgres.sql   reference grant set (read by `galbridge.sh grants`)
+SQL/grants.mysql.sql, SQL/grants.postgres.sql   reference grant set (read by `galbridge.sh grants`);
+                                 the iRedMail 1.7.3 columns are a separate, optional statement
 ```
 
 No JavaScript, templates or plugin tables: Roundcube's own address-book UI renders everything.
@@ -81,8 +82,8 @@ No JavaScript, templates or plugin tables: Roundcube's own address-book UI rende
      JS stops narrowing once a prefix returned nothing from every source, so the server minimum and
      the client minimum must agree.
 2. The **Viewer** is resolved lazily, on the first hook call that needs it:
-   * **IMAP-host binding** *(decision)*. `imap_host` is read from a fresh administrator
-     `rcube_config` (user preferences ignored). If `galbridge_imap_hosts` is empty and `imap_host`
+   * **IMAP-host binding** *(decision)*. `imap_host` (or the legacy `default_host`) is read from a
+     fresh administrator `rcube_config` (user preferences ignored). If `galbridge_imap_hosts` is empty and `imap_host`
      is a single string without `%` placeholders, the allowed host is
      `strtolower(idn_to_ascii(parse_host_uri(imap_host)[0]))` (`tls://127.0.0.1:143` -> `127.0.0.1`).
      `parse_host()` is never called, because `%d`/`%n` come from the client's Host header. Explicit
@@ -99,7 +100,9 @@ No JavaScript, templates or plugin tables: Roundcube's own address-book UI rende
    * the schema/privilege probe (12) runs on the same connection;
    * cached in `$_SESSION['galbridge']`, bound to user id, login, storage host and the configuration
      fingerprint, TTL `galbridge_scope_ttl` (default 300 s). A database outage is cached separately
-     for 30 s (`down_until`) and is never cached as "no entitlement".
+     for 30 s (`$_SESSION['galbridge_down_until']`) and is never cached as "no entitlement"; neither is
+     a refused DSN (`config_invalid`, logged once per request). Missing required columns give
+     `column_missing` (logged) without running the viewer query.
 3. `addressbooks_list` appends one entry per entitled book with a non-empty data scope: `id`, `name`
    (HTML-escaped, core prints it raw), `readonly => true`, `groups`, `autocomplete`. No internals.
 4. `addressbook_get` *(decision)*: for **our** source IDs it **always** sets an instance, whatever
@@ -131,7 +134,8 @@ localised non-empty label. It never connects to the database.
 * `*` in `galbridge_global_data_domains` (every hosted domain, including tenants added later) needs
   `galbridge_global_allow_wildcard = true` as well. diag warns about it.
 * `searchonly`: `true`, `false` or `'auto'` (search-only when the data scope holds more than
-  `galbridge_searchonly_threshold` persons, default 2000, counted once per Viewer TTL). Defaults:
+  `galbridge_searchonly_threshold` entries - persons, alias accounts and lists - default 2000; one
+  bounded COUNT, cached in `$_SESSION['galbridge_searchonly']` for the Viewer TTL). Defaults:
   domain book `false`, global book `true`. A search-only book returns an empty set with core's
   "search only" notice when listed without a search or group, as `rcube_ldap` does.
 * The global book uses **prefix** search mode whatever `addressbook_search_mode` says, matches
@@ -206,17 +210,19 @@ vCard export.
   storage, quota and transport columns, admin flags, other `enable*` flags, `rank`, timestamps other
   than `expired`. `enabledeliver`, `active` and `expired` are read in predicates only.
 * Display sanitising (RecordMapper): NFC; control, bidi and zero-width characters, CR/LF, `\ " < >`
-  removed; names capped at 128 characters; a name containing `@` is replaced by the local part;
+  removed; names capped at 128 characters; a name containing `@` is cut at the `@` (it could
+  impersonate another address);
   addresses are lower-case ASCII (A-labels, no homographs) and must pass `rcube_utils::check_email()`.
   With `galbridge_mark_foreign_domains` (default on) a global-book entry outside the viewer's home
   domain is shown as `Name (domain)`.
 
 ## 8. Groups *(decision)*
 
-* `galbridge_domain_groups`: `auto` (default: `domain` when `H` is in an organization, else
-  `department`), `department`, `domain`, `none`. `galbridge_global_groups`: `none` (default),
-  `domain`, `department`. Grouping by department requires `department` in the effective fields
-  (else forced to `none`, ERROR).
+* `galbridge_domain_groups`: `auto` (default: `domain` when `H` belongs to an organization of more
+  than one domain, else `department`), `department`, `domain`, `none`. `galbridge_global_groups`:
+  `none` (default), `domain`, `department`. Grouping by department requires `department` in the
+  effective fields (else forced to `none`, WARN `grouping_disabled`). **Search-only books (`true` or
+  `'auto'`) have no groups at all**, so a group can never list a tenant without a search.
 * Members are **persons only** (alias accounts and lists stay individual records), so counts are
   head counts and an expansion never sends to a list and its members twice.
 * One aggregate query per request and book returns `ID`, label and member count (department key
@@ -226,7 +232,7 @@ vCard export.
 * `list_groups()` returns `virtual => true` groups, so the compose list renders drill-down rows
   without a COUNT per group. With a search term (autocomplete, compose search) it applies the
   minimum length and leaves out groups larger than the expansion cap, so a group that expansion
-  would refuse is never offered. A search-only book returns no groups for an empty search.
+  would refuse is never offered.
 * Group IDs carry a book tag (`dd`/`dp` domain book, `gd`/`gp` global book) and the compact key
   encoding (9). `set_group()`: `0 '0' '' null false` clear the group; any other value is decoded,
   and an undecodable or foreign-book value installs a match-nothing predicate (and keeps
@@ -271,13 +277,14 @@ same answer (null or an empty set, the previous result cleared).
 * `set_page()` ≥ 1. Normal page sizes are those ≤ core `max_pagesize` (default 200); Roundcube's own
   lists never ask for more. A larger size on page 1 is a **full-set request** (core uses
   999/9999/99999 for group expansion, compose-to-group, export and search lists):
-  * group, no filter (compose-to-group, group expansion, group export): COUNT first; above
+  * group, no filter (compose-to-group, group expansion, group export; `mailto` and `group-expand`
+    are recipient sets whatever page size core passes, e.g. `max_group_members`): COUNT first; above
     min(`galbridge_max_group_members`, core `max_group_members` if set) → empty result, `set_error()`,
     a visible warning (`galbridge.grouptoolarge`), log; otherwise **all** members;
   * ID search (compose-to-selected, export of selected): more than `galbridge_max_ids` (200) IDs →
     empty + warning, never a prefix;
-  * search lists: capped at `galbridge_max_results` (500 domain, 100 global) with a "showing first
-    N, refine your search" notice when truncated;
+  * search lists: capped at `galbridge_max_results` (domain book, 500) / `galbridge_global_max_results`
+    (global book, 100) with a "showing first N, refine your search" notice when truncated;
   * whole-book export (no filter, no group): refused above `galbridge_max_export` (2000) or when the
     book has `export => false` (global default).
 * `count()` = `COUNT` over the same root predicate (persons + aliases + lists, each unique by primary
@@ -298,12 +305,15 @@ same answer (null or an empty set, the previous result cleared).
 * `galbridge_db_dsn` is mandatory; no fallback to Roundcube's connection (PostgreSQL cannot query
   across databases, and iRedMail's `roundcube` role can UPDATE `vmail.mailbox`).
 * Dsn policy: drivers `mysql`, `mysqli`, `pgsql` (`sqlite` only under the test bootstrap); the
-  `service` parameter is refused. Refused roles (default): `vmail`, `vmailadmin`, `roundcube`,
+  `service` parameter and a DSN naming both a host and a socket are refused. Refused roles (default): `vmail`, `vmailadmin`, `roundcube`,
   `sogo`, `iredadmin`, `iredapd`, `amavisd`, `fail2ban`, `root`, `postgres`, plus the `db_dsnw` user
   and the password plugin's DSN user. Loopback = unix socket, 127.0.0.0/8, `::1`, `localhost`; any
   other host needs verified TLS (PostgreSQL `sslmode=verify-ca|verify-full`; MySQL `ca`/`capath` +
   `verify_server_cert=1`) unless `galbridge_db_allow_plaintext` (diag WARN). A connect `timeout`
-  (`galbridge_db_connect_timeout`, 2 s) is injected when the DSN has none.
+  (`galbridge_db_connect_timeout`, 2 s) is injected when the DSN has none; a `timeout` written into
+  the DSN must be 1..30 s (rcube_db keeps the first occurrence, so it is validated, never appended).
+  Note: `rcube_db::conn_create()` itself logs a failed connect with the driver text (role and host,
+  never the password) to Roundcube's errors log, whatever `ignore_errors` says.
 * After connecting: read-only session and statement timeout (`galbridge_db_timeout`, 3 s;
   MariaDB `max_statement_time`, MySQL `max_execution_time`, PostgreSQL `statement_timeout`), as a
   backstop to the role-level limits in the grant templates.
@@ -334,8 +344,10 @@ same answer (null or an empty set, the previous result cleared).
 ## 14. Logging
 
 Channel `galbridge`. Normal levels: reason codes (`denied_source`, `invalid_gid`, `invalid_id`,
-`group_too_large`, `role_too_broad`, `column_missing`, `db_error` + SQLSTATE, `db_down`,
-`config_invalid`), the numeric Roundcube user id, book ids, counts. Each reason code is logged at
+`group_too_large`, `too_many_ids`, `export_disabled`, `export_too_large`, `too_many_groups`,
+`role_too_broad`, `column_missing`, `field_unavailable`, `grouping_disabled`, `row_dropped`,
+`db_error` + SQLSTATE, `db_down`, `config_invalid`, `dsn_warning`, `host_mismatch`), the numeric
+Roundcube user id, book ids, counts. Each reason code is logged at
 most once per request. Search terms, addresses and names only with `galbridge_debug`, sanitised.
 Note: `rcube_db` inlines bound values on the client side, so database server logs (slow/general
 log, `log_min_error_statement`) can contain search terms (SECURITY.md).
@@ -349,7 +361,7 @@ log, `log_min_error_statement`) can contain search terms (SECURITY.md).
 
 No actions, templates or JavaScript. CLI: `bin/galbridge.sh diag [--user=<login>]` (configuration,
 IMAP-host derivation, DSN policy, connection and limits, privilege tripwires, column probe, indexes,
-data sanity, core interplay, old-plugin leftovers, per-user entitlement and timed sample search) and
+data sanity, core interplay, old-plugin leftovers, per-user entitlement with timed per-kind counts) and
 `bin/galbridge.sh grants --driver=mysql|pgsql [--host=...] [--db=vmail]` (prints the grant set with a
 fresh random password and the matching DSN; never writes into the plugin directory).
 

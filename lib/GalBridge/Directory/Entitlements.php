@@ -17,6 +17,7 @@ declare(strict_types=1);
 namespace GalBridge\Directory;
 
 use GalBridge\Config;
+use GalBridge\Log;
 
 /**
  * Which books a Viewer may use: a pure function of the Viewer and the administrator configuration.
@@ -101,6 +102,8 @@ final class Entitlements
                 $minusHome = $config->bool('galbridge_global_include_home') ? [] : $home;
                 $all = $data === ['*'];
                 if ($all && !$config->bool('galbridge_global_allow_wildcard')) {
+                    // '*' exposes every hosted domain, including tenants added later: a second opt-in
+                    Log::once('error', 'config', 'config_invalid', "galbridge_global_data_domains = ['*'] needs galbridge_global_allow_wildcard = true; the global book is empty");
                     $all = false;
                     $data = [];
                 }

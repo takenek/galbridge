@@ -1,0 +1,29 @@
+# GitGuardian / ggshield configuration (format v2).
+# "version: 2" is required, otherwise ggshield treats the file as the deprecated v1 format.
+version: 2
+
+secret:
+  # tests/fixtures/vmail/ holds the TEST-ONLY iRedMail vmail fixture: the upstream schema, seed.sql
+  # (example.com, example.org and *.test tenants; mailbox.password, recovery_email and allow_nets
+  # hold obvious canary values such as {SSHA512}SECRET-HASH-1 that the suite proves are never
+  # readable) and load.sh, which carries the password of the throw-away read-only test role. Those
+  # values protect nothing and must stay in the repository for the test suite. The other entries
+  # are the E2E harness files that carry the credentials of the throw-away test databases and of
+  # the Dovecot test mailboxes created by tests/e2e/dovecot.sh - narrow, named exceptions instead
+  # of whole directories. Everything else, including the rest of tests/, is scanned.
+  ignored_paths:
+    - 'tests/fixtures/vmail/**/*'
+    - 'tests/e2e/setup.sh'
+    - 'tests/e2e/dovecot.sh'
+    - 'tests/e2e/rc.py'
+
+  # The throw-away values of the CI and local test environments, ignored by EXACT value only: the
+  # files that mention them (.github/workflows/ci.yml, docs, tests) are still scanned for anything
+  # else. Any new harness file with other throw-away credentials must be named here explicitly.
+  ignored_matches:
+    - name: CI service container administrator password (TEST ONLY, .github/workflows/ci.yml)
+      match: ci-throwaway
+    - name: read-only test role password (TEST ONLY, tests/fixtures/vmail/load.sh)
+      match: testonly-ro
+    - name: Dovecot E2E test mailbox password (TEST ONLY, tests/e2e/dovecot.sh)
+      match: testpass

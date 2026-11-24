@@ -98,7 +98,9 @@ final class Repository
         }
         $groups = [];
         foreach ($rows as $row) {
-            $key = $kind === IdCodec::GROUP_DOMAIN ? Normalizer::domain($row['gkey'] ?? null) : mb_strtolower(trim((string) ($row['gkey'] ?? '')));
+            // the department key is used exactly as SQL computed it (LOWER(TRIM(department))), so the
+            // group predicate matches on every engine and collation; PHP never re-lowercases it
+            $key = $kind === IdCodec::GROUP_DOMAIN ? Normalizer::domain($row['gkey'] ?? null) : (string) ($row['gkey'] ?? '');
             $label = Normalizer::displayText($row['label'] ?? '', 64);
             if ($key === null || $key === '' || $label === '' || strlen($key) > IdCodec::MAX_KEY_BYTES) {
                 continue;

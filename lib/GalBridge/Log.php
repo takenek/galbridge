@@ -153,11 +153,11 @@ final class Log
         if (is_array($value)) {
             $parts = [];
             foreach ($value as $k => $v) {
-                $parts[] = (is_int($k) ? '' : self::sanitize((string) $k) . '=') . self::sanitize(is_scalar($v) || $v === null ? $v : get_debug_type($v));
                 if (count($parts) >= 20) {
-                    $parts[] = '...';
+                    $parts[] = '...'; // only when something is really left out
                     break;
                 }
+                $parts[] = (is_int($k) ? '' : self::sanitize((string) $k) . '=') . self::sanitize(is_scalar($v) || $v === null ? $v : get_debug_type($v));
             }
             return '[' . implode(', ', $parts) . ']';
         }
@@ -166,15 +166,16 @@ final class Log
         }
 
         $s = (string) $value;
-        // DSN credentials (scheme://user:password@host) - never log a password, even by accident
-        $s = (string) preg_replace('~([a-z][a-z0-9+.-]*://[^:@/\s]*):[^@/\s]*@~i', '$1:***@', $s);
+        // DSN credentials (scheme://user:password@host) - never log a password, even by accident;
+        // rcube_db::parse_dsn() reads the password up to the LAST '@', so redact greedily
+        $s = (string) preg_replace('~([a-z][a-z0-9+.-]*://[^:@/\s]*):\S*@~i', '$1:***@', $s);
         // invalid UTF-8 / binary
         if (!preg_match('//u', $s)) {
             $s = '[BINARY-REDACTED]';
         }
         // control characters (CR/LF/TAB/ESC ...), NEL, line/paragraph separators, bidi and zero-width
         // characters -> log injection and display spoofing protection
-        $s = (string) preg_replace('/[\x00-\x1F\x7F]|\x{0085}|[\x{200B}-\x{200F}\x{2028}-\x{202E}\x{2066}-\x{2069}\x{FEFF}]/u', ' ', $s);
+        $s = (string) preg_replace('/[\x00-\x1F\x7F]|[\x{0080}-\x{009F}]|' . Normalizer::INVISIBLE . '/u', ' ', $s);
 
         if (mb_strlen($s) > self::MAX_VALUE) {
             $s = mb_substr($s, 0, self::MAX_VALUE) . '...';

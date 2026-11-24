@@ -93,8 +93,10 @@ final class IdCodec
             return null;
         }
         $key = self::decode($m[3]);
-        if ($key === null || trim($key) === '' || $key !== mb_strtolower(trim($key))) {
-            return null; // group keys are LOWER(TRIM(value))
+        // group keys are LOWER(TRIM(value)) as computed by the database: never edge spaces or ASCII
+        // upper case (non-ASCII letters may stay upper case where LOWER() does not fold them)
+        if ($key === null || trim($key) === '' || $key !== trim($key, ' ') || preg_match('/[A-Z]/', $key)) {
+            return null;
         }
         return ['book' => $m[1], 'kind' => $m[2], 'key' => $key];
     }

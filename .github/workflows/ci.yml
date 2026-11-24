@@ -1,0 +1,221 @@
+# GAL Bridge - continuous integration.
+#
+# Deliberate choices, so that a later audit does not re-report them:
+# - third-party actions are pinned to full commit SHAs (tag in the comment); update both together
+#   (Dependabot does, .github/dependabot.yml);
+# - read-only token (permissions: contents: read), no secrets, no pull_request_target: untrusted
+#   pull requests run with the same minimal rights as pushes;
+# - composer.lock is git-ignored (a plugin, not an application), so every PHP version resolves its
+#   own dependency set - exactly what an installation on that PHP version gets;
+# - Roundcube is not a runtime dependency of the plugin; the copy that roundcube/plugin-installer
+#   pulls into vendor/ is pinned to 1.7.7, the only supported core ("composer require --no-update"
+#   edits composer.json on the runner only, after "composer validate"), and assembled into the
+#   directory GALBRIDGE_RC expects (docs/TESTING.md). A security advisory against the pinned core
+#   fails the run on purpose: move the pin and composer.json "min-version" together;
+# - MariaDB 11.8 and PostgreSQL 17 are throw-away service containers on the job's ephemeral runner
+#   and hold only the TEST-ONLY fixture (tests/fixtures/vmail). "ci-throwaway" is their
+#   administrator password (named in .gitguardian.yaml); the read-only role the tests connect with
+#   is created by load.sh from the plugin's own SQL/grants.*.sql, so every run proves that the
+#   documented grants are sufficient. The fixture is loaded with the client inside each container
+#   (docker exec): client and server versions always match and nothing depends on the database
+#   clients of the runner image. The images use their official version tags (test data only).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Recheck resolved dependencies daily, even without source changes (05:23 UTC).
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  tests:
+    name: PHPUnit (PHP ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.1', '8.2', '8.3', '8.4', '8.5']
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: ci-throwaway
+        ports:
+          - '3306:3306'
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: ci-throwaway
+        ports:
+          - '5432:5432'
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: ${{ matrix.php }}
+          tools: composer:v2
+          extensions: mbstring, intl, dom, pdo, pdo_mysql, pdo_pgsql, pdo_sqlite, sqlite3
+          coverage: none
+
+      # GAL Bridge supports Roundcube 1.7.7 only: pin the core that roundcube/plugin-installer
+      # pulls in (a runner-local edit of composer.json, never committed).
+      - name: Pin Roundcube 1.7.7
+        run: composer require --dev --no-update --no-interaction "roundcube/roundcubemail:1.7.7"
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress
+
+      # Audit this PHP version's installed packages, including dev and transitive dependencies.
+      - name: Audit dependencies
+        run: composer audit --no-interaction --format=plain
+
+      # The git-sourced package reports "1.7-git" in its constants, so the pin is verified through
+      # Composer's installed metadata. logs/ and temp/ mirror a real installation.
+      - name: Assemble the Roundcube directory for integration tests
+        run: |
+          test "$(php -r 'require "vendor/autoload.php"; echo Composer\InstalledVersions::getPrettyVersion("roundcube/roundcubemail");')" = '1.7.7'
+          rc="$RUNNER_TEMP/rc"
+          mkdir -p "$rc/logs" "$rc/temp"
+          for d in program config plugins SQL; do
+            ln -s "$GITHUB_WORKSPACE/vendor/roundcube/roundcubemail/$d" "$rc/$d"
+          done
+          ln -s "$GITHUB_WORKSPACE/vendor" "$rc/vendor"
+          test -f "$rc/program/lib/Roundcube/bootstrap.php"
+          echo "GALBRIDGE_RC=$rc" >> "$GITHUB_ENV"
+
+      # load.sh (re)creates galbridge_vmail_test on each server, loads the upstream iRedMail 1.8.11
+      # schema and seed.sql, creates the read-only role from SQL/grants.*.sql and prints its DSN.
+      # MYSQL_ADMIN / PSQL_ADMIN are exported for the whole job: the role tests in
+      # tests/Integration/DsnPolicyTest.php create their extra roles through the same variables
+      # (without them those tests are skipped, not failed).
+      - name: Load the TEST-ONLY vmail fixture
+        env:
+          MARIADB_CID: ${{ job.services.mariadb.id }}
+          POSTGRES_CID: ${{ job.services.postgres.id }}
+        run: |
+          export MYSQL_ADMIN="docker exec -i $MARIADB_CID mariadb -u root -pci-throwaway"
+          export PSQL_ADMIN="docker exec -i -e PGPASSWORD=ci-throwaway $POSTGRES_CID psql -U postgres"
+          printf 'MYSQL_ADMIN=%s\nPSQL_ADMIN=%s\n' "$MYSQL_ADMIN" "$PSQL_ADMIN" >> "$GITHUB_ENV"
+          out="$RUNNER_TEMP/fixture"
+          mkdir -p "$out"
+          tests/fixtures/vmail/load.sh mysql | tee "$out/mysql.txt"
+          tests/fixtures/vmail/load.sh pgsql | tee "$out/pgsql.txt"
+          grep -h -E '^GALBRIDGE_TEST_(MYSQL|PGSQL)_DSN=(mysql|pgsql)://' "$out/mysql.txt" "$out/pgsql.txt" > "$out/dsn.env"
+          # both engines or fail: a missing DSN would silently reduce the suite to the SQLite mirror
+          test "$(wc -l < "$out/dsn.env")" -eq 2
+          cat "$out/dsn.env" >> "$GITHUB_ENV"
+
+      - name: PHPUnit (SQLite mirror, MariaDB 11.8, PostgreSQL 17)
+        run: vendor/bin/phpunit
+
+      - name: PHP syntax check
+        run: |
+          status=0
+          while IFS= read -r -d '' f; do
+            php -l "$f" > /dev/null 2>&1 || { php -l "$f"; status=1; }
+          done < <(find lib tests -type f -name '*.php' -print0; find localization -type f -name '*.inc' -print0; printf '%s\0' galbridge.php bin/galbridge.sh config.inc.php.dist)
+          exit "$status"
+
+  phpstan:
+    name: PHPStan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          extensions: mbstring, intl, dom, pdo, pdo_mysql, pdo_pgsql, pdo_sqlite, sqlite3
+          coverage: none
+
+      # The manifest must stay valid for Packagist; validated before the CI-only pin edits it.
+      - name: Validate composer.json
+        run: composer validate --strict --no-check-lock --no-interaction
+
+      - name: Pin Roundcube 1.7.7
+        run: composer require --dev --no-update --no-interaction "roundcube/roundcubemail:1.7.7"
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress
+
+      # Audit the independently resolved dependency set used by PHPStan.
+      - name: Audit dependencies
+        run: composer audit --no-interaction --format=plain
+
+      # phpstan.neon.dist scans Roundcube at /opt/rcrun/1.7.7 (its documented default location);
+      # the scanned tree must be 1.7.7 (rcube_addressbook's ': void' return types).
+      - name: Assemble the Roundcube directory for analysis
+        run: |
+          test "$(php -r 'require "vendor/autoload.php"; echo Composer\InstalledVersions::getPrettyVersion("roundcube/roundcubemail");')" = '1.7.7'
+          rc="$RUNNER_TEMP/rc"
+          mkdir -p "$rc"
+          for d in program config plugins SQL; do
+            ln -s "$GITHUB_WORKSPACE/vendor/roundcube/roundcubemail/$d" "$rc/$d"
+          done
+          ln -s "$GITHUB_WORKSPACE/vendor" "$rc/vendor"
+          sudo mkdir -p /opt/rcrun
+          sudo ln -s "$rc" /opt/rcrun/1.7.7
+          echo "GALBRIDGE_RC=/opt/rcrun/1.7.7" >> "$GITHUB_ENV"
+
+      - name: PHPStan
+        run: php -d memory_limit=2G vendor/bin/phpstan analyse --no-progress -c phpstan.neon.dist
+
+  coding-style:
+    name: PHP-CS-Fixer
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The same PHP version as the documented local run, so CI and developers see the same result.
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          extensions: mbstring, intl, dom, pdo, pdo_mysql, pdo_pgsql, pdo_sqlite, sqlite3
+          coverage: none
+
+      - name: Pin Roundcube 1.7.7
+        run: composer require --dev --no-update --no-interaction "roundcube/roundcubemail:1.7.7"
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress
+
+      # Check only: the configured rules are not risky, but CI never rewrites code.
+      - name: PHP-CS-Fixer (dry run)
+        run: vendor/bin/php-cs-fixer fix --dry-run --diff --using-cache=no --config=.php-cs-fixer.dist.php

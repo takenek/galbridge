@@ -36,12 +36,19 @@ final class Normalizer
     public const MAX_DOMAIN = 253;
 
     /**
+     * Invisible / direction-changing characters (bidi controls incl. U+061C ARABIC LETTER MARK,
+     * zero-width characters, line/paragraph separators, word joiner and invisible operators, BOM),
+     * as a regular-expression alternative (u modifier).
+     */
+    public const INVISIBLE = '[\x{061C}\x{180E}\x{200B}-\x{200F}\x{2028}-\x{202E}\x{2060}-\x{206F}\x{FEFF}]';
+
+    /**
      * Normalise a domain: trim, NFC, lower case, IDNA to ASCII, trailing dot removed, validated.
      */
     public static function domain(mixed $value): ?string
     {
-        if (!is_string($value)) {
-            return null;
+        if (!is_string($value) || preg_match('//u', $value) !== 1) {
+            return null; // invalid UTF-8 must fail, never be "repaired" into another value
         }
         $d = trim(self::nfc($value));
         $d = rtrim($d, '.');
@@ -72,8 +79,8 @@ final class Normalizer
      */
     public static function address(mixed $value): ?string
     {
-        if (!is_string($value)) {
-            return null;
+        if (!is_string($value) || preg_match('//u', $value) !== 1) {
+            return null; // invalid UTF-8 must fail, never be "repaired" into another value
         }
         $a = trim(self::nfc($value));
         $at = strrpos($a, '@');
@@ -97,7 +104,7 @@ final class Normalizer
         return $local !== ''
             && strlen($local) <= 64
             && preg_match('//u', $local) === 1
-            && !preg_match('/[\s\x00-\x1F\x7F,;:<>()\[\]"\'\\\\@]/u', $local);
+            && !preg_match('/[\s\x00-\x1F\x7F,;:<>()\[\]"\'\\\\@]|[\x{0080}-\x{009F}]|' . self::INVISIBLE . '/u', $local);
     }
 
     /**
@@ -124,6 +131,7 @@ final class Normalizer
             return count($values) === 1 ? ['*'] : null;
         }
         $out = [];
+        $seen = [];
         foreach ($values as $v) {
             $n = $normalise($v);
             if ($n === null) {
@@ -133,9 +141,13 @@ final class Normalizer
                 }
                 continue;
             }
-            $out[$n] = true;
+            // a separate seen-map: array_keys() would turn numeric strings ('1001') into ints
+            if (!isset($seen[$n])) {
+                $seen[$n] = true;
+                $out[] = $n;
+            }
         }
-        return array_keys($out);
+        return $out;
     }
 
     /**
@@ -169,7 +181,7 @@ final class Normalizer
             return '';
         }
         $s = self::nfc($s);
-        $s = (string) preg_replace('/[\x00-\x1F\x7F-\x9F]|[\x{200B}-\x{200F}\x{2028}-\x{202E}\x{2060}-\x{206F}\x{FEFF}]|[\\\\"<>]/u', ' ', $s);
+        $s = (string) preg_replace('/[\x00-\x1F\x7F]|[\x{0080}-\x{009F}]|' . self::INVISIBLE . '|[\\\\"<>]/u', ' ', $s);
         $s = trim((string) preg_replace('/\s+/u', ' ', $s));
         if (mb_strlen($s) > $max) {
             $s = rtrim(mb_substr($s, 0, $max));

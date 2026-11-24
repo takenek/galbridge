@@ -26,10 +26,9 @@ CREATE USER IF NOT EXISTS 'galbridge'@'localhost' IDENTIFIED BY 'CHANGE_ME_RANDO
 -- MariaDB only (MySQL 8 has no per-user statement time; the plugin also sets a session limit):
 -- ALTER USER 'galbridge'@'localhost' WITH MAX_STATEMENT_TIME 5 MAX_USER_CONNECTIONS 25;
 
--- Required: persons, domains, alias domains, per-user alias addresses and list/alias membership flags
-GRANT SELECT (username, name, first_name, last_name, domain, active, enabledeliver, expired) ON vmail.mailbox TO 'galbridge'@'localhost';
+-- Required: persons, domains, per-user alias addresses and list/alias membership flags
+GRANT SELECT (username, name, domain, active, enabledeliver, expired) ON vmail.mailbox TO 'galbridge'@'localhost';
 GRANT SELECT (domain, active, backupmx, expired) ON vmail.domain TO 'galbridge'@'localhost';
-GRANT SELECT (alias_domain, target_domain, active) ON vmail.alias_domain TO 'galbridge'@'localhost';
 GRANT SELECT (address, forwarding, domain, is_alias, is_list, is_maillist, active) ON vmail.forwardings TO 'galbridge'@'localhost';
 
 -- Alias accounts and mlmmj mailing lists (galbridge_include_aliases / galbridge_include_mailing_lists)
@@ -38,7 +37,10 @@ GRANT SELECT (address, name, accesspolicy, domain, active, expired) ON vmail.mai
 GRANT SELECT (address, moderator) ON vmail.moderators TO 'galbridge'@'localhost';
 GRANT SELECT (address, owner) ON vmail.maillist_owners TO 'galbridge'@'localhost';
 
--- Optional fields (galbridge_fields): department, phone (telephone), mobile, birthday,
--- organization (domain.description). Grant only what you enable.
-GRANT SELECT (department, telephone, mobile, birthday) ON vmail.mailbox TO 'galbridge'@'localhost';
-GRANT SELECT (description) ON vmail.domain TO 'galbridge'@'localhost';
+-- Optional fields (galbridge_fields). Grant only what you enable; the organization field needs no
+-- column (it comes from galbridge_organizations).
+GRANT SELECT (department) ON vmail.mailbox TO 'galbridge'@'localhost';
+-- Columns added by iRedMail 1.7.3 (update/1.7.3/vmail.*): first name, surname, phones, birthday.
+-- On a server upgraded without that update these GRANTs fail ("Unknown column"): apply the update or
+-- leave them out - GAL Bridge then works with fewer fields (bin/galbridge.sh diag lists them).
+GRANT SELECT (first_name, last_name, telephone, mobile, birthday) ON vmail.mailbox TO 'galbridge'@'localhost';

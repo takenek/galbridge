@@ -156,7 +156,7 @@ class galbridge extends rcube_plugin
                     $config->string('galbridge_db_dsn'),
                     $config,
                     (string) $config->adminCore('db_dsnw', ''),
-                    is_string($p = $config->adminCore('password_db_dsn')) ? $p : null,
+                    $config->passwordPluginDsn(),
                 );
                 foreach ($dsn->warnings() as $w) {
                     Log::once('warning', 'db', 'dsn_warning', $w);

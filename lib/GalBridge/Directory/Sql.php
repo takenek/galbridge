@@ -150,7 +150,7 @@ final class Sql
 
     private static function expr(string $expr): string
     {
-        if (preg_match("/['\"?;]|--|\\/\\*/", $expr)) {
+        if (preg_match("/['\"?;#]|--|\\/\\*/", $expr)) {
             throw new \LogicException('unsafe column expression');
         }
         return $expr;

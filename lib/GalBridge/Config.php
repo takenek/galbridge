@@ -389,6 +389,56 @@ final class Config
     }
 
     /**
+     * Run every validating accessor once, so problems() is complete (diag calls this first; at
+     * runtime each accessor validates lazily when it is first needed).
+     */
+    public function validate(): void
+    {
+        $this->organizations();
+        $this->fields();
+        $this->hiddenAddresses();
+        $this->hiddenLocalparts();
+        $this->visibilityColumn();
+        $this->imapHosts();
+        foreach (['galbridge_domain_viewer_domains', 'galbridge_global_viewer_domains', 'galbridge_global_data_domains'] as $allow) {
+            $this->domainAllowList($allow);
+        }
+        foreach (['galbridge_domain_viewer_domains_exclude', 'galbridge_global_viewer_domains_exclude', 'galbridge_global_data_domains_exclude'] as $deny) {
+            $this->domainDenyList($deny);
+        }
+        $this->choice('galbridge_domain_groups', self::GROUPINGS);
+        $this->choice('galbridge_global_groups', self::GROUPINGS);
+        $this->choice('galbridge_list_policy', self::LIST_POLICIES);
+        foreach (['galbridge_domain_searchonly', 'galbridge_global_searchonly'] as $name) {
+            $v = $this->get($name);
+            if (!is_bool($v) && !(is_string($v) && strtolower(trim($v)) === 'auto')) {
+                $this->problem('error', $name, "must be true, false or 'auto'");
+            }
+        }
+    }
+
+    /**
+     * The DSN of Roundcube's password plugin (its user is refused for GAL Bridge). iRedMail writes
+     * it into plugins/password/config.inc.php, which the main configuration does not include.
+     */
+    public function passwordPluginDsn(): ?string
+    {
+        $dsn = $this->adminCore('password_db_dsn');
+        if (is_string($dsn) && $dsn !== '') {
+            return $dsn;
+        }
+        $fresh = new \rcube_config();
+        $dir = defined('RCUBE_PLUGINS_DIR') ? RCUBE_PLUGINS_DIR : (defined('INSTALL_PATH') ? INSTALL_PATH . 'plugins/' : '');
+        if ($dir !== '' && is_readable($dir . 'password/config.inc.php')) {
+            $fresh->load_from_file($dir . 'password/config.inc.php');
+        } else {
+            $fresh->load_from_file('password.inc.php');
+        }
+        $dsn = $fresh->get('password_db_dsn');
+        return is_string($dsn) && $dsn !== '' ? $dsn : null;
+    }
+
+    /**
      * Hash of the effective administrator configuration of this plugin. Binds the cached Viewer and
      * stored search specs, so a configuration change takes effect immediately.
      */
