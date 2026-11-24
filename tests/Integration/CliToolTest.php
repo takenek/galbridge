@@ -10,6 +10,7 @@ use GalBridge\Config;
 use GalBridge\Db\Connection;
 use GalBridge\Db\Dsn;
 use GalBridge\Directory\BookDefinition;
+use GalBridge\Directory\Schema;
 use GalBridge\Exception\GalBridgeException;
 use GalBridge\Log;
 use GalBridge\Tests\Support\Env;
@@ -21,12 +22,15 @@ use PHPUnit\Framework\TestCase;
  * the read-only role and for checking an installation:
  *
  *  - grants: argument validation (odd roles, databases and hosts are refused, '%' is never a
- *    database server), the output (the shipped template with a fresh password; renames only inside
- *    SQL statements, so the attribution header and the comments stay as shipped; the database
- *    server in the DSN is independent of the MySQL account host; a non-local account host gets
- *    REQUIRE SSL), and the output APPLIED to the throw-away MariaDB and PostgreSQL servers as a new
- *    role: the printed DSN works, only the granted columns are readable, SELECT * and UPDATE are
- *    denied, and re-running a fresh output resets the password so that its DSN works again;
+ *    database server, the role of another component is never touched), the output (the shipped
+ *    template with a fresh password - for PostgreSQL as a SCRAM verifier, never in clear text;
+ *    renames only inside SQL statements, so the attribution header and the comments stay as
+ *    shipped; the database server in the DSN is independent of the MySQL account host; a non-local
+ *    account host gets REQUIRE SSL), and the output APPLIED to the throw-away MariaDB and
+ *    PostgreSQL servers as a new role: the printed DSN works, only the granted columns are
+ *    readable, SELECT *, UPDATE and the forwardings table are denied; a second default output
+ *    stops at the existing role and changes nothing, --reset-password changes the password and
+ *    --grants-only re-applies everything but the password;
  *  - diag: run as Roundcube runs it (php bin/galbridge.sh with ROUNDCUBE_CONFIG_DIR pointing to a
  *    temporary configuration), against the fixture role and against temporary roles that are too
  *    broad (write privileges), too narrow (missing optional or required columns), with malformed
@@ -42,13 +46,27 @@ use PHPUnit\Framework\TestCase;
  */
 final class CliToolTest extends TestCase
 {
+    /** diag: the switches of an installation that sets none of them (Config::DEFAULTS) */
+    private const SWITCHES_BOOKS = 'domain_book on, domain_autocomplete on, domain_export on, domain_searchonly off, global_book off, global_autocomplete on, global_export off, global_searchonly on, global_include_home off, global_allow_wildcard off';
+
+    private const SWITCHES_ENTRIES = 'user_aliases off, include_aliases on, include_mailing_lists on, hide_expired on, mark_foreign_domains on, list_policy strict';
+
+    private const SWITCHES_CONTROLS = 'db_allow_plaintext off, db_allow_verify_ca off, debug off';
+
+    /** what the release archive holds at the top level (.gitattributes excludes the rest) */
+    private const RELEASE_ENTRIES = [
+        '.htaccess', 'CHANGELOG.md', 'COPYRIGHT', 'LICENSE', 'README.md', 'SECURITY.md', 'SQL', 'bin', 'composer.json',
+        'config.inc.php.dist', 'docs', 'galbridge.php', 'lib', 'localization',
+    ];
+
     private const JAN = 'jan.kowalski@example.com';
 
     /** columns granted by SQL/grants.*.sql (the optional personal-data grant stays commented out) */
     private const TEMPLATE_COLUMNS = [
         'mailbox' => ['username', 'name', 'domain', 'active', 'enabledeliver', 'expired', 'department', 'first_name', 'last_name'],
         'domain' => ['domain', 'active', 'backupmx', 'expired'],
-        'forwardings' => ['address', 'forwarding', 'domain', 'is_alias', 'is_list', 'is_maillist', 'active'],
+        // the view the templates create over the forwardings table (the table itself is never granted)
+        Schema::FORWARDINGS => ['address', 'forwarding', 'domain', 'is_alias', 'is_list', 'is_maillist', 'active'],
         'alias' => ['address', 'name', 'accesspolicy', 'domain', 'active', 'expired'],
         'maillists' => ['address', 'name', 'accesspolicy', 'domain', 'active', 'expired'],
         'moderators' => ['address', 'moderator'],
@@ -56,6 +74,9 @@ final class CliToolTest extends TestCase
     ];
 
     /** the line diag adds for a non-local MySQL account host */
+    /** what the grant templates hold where the generator puts the verifier of the password */
+    private const PLACEHOLDERS = ['mysql' => 'CHANGE_ME_PASSWORD_VERIFIER', 'pgsql' => 'CHANGE_ME_RANDOM_PASSWORD'];
+
     private const TLS_COMMENT = '-- Roundcube connects from another host: require TLS for this account';
 
     /** @var array<string, null|list<string>> engine => working admin command (null = unavailable) */
@@ -95,7 +116,8 @@ final class CliToolTest extends TestCase
         [$code, $help] = self::tool([]);
         self::assertSame(0, $code);
         self::assertStringContainsString('Usage: plugins/galbridge/bin/galbridge.sh <command>', $help);
-        foreach (['diag [--user=EMAIL]', 'grants --driver=mysql|pgsql', '[--host=H]', 'database server written into the DSN', '[--account-host=A]', 'patterns like 10.0.0.% allowed', '--connection-limit=25'] as $text) {
+        foreach (['diag [--user=EMAIL]', '[--url=URL]', 'grants --driver=mysql|pgsql', '[--host=H]', 'database server written into the DSN', '[--account-host=A]', 'patterns like 10.0.0.% allowed', '--connection-limit=25',
+            '[--reset-password]', '[--grants-only]', 'stop when a role of that name exists', 'Do not run this tool as root'] as $text) {
             self::assertStringContainsString($text, $help);
         }
         self::assertSame([0, $help], self::tool(['help']));
@@ -139,7 +161,112 @@ final class CliToolTest extends TestCase
             'account host with brackets' => [['driver' => 'mysql', 'account-host' => '[::1]']],
             'connection limit 0' => [['driver' => 'pgsql', 'connection-limit' => '0']],
             'connection limit above 10000' => [['driver' => 'pgsql', 'connection-limit' => '10001']],
+            'mysql: connection limit 0' => [['driver' => 'mysql', 'connection-limit' => '0']],
+            'both modes for an existing role' => [['driver' => 'pgsql', 'reset-password' => true, 'grants-only' => true]],
+            'reset-password with a value' => [['driver' => 'mysql', 'reset-password' => 'yes']],
+            'clear-text-password for PostgreSQL' => [['driver' => 'pgsql', 'clear-text-password' => true]],
+            'clear-text-password with a value' => [['driver' => 'mysql', 'clear-text-password' => 'yes']],
+            'clear-text-password without a password to write' => [['driver' => 'mysql', 'grants-only' => true, 'clear-text-password' => true]],
+            'grants-only with a value' => [['driver' => 'pgsql', 'grants-only' => '1']],
+            // written "--role acme" instead of "--role=acme": the option arrives without a value and
+            // the name as a stray word - the default role must not be used instead
+            'role without a value' => [['driver' => 'pgsql', 'reset-password' => true, 'role' => true, 1 => 'acme_gal']],
+            'account host without a value' => [['driver' => 'mysql', 'account-host' => true, 1 => '10.0.0.5']],
+            'host without a value' => [['driver' => 'mysql', 'host' => true]],
+            'database without a value' => [['driver' => 'mysql', 'db' => true]],
+            'driver without a value' => [['driver' => true]],
+            'connection limit without a value' => [['driver' => 'mysql', 'connection-limit' => true]],
+            'a misspelled option' => [['driver' => 'mysql', 'grants-only' => true, 'conection-limit' => '200']],
+            'an option of another command' => [['driver' => 'mysql', 'user' => 'jan.kowalski@example.com']],
+            'a stray word' => [['driver' => 'mysql', 1 => 'vmail']],
         ];
+    }
+
+    /**
+     * The same through the script, as an administrator types it - and for diag, whose --user or
+     * --url would otherwise be dropped without a word.
+     */
+    public function testOptionsWithoutEqualsSignOrWithAnUnknownNameAreRefused(): void
+    {
+        $env = ['ROUNDCUBE_INSTALL_PATH' => '/nonexistent-roundcube'];
+        foreach ([
+            [['grants', '--driver=pgsql', '--reset-password', '--role', 'acme_gal'], '--role needs a value: --role=...'],
+            [['grants', '--driver=mysql', '--grants-only', '--conection-limit=200'], 'unknown option --conection-limit'],
+            [['grants', '--driver=mysql', '--account-host', '10.0.0.5'], '--account-host needs a value: --account-host=...'],
+            [['grants', '--driver=mysql', 'vmail'], "unexpected argument 'vmail': options are written --name=value"],
+        ] as [$args, $problem]) {
+            [$code, $out] = self::cli($args, $env);
+            self::assertSame(1, $code, $out);
+            self::assertSame("Usage: galbridge.sh grants --driver=mysql|pgsql [--host=H] [--account-host=A] [--db=vmail] [--role=galbridge] [--connection-limit=25] [--reset-password | --grants-only] [--clear-text-password (mysql only)]\n{$problem}\n", $out);
+        }
+        if (GALBRIDGE_RC_LOADED) {
+            $dir = $this->writeConfig(['galbridge_db_dsn' => $this->anyServerDsn()]);
+            foreach ([[['--user', self::JAN], '--user needs a value: --user=...'], [['--usr=' . self::JAN], 'unknown option --usr'], [['--url'], '--url needs a value: --url=...'], [['now'], "unexpected argument 'now'"]] as [$args, $problem]) {
+                [$code, $out] = $this->runDiag($dir, $args);
+                self::assertSame(1, $code, $out);
+                self::assertStringStartsWith("Usage: galbridge.sh diag [--user=EMAIL] [--url=URL]\n{$problem}", $out);
+                self::assertStringNotContainsString('== Versions', $out, 'nothing is checked with half of the request');
+            }
+        }
+    }
+
+    /**
+     * The account host is inserted with the role, and the database is renamed in the same pass: a
+     * host name that contains the text "vmail." - devmail.example.com - is not renamed with it.
+     */
+    public function testAnAccountHostThatContainsTheDatabaseNameIsNotRenamed(): void
+    {
+        foreach (['devmail.example.com', 'vmail.example.com', 'srvmail.lan'] as $accountHost) {
+            [$code, $out] = self::tool(['grants', 'driver' => 'mysql', 'db' => 'maildb', 'account-host' => $accountHost]);
+            self::assertSame(0, $code, $out);
+            $account = "'galbridge'@'{$accountHost}'";
+            self::assertStringContainsString("CREATE USER {$account} IDENTIFIED WITH mysql_native_password AS ", $out);
+            self::assertStringContainsString("ALTER USER {$account} REQUIRE SSL;", $out);
+            // every statement names that account and that database, nothing else
+            preg_match_all("/'galbridge'@'[^']*'/", $out, $accounts);
+            self::assertSame([$account], array_values(array_unique($accounts[0])), $accountHost);
+            self::assertStringContainsString(' ON maildb.mailbox TO ' . $account, $out);
+            self::assertDoesNotMatchRegularExpression('/\bON vmail\./', implode("\n", self::statements($out)));
+        }
+    }
+
+    /**
+     * The comments of an output describe ITS statements: the sentence of the template - "creates the
+     * account and stops when it already exists" - and the paragraph "no statement of this file
+     * contains the password" do not stand above statements that do something else.
+     */
+    public function testTheCommentsOfEveryModeDescribeItsStatements(): void
+    {
+        $stops = ['mysql' => 'Creates the account and STOPS when it already exists (ERROR 1396): nothing below is then', 'pgsql' => 'Creates the role and STOPS when it already exists: the whole transaction is rolled back'];
+        $note = 'No statement of this file contains the password of the account';
+        foreach (['mysql' => 'account', 'pgsql' => 'role'] as $driver => $what) {
+            [, $create] = self::tool(['grants', 'driver' => $driver]);
+            self::assertStringContainsString('-- [role] ' . $stops[$driver], $create);
+            [, $reset] = self::tool(['grants', 'driver' => $driver, 'reset-password' => true]);
+            self::assertStringContainsString("-- [role] (--reset-password) Creates the {$what} when it does not exist and gives it a NEW password in either case.", $reset);
+            [, $only] = self::tool(['grants', 'driver' => $driver, 'grants-only' => true]);
+            self::assertStringContainsString("-- [role] (--grants-only) The {$what} is neither created nor given a password: it has to exist.", $only);
+            foreach ([$reset, $only] as $out) {
+                self::assertStringNotContainsString($stops[$driver], $out);
+                self::assertSame(1, preg_match_all('/^-- \[role\]/m', $out), 'one marker line');
+                self::assertSame(1, preg_match_all('/^-- \[\/role\]/m', $out));
+            }
+        }
+        [, $create] = self::tool(['grants', 'driver' => 'mysql']);
+        self::assertStringContainsString($note, $create);
+        foreach ([['clear-text-password' => true], ['clear-text-password' => true, 'reset-password' => true]] as $mode) {
+            [$code, $clear] = self::tool(['grants', 'driver' => 'mysql'] + $mode);
+            self::assertSame(0, $code, $clear);
+            self::assertStringNotContainsString($note, $clear, 'this output does contain the password');
+            self::assertStringNotContainsString('CREATE USER takes its verifier', $clear);
+            self::assertStringNotContainsString('qualify - to its slow query log exactly as they were sent', $clear, 'the whole paragraph is left out');
+            self::assertStringContainsString("IDENTIFIED BY '" . self::passwordOf($clear) . "'", $clear);
+            self::assertStringContainsString('the next statements contain the password itself', $clear);
+            // the paragraph only: what follows it is still there
+            self::assertStringContainsString('-- Account limits, active by default', $clear);
+        }
+        [, $clear] = self::tool(['grants', 'driver' => 'mysql', 'clear-text-password' => true]);
+        self::assertStringContainsString('-- [role] (--clear-text-password) Creates the account and STOPS when it already exists (ERROR 1396).', $clear);
     }
 
     /**
@@ -156,6 +283,40 @@ final class CliToolTest extends TestCase
     }
 
     /**
+     * The statements set the password, the limits and (PostgreSQL) the session defaults of the NAMED
+     * role. For the role of another component that would cut that component off from the database,
+     * so such a name is refused outright - in every mode - and nothing is printed that could be run.
+     *
+     * @return array<string, array{string, string}>
+     */
+    public static function rolesOfOtherComponents(): array
+    {
+        $out = [];
+        foreach ([...Config::DEFAULTS['galbridge_db_refused_users'], 'public', 'mysql', 'pg_monitor', 'pg_read_all_data'] as $role) {
+            foreach (['mysql', 'pgsql'] as $driver) {
+                $out["{$driver}: {$role}"] = [$driver, $role];
+            }
+        }
+        return $out;
+    }
+
+    #[DataProvider('rolesOfOtherComponents')]
+    public function testRolesOfOtherComponentsAreNeverTouched(string $driver, string $role): void
+    {
+        foreach ([[], ['reset-password' => true], ['grants-only' => true]] as $mode) {
+            [$code, $out] = self::tool(['grants', 'driver' => $driver, 'role' => $role] + $mode);
+            self::assertSame(1, $code, $out);
+            self::assertSame("grants: '{$role}' is a role of another component or of the database server (galbridge_db_refused_users): choose a dedicated role name, e.g. --role=galbridge\n", $out);
+            foreach (['GRANT', 'ALTER', 'CREATE', 'PASSWORD', 'IDENTIFIED', 'galbridge_db_dsn', '://'] as $never) {
+                self::assertStringNotContainsString($never, $out, 'nothing that could be run or pasted');
+            }
+        }
+        // names that merely resemble them are ordinary role names
+        [$code] = self::tool(['grants', 'driver' => $driver, 'role' => $role . '_gal']);
+        self::assertSame(str_starts_with($role, 'pg_') ? 1 : 0, $code, 'only the reserved pg_ prefix is refused as a prefix');
+    }
+
+    /**
      * A connection limit that is not a number is a typo, not a request for the default: an
      * administrator who typed --connection-limit=1OO must not silently get CONNECTION LIMIT 25.
      *
@@ -169,9 +330,35 @@ final class CliToolTest extends TestCase
     #[DataProvider('malformedConnectionLimits')]
     public function testMalformedConnectionLimitIsRefused(string $limit): void
     {
-        [$code, $out] = self::tool(['grants', 'driver' => 'pgsql', 'connection-limit' => $limit]);
-        self::assertSame(1, $code, 'accepted --connection-limit=' . $limit . ' and printed: ' . (preg_match('/CONNECTION LIMIT \d+/', $out, $m) ? $m[0] : $out));
-        self::assertStringNotContainsString('CONNECTION LIMIT', $out);
+        foreach (['pgsql', 'mysql'] as $driver) {
+            [$code, $out] = self::tool(['grants', 'driver' => $driver, 'connection-limit' => $limit]);
+            self::assertSame(1, $code, 'accepted --connection-limit=' . $limit . ' and printed: ' . (preg_match('/(CONNECTION LIMIT|MAX_USER_CONNECTIONS) \d+/', $out, $m) ? $m[0] : $out));
+            self::assertStringNotContainsString('CONNECTION LIMIT', $out);
+            self::assertStringNotContainsString('MAX_USER_CONNECTIONS', $out);
+        }
+    }
+
+    /**
+     * The connection limit of the account is ACTIVE for both engines (it used to be a commented-out
+     * line for MariaDB/MySQL, and --connection-limit had no effect there).
+     */
+    public function testConnectionLimitIsAppliedForBothEngines(): void
+    {
+        [$code, $out] = self::tool(['grants', 'driver' => 'mysql']);
+        self::assertSame(0, $code, $out);
+        self::assertContains("ALTER USER 'galbridge'@'localhost' WITH MAX_USER_CONNECTIONS 25 /*M!100101 MAX_STATEMENT_TIME 5 */;", self::statements($out));
+        [, $out] = self::tool(['grants', 'driver' => 'mysql', 'connection-limit' => '120', 'account-host' => '10.0.0.%']);
+        self::assertContains("ALTER USER 'galbridge'@'10.0.0.%' WITH MAX_USER_CONNECTIONS 120 /*M!100101 MAX_STATEMENT_TIME 5 */;", self::statements($out));
+        self::assertStringNotContainsString('MAX_USER_CONNECTIONS 25', implode("\n", self::statements($out)));
+
+        [, $out] = self::tool(['grants', 'driver' => 'pgsql']);
+        self::assertContains('ALTER ROLE galbridge WITH CONNECTION LIMIT 25;', self::statements($out));
+        [, $out] = self::tool(['grants', 'driver' => 'pgsql', 'connection-limit' => '120']);
+        self::assertContains('ALTER ROLE galbridge WITH CONNECTION LIMIT 120;', self::statements($out));
+        // no commented-out limit is left that somebody would have to remember to uncomment
+        foreach (['mysql', 'pgsql'] as $driver) {
+            self::assertDoesNotMatchRegularExpression('/^\s*--.*(MAX_USER_CONNECTIONS|CONNECTION LIMIT) \d/m', implode("\n", self::templateLines($driver)));
+        }
     }
 
     /**
@@ -230,13 +417,17 @@ final class CliToolTest extends TestCase
         self::assertSame(0, $code, $out);
         $lines = explode("\n", $out);
         self::assertMatchesRegularExpression('/^-- Generated by bin\/galbridge\.sh grants on \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC\. Keep this output private\.$/', $lines[0]);
-        self::assertSame('-- Re-running it is safe: the account keeps its grants and gets the new password below.', $lines[1]);
+        // what the statements do to an EXISTING role of that name is said up front: nothing
+        self::assertSame("-- It creates the role 'galbridge'. When a role of that name already exists it stops and changes nothing (see --reset-password, --grants-only).", $lines[1]);
 
         $password = self::passwordOf($out);
         self::assertMatchesRegularExpression('/^[0-9a-f]{40}$/', $password);
+        // what the statements carry: a VERIFIER of the password, never the password - the
+        // mysql_native_password hash for MySQL/MariaDB, a SCRAM-SHA-256 verifier for PostgreSQL
+        $secret = self::secretOf($out, $driver);
         $expected = [];
         foreach (self::templateLines($driver) as $line) {
-            $expected[] = str_starts_with(ltrim($line), '--') ? $line : str_replace('CHANGE_ME_RANDOM_PASSWORD', $password, $line);
+            $expected[] = str_starts_with(ltrim($line), '--') ? $line : str_replace(self::PLACEHOLDERS[$driver], $secret, $line);
         }
         self::assertSame(rtrim(implode("\n", $expected)), self::body($out));
 
@@ -245,14 +436,35 @@ final class CliToolTest extends TestCase
         self::assertStringNotContainsString('Remote database', $out, 'a local server needs no TLS hint');
         self::assertStringNotContainsString('REQUIRE SSL;', $out);
         foreach (self::statements($out) as $statement) {
-            self::assertStringNotContainsString('CHANGE_ME_RANDOM_PASSWORD', $statement);
+            self::assertStringNotContainsString('CHANGE_ME_', $statement);
         }
-        // the password is set on every run (CREATE ... IF NOT EXISTS keeps an old one): CREATE USER +
-        // ALTER USER + DSN for MySQL, ALTER ROLE + DSN for PostgreSQL
-        self::assertSame($driver === 'mysql' ? 3 : 2, substr_count($out, $password));
-        self::assertMatchesRegularExpression($driver === 'mysql'
-            ? "/^ALTER USER 'galbridge'@'localhost' IDENTIFIED BY '{$password}';$/m"
-            : "/^ALTER ROLE galbridge WITH LOGIN PASSWORD '{$password}' CONNECTION LIMIT 25;$/m", $out);
+        // the password: in the DSN line and NOWHERE else - a database server that keeps account
+        // statements in a log (MariaDB: general, slow and binary log) never receives it.
+        // No statement ever CHANGES the password of a role that exists (see --reset-password)
+        self::assertSame(1, substr_count($out, $password));
+        if ($driver === 'mysql') {
+            self::assertContains("CREATE USER 'galbridge'@'localhost' IDENTIFIED WITH mysql_native_password AS '{$secret}';", self::statements($out));
+            self::assertStringNotContainsString('IDENTIFIED BY', implode("\n", self::statements($out)));
+            self::assertStringNotContainsString('sql_log_off', implode("\n", self::statements($out)), 'nothing secret is left to keep out of a log');
+        } else {
+            self::assertContains("CREATE ROLE galbridge WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT PASSWORD '{$secret}';", self::statements($out));
+            // ONE transaction - after an error nothing is applied. Before it only the session setting
+            // that has to be in effect when a transaction starts (whether it is in the logged sample)
+            $statements = self::statements($out);
+            $begin = array_search('BEGIN;', $statements, true);
+            self::assertSame(['DO $$', 'BEGIN', "IF current_setting('server_version_num')::int >= 120000 THEN", "PERFORM set_config('log_transaction_sample_rate', '0', false);", 'END IF;', 'END', '$$;'],
+                array_slice($statements, 0, (int) $begin));
+            self::assertSame('COMMIT;', $statements[count($statements) - 1]);
+            self::assertSame(1, count(array_keys($statements, 'BEGIN;', true)) + count(array_keys($statements, 'COMMIT;', true)) - 1, 'one BEGIN, one COMMIT');
+            // every statement that names the role or carries the verifier lies inside it
+            foreach (array_slice($statements, 0, (int) $begin) as $outside) {
+                self::assertStringNotContainsString('galbridge', $outside);
+                self::assertStringNotContainsString($secret, $outside);
+            }
+        }
+        self::assertStringNotContainsString('ALTER USER \'galbridge\'@\'localhost\' IDENTIFIED', $out);
+        self::assertDoesNotMatchRegularExpression('/ALTER ROLE galbridge WITH[^;]*PASSWORD/', $out);
+        self::assertStringNotContainsString('IF NOT EXISTS', implode("\n", self::statements($out)), 'an existing account is an error, not something to reuse');
 
         // personal data is never granted by default: the statement stays a comment
         self::assertDoesNotMatchRegularExpression('/^GRANT SELECT \([^)]*(telephone|mobile|birthday)/m', $out);
@@ -271,15 +483,14 @@ final class CliToolTest extends TestCase
     #[DataProvider('drivers')]
     public function testCustomNamesAreAppliedToStatementsOnly(string $driver): void
     {
-        $args = ['grants', 'driver' => $driver, 'role' => 'acme_gal', 'db' => 'maildb', 'host' => 'db.example.com'];
+        $args = ['grants', 'driver' => $driver, 'role' => 'acme_gal', 'db' => 'maildb', 'host' => 'db.example.com', 'connection-limit' => '40'];
         if ($driver === 'mysql') {
             $args['account-host'] = '10.0.0.%';
-        } else {
-            $args['connection-limit'] = '40';
         }
         [$code, $out] = self::tool($args);
         self::assertSame(0, $code, $out);
         $password = self::passwordOf($out);
+        $secret = self::secretOf($out, $driver);
         $body = explode("\n", self::body($out));
 
         // the attribution header, verbatim, at the top of the template part
@@ -296,7 +507,7 @@ final class CliToolTest extends TestCase
         $statements = self::statements($out);
         self::assertCount(count(self::statements(implode("\n", self::templateLines($driver)))) + ($driver === 'mysql' ? 1 : 0), $statements);
         foreach ($statements as $statement) {
-            self::assertStringNotContainsString('CHANGE_ME_RANDOM_PASSWORD', $statement);
+            self::assertStringNotContainsString('CHANGE_ME_', $statement);
             if ($driver === 'mysql') {
                 self::assertStringNotContainsString("'galbridge'@", $statement);
                 self::assertStringNotContainsString('vmail.', $statement);
@@ -312,16 +523,27 @@ final class CliToolTest extends TestCase
             }
         }
         if ($driver === 'mysql') {
-            self::assertContains("CREATE USER IF NOT EXISTS 'acme_gal'@'10.0.0.%' IDENTIFIED BY '{$password}';", $statements);
-            self::assertContains("ALTER USER 'acme_gal'@'10.0.0.%' IDENTIFIED BY '{$password}';", $statements);
+            self::assertContains("CREATE USER 'acme_gal'@'10.0.0.%' IDENTIFIED WITH mysql_native_password AS '" . Tool::mysqlVerifier($password) . "';", $statements);
+            self::assertContains("ALTER USER 'acme_gal'@'10.0.0.%' WITH MAX_USER_CONNECTIONS 40 /*M!100101 MAX_STATEMENT_TIME 5 */;", $statements);
+            self::assertContains('CREATE OR REPLACE SQL SECURITY DEFINER VIEW maildb.galbridge_forwardings AS', $statements);
+            self::assertContains('FROM maildb.forwardings', $statements);
+            self::assertContains("GRANT SELECT (address, forwarding, domain, is_alias, is_list, is_maillist, active) ON maildb.galbridge_forwardings TO 'acme_gal'@'10.0.0.%';", $statements);
             self::assertSame("ALTER USER 'acme_gal'@'10.0.0.%' REQUIRE SSL;", end($statements));
             self::assertSame("mysql://acme_gal:{$password}@db.example.com/maildb", self::dsnOf($out), 'the DSN names the database server, not the account host');
         } else {
-            self::assertContains("IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'acme_gal') THEN", $statements);
-            self::assertContains('CREATE ROLE acme_gal WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT;', $statements);
-            self::assertContains("ALTER ROLE acme_gal WITH LOGIN PASSWORD '{$password}' CONNECTION LIMIT 40;", $statements);
+            self::assertContains("IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'acme_gal') THEN", $statements);
+            self::assertContains("CREATE ROLE acme_gal WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT PASSWORD '{$secret}';", $statements);
+            self::assertContains('ALTER ROLE acme_gal WITH CONNECTION LIMIT 40;', $statements);
             self::assertContains('GRANT CONNECT ON DATABASE maildb TO acme_gal;', $statements);
+            // the view keeps its name whatever the role is called; the role gets the view, not the table
+            self::assertContains('CREATE OR REPLACE VIEW galbridge_forwardings WITH (security_barrier = true) AS', $statements);
+            self::assertContains('GRANT SELECT (address, forwarding, domain, is_alias, is_list, is_maillist, active) ON galbridge_forwardings TO acme_gal;', $statements);
+            self::assertContains('REVOKE ALL ON forwardings FROM acme_gal;', $statements);
             self::assertSame("pgsql://acme_gal:{$password}@db.example.com/maildb", self::dsnOf($out));
+        }
+        // the forwardings table itself is granted to nobody
+        foreach ($statements as $statement) {
+            self::assertDoesNotMatchRegularExpression('/^GRANT .* ON (?:maildb\.)?forwardings /', $statement);
         }
         self::assertStringContainsString("-- Remote database: add TLS verification to the DSN (pgsql: ?sslmode=verify-full&sslrootcert=...; mysql: ?ca=...&verify_server_cert=1).\n", $out);
     }
@@ -338,7 +560,7 @@ final class CliToolTest extends TestCase
         self::assertSame(0, $code, $out);
         $commented = [];
         foreach (explode("\n", self::body($out)) as $line) {
-            if (preg_match('/^-- ((?:GRANT|ALTER USER|ALTER ROLE) .*;)$/', $line, $m)) {
+            if (preg_match('/^-- ((?:GRANT|REVOKE|ALTER USER|ALTER ROLE) .*;)$/', $line, $m)) {
                 $commented[] = $m[1];
             }
         }
@@ -417,13 +639,31 @@ final class CliToolTest extends TestCase
         [$code, $out, $err] = self::cli(['grants', '--driver=postgresql', '--role=acme_gal', '--db=maildb', '--connection-limit=40'], $env);
         self::assertSame(0, $code, $err);
         self::assertSame('', $err, 'stdout only');
-        self::assertStringContainsString("ALTER ROLE acme_gal WITH LOGIN PASSWORD '" . self::passwordOf($out) . "' CONNECTION LIMIT 40;", $out);
+        self::assertStringContainsString('ALTER ROLE acme_gal WITH CONNECTION LIMIT 40;', $out);
+        self::assertStringContainsString("PASSWORD '" . self::secretOf($out, 'pgsql') . "';", $out);
         self::assertSame('pgsql://acme_gal:' . self::passwordOf($out) . '@127.0.0.1/maildb', self::dsnOf($out));
 
         [$code, $out] = self::cli(['grants', '--driver=mariadb', '--account-host=10.0.0.%'], $env);
         self::assertSame(0, $code);
-        self::assertStringContainsString("CREATE USER IF NOT EXISTS 'galbridge'@'10.0.0.%' IDENTIFIED BY '", $out);
+        self::assertStringContainsString("CREATE USER 'galbridge'@'10.0.0.%' IDENTIFIED WITH mysql_native_password AS '" . self::secretOf($out, 'mysql') . "';", $out);
         self::assertStringContainsString("ALTER USER 'galbridge'@'10.0.0.%' REQUIRE SSL;", $out);
+
+        // the modes for an existing role are plain flags
+        [$code, $out] = self::cli(['grants', '--driver=mysql', '--reset-password'], $env);
+        self::assertSame(0, $code);
+        $verifier = Tool::mysqlVerifier(self::passwordOf($out));
+        self::assertStringContainsString("CREATE USER IF NOT EXISTS 'galbridge'@'localhost' IDENTIFIED WITH mysql_native_password AS '{$verifier}';\nALTER USER 'galbridge'@'localhost' IDENTIFIED WITH mysql_native_password AS '{$verifier}';", $out);
+        self::assertSame(1, substr_count($out, self::passwordOf($out)), 'the password is in the DSN line only');
+        [$code, $out] = self::cli(['grants', '--driver=mysql', '--clear-text-password'], $env);
+        self::assertSame(0, $code);
+        self::assertStringContainsString("IDENTIFIED BY '" . self::passwordOf($out) . "';", $out);
+        [$code, $out] = self::cli(['grants', '--driver=pgsql', '--grants-only'], $env);
+        self::assertSame(0, $code);
+        self::assertStringNotContainsString('-- Put this line into', $out);
+        self::assertDoesNotMatchRegularExpression("/^-- \\\$config\\['galbridge_db_dsn'\\]/m", $out, 'no DSN line (the template has an example of its own in its comments)');
+        [$code, $out] = self::cli(['grants', '--driver=pgsql', '--role=vmail'], $env);
+        self::assertSame(1, $code);
+        self::assertStringStartsWith("grants: 'vmail' is a role of another component", $out);
 
         [$code, $out] = self::cli(['grants', '--driver=pgsql', '--host=%'], $env);
         self::assertSame(1, $code);
@@ -451,9 +691,54 @@ final class CliToolTest extends TestCase
     }
 
     /**
+     * --clear-text-password exists for MySQL 8.4 and later only (mysql_native_password is not loaded
+     * there; MySQL rewrites passwords in its own logs). MariaDB keeps account statements verbatim in
+     * its general, slow and binary logs, so that output must never get as far as the password on
+     * MariaDB: its first statement stops the script there.
+     */
+    public function testClearTextPasswordOutputRefusesToRunOnMariaDb(): void
+    {
+        foreach ([[], ['reset-password' => true]] as $mode) {
+            [$code, $out] = self::tool(['grants', 'driver' => 'mysql', 'clear-text-password' => true] + $mode);
+            self::assertSame(0, $code, $out);
+            $password = self::passwordOf($out);
+            $statements = self::statements($out);
+            $guard = "/*M! SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'this output is for MySQL: for MariaDB run grants without --clear-text-password' */;";
+            $create = $mode === [] ? "CREATE USER 'galbridge'@'localhost' IDENTIFIED BY '{$password}';" : "CREATE USER IF NOT EXISTS 'galbridge'@'localhost' IDENTIFIED BY '{$password}';";
+            self::assertContains($guard, $statements);
+            self::assertContains($create, $statements);
+            self::assertLessThan(array_search($create, $statements, true), array_search($guard, $statements, true), 'the guard comes before the password');
+            self::assertStringContainsString('-- (--clear-text-password) FOR MYSQL 8.4 OR LATER ONLY', $out);
+            self::assertStringNotContainsString('mysql_native_password', implode("\n", $statements));
+            self::assertStringNotContainsString('CHANGE_ME_', implode("\n", $statements));
+        }
+
+        // applied to MariaDB: the guard stops the script, the account is not created and the
+        // statement with the password is never sent
+        $dsn = Env::engines()['mysql'][0] ?? null;
+        if (!is_string($dsn)) {
+            self::markTestSkipped('needs the MariaDB test server');
+        }
+        [$engine, $db, $host] = $this->target($dsn);
+        if (stripos(self::adminQuery($engine, $db, 'SELECT VERSION()'), 'mariadb') === false) {
+            self::markTestSkipped('the guard is for MariaDB');
+        }
+        $role = 'gbt_cli_c' . getmypid();
+        self::dropRole($engine, $db, $role);
+        $this->roles[] = [$engine, $db, $role];
+        [$code, $out] = self::tool(['grants', 'driver' => 'mysql', 'role' => $role, 'db' => $db, 'host' => $host, 'clear-text-password' => true]);
+        self::assertSame(0, $code, $out);
+        [$code, , $err] = self::adminScript($engine, $db, $out);
+        self::assertNotSame(0, $code, 'the clear-text output ran on MariaDB');
+        self::assertStringContainsString('this output is for MySQL', $err);
+        self::assertSame('0', self::adminQuery($engine, $db, "SELECT COUNT(*) FROM mysql.user WHERE User = '{$role}'"), 'nothing was created');
+    }
+
+    /**
      * The generated output, run by the database administrator, creates a role that the plugin can
-     * use with the PRINTED DSN and that can read nothing else; re-running a fresh output changes
-     * the password, so the newly printed DSN works and the old one does not.
+     * use with the PRINTED DSN and that can read nothing else. A second default output stops at the
+     * existing role and changes nothing; --reset-password changes the password (the newly printed
+     * DSN works, the old one does not); --grants-only re-applies everything but the password.
      */
     #[DataProvider('serverEngines')]
     public function testGeneratedGrantsCreateAWorkingLeastPrivilegeRole(string $dsn): void
@@ -462,10 +747,7 @@ final class CliToolTest extends TestCase
         $role = 'gbt_cli_g' . getmypid();
         self::dropRole($engine, $db, $role);
         $this->roles[] = [$engine, $db, $role];
-        $args = ['grants', 'driver' => $engine, 'role' => $role, 'db' => $db, 'host' => $host];
-        if ($engine === 'pgsql') {
-            $args['connection-limit'] = '7';
-        }
+        $args = ['grants', 'driver' => $engine, 'role' => $role, 'db' => $db, 'host' => $host, 'connection-limit' => '7'];
 
         [$code, $first] = self::tool($args);
         self::assertSame(0, $code, $first);
@@ -475,14 +757,17 @@ final class CliToolTest extends TestCase
 
         $conn = new Connection(new Dsn($printed, Env::config($printed)), 3);
         self::assertContains($conn->flavour(), $engine === 'pgsql' ? ['pgsql'] : ['mariadb', 'mysql']);
+        self::assertSame([], $conn->sessionWarnings(), 'statement timeout and read-only mode were accepted');
         $columns = $conn->visibleColumns();
         foreach (self::TEMPLATE_COLUMNS as $table => $cols) {
             self::assertEqualsCanonicalizing($cols, $columns[$table], "{$table}: exactly the granted columns");
         }
         self::assertSame([], $columns['alias_domain'] ?? [], 'alias_domain is neither probed nor granted');
-        self::assertNotSame('', $conn->probeFailure('SELECT password FROM mailbox WHERE 1 = 0'), 'mailbox.password must not be readable');
-        self::assertNotSame('', $conn->probeFailure('SELECT * FROM mailbox WHERE 1 = 0'), 'SELECT * must be denied');
-        self::assertNotSame('', $conn->probeFailure('SELECT telephone FROM mailbox WHERE 1 = 0'), 'personal data is not granted by default');
+        self::assertSame('denied', $conn->probe('SELECT password FROM mailbox WHERE 1 = 0'), 'mailbox.password must not be readable');
+        self::assertSame('denied', $conn->probe('SELECT * FROM mailbox WHERE 1 = 0'), 'SELECT * must be denied');
+        self::assertSame('denied', $conn->probe('SELECT telephone FROM mailbox WHERE 1 = 0'), 'personal data is not granted by default');
+        self::assertSame('denied', $conn->probe('SELECT forwarding FROM forwardings WHERE 1 = 0'), 'the forwardings table (private forwarding targets) must not be readable');
+        self::assertSame([], $columns[Schema::FORWARDINGS_TABLE]);
         self::assertCount(1, $conn->select('SELECT m.username FROM mailbox m WHERE m.username = ?', [self::JAN]));
         $conn->close();
 
@@ -501,18 +786,52 @@ final class CliToolTest extends TestCase
             self::assertStringNotContainsString($reason, $log);
         }
 
+        // limits and settings of the role - for BOTH engines
         if ($engine === 'pgsql') {
             self::assertSame('7', self::adminQuery($engine, $db, "SELECT rolconnlimit FROM pg_roles WHERE rolname = '{$role}'"));
             $settings = self::adminQuery($engine, $db, "SELECT array_to_string(rolconfig, ',') FROM pg_roles WHERE rolname = '{$role}'");
-            foreach (['default_transaction_read_only=on', 'statement_timeout=5s', 'idle_in_transaction_session_timeout=10s'] as $setting) {
+            foreach (['default_transaction_read_only=on', 'statement_timeout=5s', 'idle_in_transaction_session_timeout=10s',
+                'log_statement=none', 'log_min_duration_statement=-1', 'log_min_error_statement=panic',
+                // sampled logging (PostgreSQL 13 / 12 and later) is switched off for the role as well
+                'log_min_duration_sample=-1', 'log_transaction_sample_rate=0'] as $setting) {
                 self::assertStringContainsString($setting, $settings);
             }
+            // the server stores (and the statement carried) a SCRAM verifier - never the password
+            self::assertSame(self::secretOf($first, 'pgsql'), self::adminQuery($engine, $db, "SELECT rolpassword FROM pg_authid WHERE rolname = '{$role}'"));
+            self::assertSame('v', self::adminQuery($engine, $db, "SELECT relkind FROM pg_class WHERE relname = 'galbridge_forwardings'"));
+            self::assertSame('f', self::adminQuery($engine, $db, "SELECT has_table_privilege('{$role}', 'forwardings', 'SELECT') OR has_any_column_privilege('{$role}', 'forwardings', 'SELECT')"));
+        } else {
+            self::assertSame('7', self::adminQuery($engine, $db, "SELECT max_user_connections FROM mysql.user WHERE User = '{$role}' AND Host = 'localhost'"));
+            // the server stores (and the statement carried) the verifier - never the password
+            self::assertSame(self::secretOf($first, 'mysql'), self::adminQuery($engine, $db, "SELECT authentication_string FROM mysql.user WHERE User = '{$role}' AND Host = 'localhost'"));
+            if (stripos(self::adminQuery($engine, $db, 'SELECT VERSION()'), 'mariadb') !== false) {
+                self::assertSame('5.000000', self::adminQuery($engine, $db, "SELECT max_statement_time FROM mysql.user WHERE User = '{$role}' AND Host = 'localhost'"));
+            }
+            self::assertSame('0', self::adminQuery($engine, $db, "SELECT COUNT(*) FROM mysql.tables_priv WHERE User = '{$role}' AND Db = '{$db}' AND Table_name = 'forwardings'"), 'no grant on the forwardings table');
+            self::assertSame('DEFINER', self::adminQuery($engine, $db, "SELECT SECURITY_TYPE FROM information_schema.VIEWS WHERE TABLE_SCHEMA = '{$db}' AND TABLE_NAME = 'galbridge_forwardings'"));
         }
+        // the comments of the run are the shipped ones
+        self::assertSame(self::comments(self::templateLines($engine)), self::comments(explode("\n", self::body($first))));
 
-        // re-run: a fresh password that really is applied (CREATE ... IF NOT EXISTS alone would keep the old one)
+        // ---- a second DEFAULT output: the role exists, so it stops and changes NOTHING
         unset($args['connection-limit']);
-        [$code, $second] = self::tool($args);
+        [$code, $again] = self::tool($args);
+        self::assertSame(0, $code, $again);
+        [$code, , $err] = self::adminScript($engine, $db, $again);
+        self::assertNotSame(0, $code, 'the default output was applied to an existing role');
+        self::assertMatchesRegularExpression($engine === 'pgsql' ? '/already exists: nothing was changed/' : '/1396/', $err);
+        $_SESSION = [];
+        $conn = new Connection(new Dsn($printed, Env::config($printed)), 3);
+        self::assertNotSame('', $conn->flavour(), 'the password of the existing role is untouched');
+        $conn->close();
+        self::assertSame('7', self::adminQuery($engine, $db, $engine === 'pgsql'
+            ? "SELECT rolconnlimit FROM pg_roles WHERE rolname = '{$role}'"
+            : "SELECT max_user_connections FROM mysql.user WHERE User = '{$role}' AND Host = 'localhost'"), 'and so are its limits');
+
+        // ---- --reset-password: a fresh password that really is applied to the existing role
+        [$code, $second] = self::tool($args + ['reset-password' => true]);
         self::assertSame(0, $code, $second);
+        self::assertStringContainsString('NEW PASSWORD, also when the role already exists', explode("\n", $second)[1]);
         self::assertNotSame(self::passwordOf($first), self::passwordOf($second));
         $this->apply($engine, $db, $role, $second);
         $_SESSION = [];
@@ -523,19 +842,96 @@ final class CliToolTest extends TestCase
         $old = new Connection(new Dsn($printed, Env::config($printed)), 3);
         try {
             $old->flavour();
-            self::fail('the old password still works after re-running the generated output');
+            self::fail('the old password still works after --reset-password');
         } catch (GalBridgeException $e) {
             self::assertSame('db_down', $e->getReason());
         }
         self::assertStringNotContainsString(self::passwordOf($first), $old->lastError());
         $_SESSION = [];
-        if ($engine === 'pgsql') {
-            self::assertSame('25', self::adminQuery($engine, $db, "SELECT rolconnlimit FROM pg_roles WHERE rolname = '{$role}'"), 'the default limit is applied again');
-        }
+        self::assertSame('25', self::adminQuery($engine, $db, $engine === 'pgsql'
+            ? "SELECT rolconnlimit FROM pg_roles WHERE rolname = '{$role}'"
+            : "SELECT max_user_connections FROM mysql.user WHERE User = '{$role}' AND Host = 'localhost'"), 'the default limit is applied again');
 
-        // the comments of both runs are the shipped ones
-        self::assertSame(self::comments(self::templateLines($engine)), self::comments(explode("\n", self::body($first))));
-        self::assertSame(self::comments(explode("\n", self::body($first))), self::comments(explode("\n", self::body($second))));
+        // ---- --grants-only: everything but the password; no password or DSN in the output
+        [$code, $third] = self::tool($args + ['grants-only' => true, 'connection-limit' => '9']);
+        self::assertSame(0, $code, $third);
+        self::assertStringContainsString('its password is not changed', explode("\n", $third)[1]);
+        foreach (['galbridge_db_dsn', 'IDENTIFIED BY', "PASSWORD '", 'SCRAM-SHA-256', 'CREATE USER', 'CREATE ROLE', '://' . $role] as $never) {
+            self::assertStringNotContainsString($never, implode("\n", self::statementsOfAnyOutput($third)), '--grants-only: ' . $never);
+        }
+        self::assertStringNotContainsString('-- Put this line into', $third);
+        self::assertDoesNotMatchRegularExpression("/^-- \\\$config\\['galbridge_db_dsn'\\]/m", $third);
+        [$code, , $err] = self::adminScript($engine, $db, $third);
+        self::assertSame(0, $code, 'applying --grants-only failed: ' . $err);
+        $_SESSION = [];
+        $conn = new Connection(new Dsn(self::dsnOf($second), Env::config(self::dsnOf($second))), 3);
+        self::assertNotSame('', $conn->flavour(), 'the password is unchanged');
+        self::assertSame('denied', $conn->probe('SELECT forwarding FROM forwardings WHERE 1 = 0'));
+        $conn->close();
+        self::assertSame('9', self::adminQuery($engine, $db, $engine === 'pgsql'
+            ? "SELECT rolconnlimit FROM pg_roles WHERE rolname = '{$role}'"
+            : "SELECT max_user_connections FROM mysql.user WHERE User = '{$role}' AND Host = 'localhost'"));
+
+        // --grants-only for a role that does not exist creates nothing
+        $ghost = 'gbt_cli_x' . getmypid();
+        self::dropRole($engine, $db, $ghost);
+        $this->roles[] = [$engine, $db, $ghost];
+        [, $none] = self::tool(['grants', 'driver' => $engine, 'role' => $ghost, 'db' => $db, 'grants-only' => true]);
+        [$code] = self::adminScript($engine, $db, $none);
+        self::assertNotSame(0, $code);
+        self::assertSame($engine === 'pgsql' ? '0' : '0', self::adminQuery($engine, $db, $engine === 'pgsql'
+            ? "SELECT COUNT(*) FROM pg_roles WHERE rolname = '{$ghost}'"
+            : "SELECT COUNT(*) FROM mysql.user WHERE User = '{$ghost}'"));
+    }
+
+    /**
+     * The grants of GAL Bridge 1.0.0 gave the role the forwardings table. Applying the current
+     * output with --grants-only to such a role takes that away on PostgreSQL; on MariaDB/MySQL the
+     * output names the REVOKE statement to run once.
+     */
+    #[DataProvider('serverEngines')]
+    public function testGrantsOnlyMovesARoleOfTheOldGrantsToTheView(string $dsn): void
+    {
+        [$engine, $db, $host] = $this->target($dsn);
+        $legacy = self::TEMPLATE_COLUMNS;
+        $legacy[Schema::FORWARDINGS_TABLE] = $legacy[Schema::FORWARDINGS];
+        unset($legacy[Schema::FORWARDINGS]);
+        $roleDsn = $this->createRole($dsn, 'old', $legacy);
+        $role = (string) (\rcube_db::parse_dsn($roleDsn)['username'] ?? '');
+
+        // as it is, the plugin refuses the role and diag says what to do
+        $factory = Env::factory(Env::config($roleDsn), self::JAN);
+        self::assertSame([], $factory->books());
+        self::assertSame('role_too_broad', $factory->resolver()->status());
+        [$code, $out] = $this->diag(['galbridge_db_dsn' => $roleDsn]);
+        self::assertSame(2, $code, $out);
+        self::assertLine($out, 'FAIL', 'table forwardings', 'READABLE: the role can read every row, including the private forwarding targets');
+        self::assertLine($out, 'FAIL', 'columns ' . Schema::FORWARDINGS, 'missing or not granted');
+
+        [$code, $grants] = self::tool(['grants', 'driver' => $engine, 'role' => $role, 'db' => $db, 'host' => $host, 'grants-only' => true]);
+        self::assertSame(0, $code, $grants);
+        $this->apply($engine, $db, $role, $grants);
+        if ($engine === 'mysql') {
+            // MariaDB/MySQL cannot revoke "if granted": the statement is in the output, commented out
+            self::assertMatchesRegularExpression("/^-- (REVOKE SELECT \\([a-z_, ]+\\) ON {$db}\\.forwardings FROM '{$role}'@'localhost';)$/m", $grants, 'the REVOKE names this role and database');
+            preg_match("/^-- (REVOKE SELECT \\([a-z_, ]+\\) ON {$db}\\.forwardings FROM '{$role}'@'localhost';)$/m", $grants, $m);
+            foreach ([$m[1], str_replace("'@'localhost'", "'@'%'", $m[1])] as $revoke) {
+                [$code, , $err] = self::adminScript($engine, $db, $revoke);
+                self::assertSame(0, $code, $err);
+            }
+        }
+        $_SESSION = [];
+        $GLOBALS['galbridge_test_log'] = [];
+        Log::resetOnce();
+        $factory = Env::factory(Env::config($roleDsn), self::JAN);
+        self::assertSame([BookDefinition::DOMAIN], array_keys($factory->books()), implode("\n", $GLOBALS['galbridge_test_log']));
+        $book = $factory->create(BookDefinition::DOMAIN);
+        self::assertInstanceOf(AddressBook::class, $book);
+        $book->set_pagesize(200);
+        self::assertSame(13, $book->list_records()->count);
+        [$code, $out] = $this->diag(['galbridge_db_dsn' => $roleDsn]);
+        self::assertSame(0, $code, $out);
+        self::assertLine($out, 'OK', 'table forwardings', 'not readable');
     }
 
     /**
@@ -575,13 +971,17 @@ final class CliToolTest extends TestCase
 
         foreach ([
             ['OK', 'plugin enabled'], ['OK', 'config file'], ['OK', 'enabled books', 'galbridge_domain'],
-            ['OK', 'directory hosts', '127.0.0.1 (derived from imap_host)'], ['OK', 'imap_host 127.0.0.1', 'covered'],
-            ['OK', 'connect'], ['OK', 'password column', 'not readable (SQLSTATE '], ['OK', 'write privileges', 'none on the vmail tables'],
-            ['OK', 'secret columns', 'not visible'], ['OK', 'columns mailbox', 'ok'], ['OK', 'columns domain', 'ok'], ['OK', 'columns forwardings', 'ok'],
+            ['OK', 'directory hosts', '127.0.0.1:143 (derived from imap_host)'], ['OK', 'imap_host 127.0.0.1', 'covered'],
+            ['OK', 'connect'], ['OK', 'password column', 'not readable (refused by the server)'], ['OK', 'write privileges', 'none on the vmail tables'],
+            ['OK', 'secret columns', 'not visible'], ['OK', 'table forwardings', 'not readable (the role reads the view galbridge_forwardings'],
+            ['OK', 'columns mailbox', 'ok'], ['OK', 'columns domain', 'ok'], ['OK', 'columns galbridge_forwardings', 'ok'],
+            ['INFO', 'switches (books)', self::SWITCHES_BOOKS], ['INFO', 'switches (entries)', self::SWITCHES_ENTRIES], ['INFO', 'switches (controls)', self::SWITCHES_CONTROLS],
+            ['INFO', 'viewer cache', '300 s (galbridge_scope_ttl)'], ['INFO', 'visibility column', 'not used'],
+            ['INFO', 'web access', 'not checked: run diag --url='],
             ['OK', 'optional columns mailbox', 'ok'], ['OK', 'optional columns alias', 'ok'], ['OK', 'optional columns maillists', 'ok'],
             ['INFO', 'granted but unused', 'mailbox.telephone, mailbox.mobile, mailbox.birthday (not in galbridge_fields'],
             ['INFO', 'hosted domains', '4 active'], ['INFO', 'deliverable mailboxes', '11'],
-            ['OK', 'home domain', 'example.com'], ['INFO', 'addresses', '4 (login + per-user aliases'],
+            ['OK', 'home domain', 'example.com'], ['INFO', 'addresses', '4 (login + per-user aliases of deliverable domains'],
             ['OK', 'galbridge_domain', '1 domain(s), groups: department (3 groups), search-only: no'],
             ['INFO', 'persons', '7 ('], ['INFO', 'alias accounts', '5 ('], ['INFO', 'mailing lists', '1 ('],
         ] as $line) {
@@ -591,13 +991,18 @@ final class CliToolTest extends TestCase
             // PostgreSQL 16+ has no lc_ctype setting: the ctype comes from pg_database
             self::assertLine($out, 'OK', 'ctype');
             self::assertLine($out, 'OK', 'schema public', 'no CREATE privilege');
-            // the fixture role has no limit (load.sh: a PHPUnit process holds many connections)
-            self::assertLine($out, 'INFO', 'connection limit', 'unlimited');
             self::assertStringNotContainsString('42704', $out);
+            // the role of the grant template keeps its statements (search terms) out of the server log
+            self::assertLine($out, 'OK', 'statement logging', 'off for this role');
         } else {
             self::assertMatchesRegularExpression('/\[INFO\] max_(statement|execution)_time /', $out);
+            self::assertMatchesRegularExpression('/\[( OK |WARN)\] statement logging +general query log /', $out);
         }
-        foreach (['== Versions', '== Configuration', '== IMAP host binding', '== Core interplay', '== vmail database', '== User ' . self::JAN] as $section) {
+        // the fixture role has no limit (load.sh: a PHPUnit process holds many connections): diag says
+        // so for BOTH engines - it used to be silent for MariaDB/MySQL
+        self::assertLine($out, 'WARN', 'connection limit', 'unlimited');
+        self::assertStringNotContainsString('session limit', $out, 'the statement timeout and read-only mode of the session are in effect');
+        foreach (['== Versions', '== Configuration', '== Installation', '== IMAP host binding', '== Core interplay', '== vmail database', '== User ' . self::JAN] as $section) {
             self::assertStringContainsString("\n{$section}\n", $out);
         }
     }
@@ -633,9 +1038,25 @@ final class CliToolTest extends TestCase
         // aliases and lists switched off: their tables are not checked at all
         [$code, $out] = $this->diag(['galbridge_db_dsn' => $roleDsn, 'galbridge_include_aliases' => false, 'galbridge_include_mailing_lists' => false]);
         self::assertSame(0, $code, $out);
-        foreach (['alias', 'maillists', 'moderators', 'maillist_owners', 'forwardings'] as $table) {
+        foreach (['alias', 'maillists', 'moderators', 'maillist_owners', Schema::FORWARDINGS] as $table) {
             self::assertStringNotContainsString('optional columns ' . $table, $out);
         }
+
+        // hide_expired needs the expired column of alias accounts and lists: without it the kind is
+        // LEFT OUT (as the WARN says) - it is not listed unfiltered
+        $columns = self::TEMPLATE_COLUMNS;
+        $columns['alias'] = array_values(array_diff($columns['alias'], ['expired']));
+        $noAliasExpiry = $this->createRole($dsn, 'ae', $columns);
+        [$code, $out] = $this->diag(['galbridge_db_dsn' => $noAliasExpiry], [], ['--user=' . self::JAN]);
+        self::assertSame(0, $code, $out);
+        self::assertLine($out, 'WARN', 'optional columns alias', 'missing or not granted: expired (alias accounts / mailing lists are left out)');
+        self::assertStringNotContainsString('alias accounts ', (string) preg_replace('/^.*== User /s', '', $out), 'no alias account is counted for the user');
+        self::assertLine($out, 'INFO', 'mailing lists', '1 (');
+        // without hide_expired the column is not needed: alias accounts are back
+        [$code, $out] = $this->diag(['galbridge_db_dsn' => $noAliasExpiry, 'galbridge_hide_expired' => false], [], ['--user=' . self::JAN]);
+        self::assertSame(0, $code, $out);
+        self::assertStringNotContainsString('[WARN] optional columns', $out);
+        self::assertMatchesRegularExpression('/^  \[INFO\]   alias accounts +[1-9]\d* \(/m', $out);
     }
 
     // ------------------------------------------------------------------ diag: roles that are wrong
@@ -648,15 +1069,18 @@ final class CliToolTest extends TestCase
         $out = [];
         foreach (self::serverEngines() as $engine => [$dsn]) {
             $out["{$engine}: column UPDATE on mailbox"] = [$dsn, 'UPDATE (name)', 'mailbox'];
-            $out["{$engine}: table DELETE on forwardings"] = [$dsn, 'DELETE', 'forwardings'];
+            // through the view the plugin reads: a simple view is updatable
+            $out["{$engine}: DELETE on the forwardings view"] = [$dsn, 'DELETE', Schema::FORWARDINGS];
+            $out["{$engine}: table UPDATE on domain"] = [$dsn, 'UPDATE', 'domain'];
             $out["{$engine}: table INSERT on alias"] = [$dsn, 'INSERT', 'alias'];
         }
         return $out;
     }
 
     /**
-     * The write tripwire reads the catalogs: a role that can modify vmail is a FAIL, although the
-     * plugin's own session is read-only (a statement probe would always be denied there).
+     * The write tripwire reads the catalogs - and on MariaDB/MySQL also asks the server with
+     * statements that can change nothing: a role that can modify vmail is a FAIL, although the
+     * plugin's own session is read-only.
      */
     #[DataProvider('writeGrants')]
     public function testDiagFailsForAWriteCapableRole(string $dsn, string $privilege, string $table): void
@@ -674,8 +1098,7 @@ final class CliToolTest extends TestCase
 
     /**
      * The required columns depend on the configuration (Schema): mailbox/domain.expired only with
-     * galbridge_hide_expired, forwardings.domain only with galbridge_user_aliases. diag and the
-     * runtime agree in every combination.
+     * galbridge_hide_expired. diag and the runtime agree in every combination.
      */
     #[DataProvider('serverEngines')]
     public function testDiagRequiredColumnsFollowTheConfiguration(string $dsn): void
@@ -700,16 +1123,24 @@ final class CliToolTest extends TestCase
         self::assertLine($out, 'FAIL', 'mailbox', 'not found, not active or not usable (status: column_missing)');
         self::assertNotInstanceOf(AddressBook::class, Env::factory(Env::config($noExpired), self::JAN)->create(BookDefinition::DOMAIN), 'the runtime agrees');
 
+        // the domain column of the forwardings view is always required
         $columns = self::TEMPLATE_COLUMNS;
-        $columns['forwardings'] = array_values(array_diff($columns['forwardings'], ['domain']));
+        $columns[Schema::FORWARDINGS] = array_values(array_diff($columns[Schema::FORWARDINGS], ['domain']));
         $noForwardingDomain = $this->createRole($dsn, 'nf', $columns);
-        [$code, $out] = $this->diag(['galbridge_db_dsn' => $noForwardingDomain], [], ['--user=' . self::JAN]);
-        self::assertSame(0, $code, 'forwardings.domain is needed only for galbridge_user_aliases: ' . $out);
+        foreach ([[], ['galbridge_user_aliases' => true]] as $options) {
+            [$code, $out] = $this->diag(['galbridge_db_dsn' => $noForwardingDomain] + $options, [], ['--user=' . self::JAN]);
+            self::assertSame(2, $code, $out);
+            self::assertLine($out, 'FAIL', 'columns galbridge_forwardings', 'missing or not granted: domain');
+            self::assertLine($out, 'FAIL', 'mailbox', '(status: column_missing)');
+        }
 
-        [$code, $out] = $this->diag(['galbridge_db_dsn' => $noForwardingDomain, 'galbridge_user_aliases' => true], [], ['--user=' . self::JAN]);
+        // a role without the view at all: the hint names the way out
+        $columns = self::TEMPLATE_COLUMNS;
+        unset($columns[Schema::FORWARDINGS]);
+        $noView = $this->createRole($dsn, 'nv', $columns);
+        [$code, $out] = $this->diag(['galbridge_db_dsn' => $noView]);
         self::assertSame(2, $code, $out);
-        self::assertLine($out, 'FAIL', 'columns forwardings', 'missing or not granted: domain');
-        self::assertLine($out, 'FAIL', 'mailbox', '(status: column_missing)');
+        self::assertLine($out, 'FAIL', 'columns galbridge_forwardings', 'missing or not granted: address, forwarding, domain, is_alias, active (the view of the grant template: run galbridge.sh grants, --grants-only for an existing role)');
     }
 
     /**
@@ -783,7 +1214,7 @@ final class CliToolTest extends TestCase
     public function testDiagRefusedDsnNeverPrintsThePassword(): void
     {
         if (!GALBRIDGE_RC_LOADED) {
-            self::markTestSkipped('needs Roundcube 1.7.7 (GALBRIDGE_RC)');
+            self::markTestSkipped('needs Roundcube 1.7 (GALBRIDGE_RC)');
         }
         [$code, $out] = $this->diag(['galbridge_db_dsn' => 'mysql://vmail:Secret-Vmail-pw@127.0.0.1/vmail']);
         self::assertSame(2, $code, $out);
@@ -793,13 +1224,20 @@ final class CliToolTest extends TestCase
     }
 
     /**
-     * The configuration file holds the database credential and the visibility policy.
+     * The configuration file holds the database credential and the visibility policy. As root the
+     * script itself refuses a configuration that another account could have written (it is PHP code
+     * the tool would run): those cases never reach diag.
      */
     public function testDiagChecksTheConfigurationFile(): void
     {
         $dsn = $this->anyServerDsn();
         $dir = $this->writeConfig(['galbridge_db_dsn' => $dsn]);
         $file = $dir . '/galbridge.inc.php';
+        $refused = static function (array $run) use ($file, $dir): void {
+            self::assertSame(1, $run[0], $run[1]);
+            self::assertSame('', $run[1], 'nothing was checked');
+            self::assertMatchesRegularExpression('~^galbridge\.sh --allow-root refused: (' . preg_quote($file, '~') . '|' . preg_quote($dir, '~') . ') \(owner uid \d+, mode \d{4}\) is not owned by root or is writable by its group or by others\.$~', trim($run[2]));
+        };
 
         chmod($file, 0o644);
         [$code, $out] = $this->runDiag($dir);
@@ -807,38 +1245,665 @@ final class CliToolTest extends TestCase
         self::assertLine($out, 'FAIL', 'config file', $file . ' (mode 0644: readable by everyone - use 0640 root:<web server group>)');
 
         chmod($file, 0o660);
-        [$code, $out] = $this->runDiag($dir);
-        self::assertSame(0, $code, $out);
-        self::assertLine($out, 'OK', 'config file', $file . ' (mode 0660)');
-        self::assertLine($out, 'WARN', 'config file', 'writable by its group (mode 0660)');
+        if (self::isRoot()) {
+            $refused($this->runDiag($dir));
+        } else {
+            [$code, $out] = $this->runDiag($dir);
+            self::assertSame(0, $code, $out);
+            self::assertLine($out, 'OK', 'config file', $file . ' (mode 0660)');
+            self::assertLine($out, 'WARN', 'config file', 'writable by its group (mode 0660)');
+        }
 
         chmod($file, 0o640);
         chmod($dir, 0o777);
-        [$code, $out] = $this->runDiag($dir);
-        self::assertSame(0, $code, $out);
-        self::assertLine($out, 'WARN', 'config directory', $dir . ' is writable by group/others (mode 0777)');
-
-        chmod($dir, 0o1777); // sticky: others cannot replace the file
-        [$code, $out] = $this->runDiag($dir);
-        self::assertStringNotContainsString('config directory', $out);
+        if (self::isRoot()) {
+            $refused($this->runDiag($dir));
+        } else {
+            [$code, $out] = $this->runDiag($dir);
+            self::assertSame(0, $code, $out);
+            self::assertLine($out, 'WARN', 'config directory', $dir . ' is writable by group/others (mode 0777)');
+            chmod($dir, 0o1777); // sticky: others cannot replace the file
+            [$code, $out] = $this->runDiag($dir);
+            self::assertStringNotContainsString('config directory', $out);
+        }
         chmod($dir, 0o700);
 
         [$code, $out] = $this->runDiag($dir);
         self::assertSame(0, $code, $out);
         self::assertLine($out, 'OK', 'config file', $file . ' (mode 0640)');
-        self::assertDoesNotMatchRegularExpression('/\[(WARN|FAIL)\] config /', $out);
-
-        if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
+        self::assertDoesNotMatchRegularExpression('/\[FAIL\] config /', $out);
+        if (self::isRoot()) {
+            self::assertDoesNotMatchRegularExpression('/\[WARN\] config /', $out, 'owned by root, mode 0640: nothing to say');
+            // a file of another account is refused before anything is loaded
             self::assertTrue(chown($file, 65534));
-            [$code, $out] = $this->runDiag($dir);
-            self::assertLine($out, 'WARN', 'config file', 'owned by uid 65534 (expected root or the PHP user)');
+            $refused($this->runDiag($dir));
             chown($file, 0);
+        } else {
+            // the PHP user owns the file: it can rewrite the directory policy whatever the mode says
+            self::assertLine($out, 'WARN', 'config file', 'owned by uid ' . Tool::euid() . ' (the user running this tool, i.e. the PHP user: the web server process can change the directory policy) - expected root');
         }
 
         unlink($file);
         [$code, $out] = $this->runDiag($dir);
         self::assertSame(2, $code, $out);
         self::assertLine($out, 'FAIL', 'config file', 'neither plugins/galbridge/config.inc.php nor config/galbridge.inc.php exists');
+    }
+
+    /**
+     * The tool loads PHP code from the plugin and the Roundcube directory (and Roundcube's
+     * configuration is PHP as well). As root it does not run at all unless --allow-root is given -
+     * and then only when all of that belongs to root.
+     */
+    public function testTheScriptRefusesToRunAsRoot(): void
+    {
+        if (!self::isRoot()) {
+            self::markTestSkipped('needs root (the refusal applies to root only)');
+        }
+        $env = ['ROUNDCUBE_INSTALL_PATH' => '/nonexistent-roundcube'];
+        foreach ([['grants', '--driver=mysql'], ['diag'], ['help'], []] as $args) {
+            [$code, $out, $err] = self::cli([...$args, '--no-allow-root'], $env);
+            self::assertSame(1, $code);
+            self::assertSame('', $out, 'no statement, no password, no check');
+            self::assertStringStartsWith('galbridge.sh must not run as root: it loads PHP code from the plugin and the Roundcube directory.', $err);
+            self::assertStringContainsString('sudo -u www-data', $err);
+        }
+        // --allow-root with root-owned code works (this checkout); with a configuration that somebody
+        // else could have written it does not (testDiagChecksTheConfigurationFile)
+        [$code, $out] = self::cli(['grants', '--driver=mysql'], $env);
+        self::assertSame(0, $code);
+        self::assertStringContainsString('CREATE USER', $out);
+    }
+
+    /**
+     * The posix extension is a package of its own on several platforms (php-process, php-posix) and
+     * no requirement of the plugin. Without it the script must still know its user - on Linux from
+     * the kernel - instead of taking "cannot tell" for "not root" and loading code as root.
+     */
+    public function testTheScriptKnowsItsUserWithoutThePosixExtension(): void
+    {
+        // php -n: no configuration file, so no extension that is loaded as a module
+        $bare = [PHP_BINARY, '-n', '-d', 'display_errors=stderr'];
+        [$code, $has] = self::exec([...$bare, '-r', 'echo function_exists("posix_geteuid") ? "posix" : "none";']);
+        if ($code !== 0 || $has !== 'none') {
+            self::markTestSkipped('this PHP has the posix extension compiled in');
+        }
+        if (!is_readable('/proc/self/status')) {
+            self::markTestSkipped('needs /proc (Linux)');
+        }
+        [$code, $uid, $err] = self::exec([...$bare, '-r', 'require $argv[1]; var_export(GalBridge\\Cli\\Tool::euid());', self::pluginDir() . '/lib/autoload.php']);
+        self::assertSame(0, $code, $err);
+        // (the parent asks the posix extension when it has one: an independent second source)
+        self::assertSame((string) Tool::euid(), $uid, 'the user of the process, read from /proc/self/status');
+
+        $script = self::pluginDir() . '/bin/galbridge.sh';
+        [$code, $out, $err] = self::exec([...$bare, $script, 'grants', '--driver=mysql'], null, ['ROUNDCUBE_INSTALL_PATH' => '/nonexistent-roundcube'] + getenv());
+        if (self::isRoot()) {
+            self::assertSame(1, $code, $out);
+            self::assertSame('', $out, 'no statement, no password');
+            self::assertStringStartsWith('galbridge.sh must not run as root: it loads PHP code from the plugin and the Roundcube directory.', $err);
+        } else {
+            self::assertSame(0, $code, $err);
+            self::assertStringContainsString('CREATE USER', $out);
+            self::assertStringNotContainsString('root', $err);
+        }
+    }
+
+    /**
+     * --allow-root passes only when EVERYTHING the tool then loads as root belongs to root and can be
+     * written by nobody else: Roundcube's start loads every enabled plugin, classes of vendor/ on
+     * demand and the localization index, and the plugin reads the configuration of the password
+     * plugin - not only the files of GAL Bridge and of the core library.
+     */
+    public function testAllowRootChecksEverythingThatIsLoadedAsRoot(): void
+    {
+        if (!self::isRoot()) {
+            self::markTestSkipped('needs root (--allow-root is for root only)');
+        }
+        $www = $this->base() . '/www';
+        $rc = $www . '/roundcube';
+        $files = [
+            'program/include/clisetup.php' => '<?php exit(42); // the checks passed: this file was loaded',
+            'program/lib/Roundcube/bootstrap.php' => '<?php',
+            'program/localization/index.inc' => '<?php',
+            'plugins/foo/foo.php' => '<?php',
+            'plugins/foo/lib/deep/more.php' => '<?php',
+            'plugins/password/config.inc.php' => '<?php',
+            'vendor/autoload.php' => '<?php',
+            'vendor/composer/autoload_real.php' => '<?php',
+            'vendor/pear/net_smtp/Net/SMTP.php' => '<?php',
+            'config/config.inc.php' => '<?php',
+            'config/password.inc.php' => '<?php',
+        ];
+        foreach ($files as $file => $content) {
+            if (!is_dir(dirname($rc . '/' . $file))) {
+                mkdir(dirname($rc . '/' . $file), 0o755, true);
+            }
+            file_put_contents($rc . '/' . $file, $content);
+            chmod($rc . '/' . $file, 0o644);
+        }
+        // the plugin as a release, installed through a symbolic link - and another plugin likewise
+        $plugin = $this->releaseCopy('galbridge-1.0.1');
+        symlink($plugin, $rc . '/plugins/galbridge');
+        mkdir($this->base() . '/elsewhere/bar', 0o755, true);
+        file_put_contents($this->base() . '/elsewhere/bar/bar.php', '<?php');
+        symlink($this->base() . '/elsewhere/bar', $rc . '/plugins/bar');
+
+        $run = fn (): array => self::exec([PHP_BINARY, '-d', 'display_errors=stderr', $plugin . '/bin/galbridge.sh', 'diag', '--allow-root'], null,
+            ['ROUNDCUBE_INSTALL_PATH' => $rc, 'ROUNDCUBE_CONFIG_DIR' => $rc . '/config'] + getenv(), $rc);
+        [$code, , $err] = $run();
+        self::assertSame(42, $code, 'everything belongs to root: ' . $err);
+
+        $nobody = 65534;
+        foreach ([
+            'a file of another plugin' => [$rc . '/plugins/foo/foo.php', 0o666, null],
+            'a file deep inside a plugin' => [$rc . '/plugins/foo/lib/deep/more.php', 0o664, null],
+            'a directory inside a plugin' => [$rc . '/plugins/foo/lib/deep', 0o777, null],
+            'the configuration of the password plugin' => [$rc . '/plugins/password/config.inc.php', 0o400, $nobody],
+            'password.inc.php in the configuration directory' => [$rc . '/config/password.inc.php', 0o640, $nobody],
+            'a file of Composer' => [$rc . '/vendor/composer/autoload_real.php', 0o664, null],
+            'a class of a package' => [$rc . '/vendor/pear/net_smtp/Net/SMTP.php', 0o644, $nobody],
+            'the localization index' => [$rc . '/program/localization/index.inc', 0o666, null],
+            'a plugin behind a symbolic link' => [$this->base() . '/elsewhere/bar/bar.php', 0o666, null],
+            'the directory above the target of that link' => [$this->base() . '/elsewhere', 0o777, null],
+            'the main file of this plugin' => [$plugin . '/galbridge.php', 0o666, null],
+            'a localization file of this plugin' => [$plugin . '/localization/en_US.inc', 0o600, $nobody],
+            'the directory above the installation' => [$www, 0o777, null],
+        ] as $what => [$path, $mode, $owner]) {
+            $before = [fileperms($path) & 0o7777, (int) fileowner($path)];
+            chmod($path, $mode);
+            if ($owner !== null) {
+                chown($path, $owner);
+            }
+            clearstatcache();
+            try {
+                [$code, $out, $err] = $run();
+                self::assertSame(1, $code, $what . ': ' . $err);
+                self::assertSame('', $out, $what);
+                self::assertStringStartsWith('galbridge.sh --allow-root refused: ' . $path . ' (owner uid ' . ($owner ?? 0) . ', mode ' . sprintf('%04o', $mode) . ') is not owned by root or is writable', $err, $what);
+            } finally {
+                chown($path, $before[1]);
+                chmod($path, $before[0]);
+                clearstatcache();
+            }
+        }
+        // a directory with the sticky bit above the installation (/tmp) lets nobody replace what
+        // belongs to root: accepted there - but never as a directory that holds code
+        chmod($www, 0o1777);
+        clearstatcache();
+        self::assertSame(42, $run()[0]);
+        chmod($www, 0o755);
+        chmod($rc . '/plugins', 0o1777);
+        clearstatcache();
+        [$code, , $err] = $run();
+        self::assertSame(1, $code);
+        self::assertStringContainsString($rc . '/plugins (owner uid 0, mode 1777)', $err);
+        chmod($rc . '/plugins', 0o755);
+        clearstatcache();
+        self::assertSame(42, $run()[0]);
+    }
+
+    // ------------------------------------------------------------------ diag: audit regressions
+
+    /**
+     * A switch that is not a boolean (U-03) and a visibility column that is not a string (U-02) are
+     * FAIL lines that say every book is disabled; the effective switches are always shown.
+     *
+     * @return array<string, array{string, mixed}>
+     */
+    public static function ambiguousOptions(): array
+    {
+        return [
+            'string false for the global book' => ['galbridge_global_book', 'false'],
+            'string no for the plaintext exception' => ['galbridge_db_allow_plaintext', 'no'],
+            'string for debug' => ['galbridge_debug', 'off'],
+            'array for the visibility column' => ['galbridge_visibility_column', ['galbridge_visible']],
+            'true for the visibility column' => ['galbridge_visibility_column', true],
+            'string for search-only' => ['galbridge_domain_searchonly', 'false'],
+        ];
+    }
+
+    #[DataProvider('ambiguousOptions')]
+    public function testDiagFailsForAnOptionOfTheWrongType(string $option, mixed $value): void
+    {
+        $dsn = $this->anyServerDsn();
+        [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn, $option => $value], [], ['--user=' . self::JAN]);
+        self::assertSame(2, $code, $out);
+        self::assertMatchesRegularExpression('/^  \[FAIL\] ' . preg_quote($option, '/') . ' +must be .*: all books are disabled$/m', $out);
+        self::assertStringNotContainsString('[ OK ] galbridge_domain ', $out, 'the user gets no book');
+        self::assertLine($out, 'WARN', 'books', 'none for this user');
+        if ($option !== 'galbridge_visibility_column') {
+            self::assertLine($out, 'FAIL', 'enabled books', 'none: a switch has an ambiguous value');
+            // what the switch is read as meanwhile is its conservative value - and diag shows it,
+            // marked: off for the three booleans, on (search-only) for the tristate
+            $short = substr($option, strlen('galbridge_'));
+            self::assertMatchesRegularExpression('/^  \[INFO\] switches \((books|entries|controls)\) .*\b' . preg_quote($short, '/')
+                . ' ' . ($option === 'galbridge_domain_searchonly' ? 'on' : 'off') . ' \(INVALID\)(,|$)/m', $out);
+            self::assertSame(1, substr_count($out, '(INVALID)'), 'the other switches are shown as they are');
+            self::assertLine($out, 'INFO', 'switches (entries)', self::SWITCHES_ENTRIES);
+        }
+    }
+
+    public function testDiagShowsEffectiveSwitchesAndEnvironmentOverrides(): void
+    {
+        $dsn = $this->anyServerDsn();
+        $dir = $this->writeConfig(['galbridge_db_dsn' => $dsn, 'galbridge_user_aliases' => true, 'galbridge_list_policy' => 'public_only', 'galbridge_scope_ttl' => 60]);
+        [$code, $out] = $this->runDiag($dir);
+        self::assertSame(0, $code, $out);
+        self::assertLine($out, 'INFO', 'switches (books)', self::SWITCHES_BOOKS);
+        self::assertLine($out, 'INFO', 'switches (entries)', 'user_aliases on, include_aliases on, include_mailing_lists on, hide_expired on, mark_foreign_domains on, list_policy public_only');
+        self::assertLine($out, 'INFO', 'switches (controls)', self::SWITCHES_CONTROLS);
+        self::assertLine($out, 'INFO', 'viewer cache', '60 s (galbridge_scope_ttl)');
+        self::assertStringNotContainsString('[WARN] environment', $out);
+        // EVERY switch of the configuration is shown, under the name of its option
+        foreach ([...Config::BOOLEANS, ...Config::TRISTATES] as $switch) {
+            self::assertMatchesRegularExpression('/^  \[INFO\] switches \((books|entries|controls)\) .*\b' . preg_quote(substr($switch, strlen('galbridge_')), '/') . ' (on|off|auto)(,|$)/m', $out, $switch);
+        }
+        self::assertStringNotContainsString('[WARN] switches', $out);
+
+        // "false" in the environment means false (Roundcube itself would read it as true) ...
+        $env = ['ROUNDCUBE_INSTALL_PATH' => rtrim((string) constant('RCUBE_INSTALL_PATH'), '/'), 'ROUNDCUBE_CONFIG_DIR' => $dir];
+        [$code, $out] = self::cli(['diag'], $env + ['ROUNDCUBE_GALBRIDGE_USER_ALIASES' => 'false']);
+        self::assertSame(0, $code, $out);
+        self::assertLine($out, 'WARN', 'environment', 'ROUNDCUBE_GALBRIDGE_USER_ALIASES overrides galbridge_user_aliases');
+        self::assertLine($out, 'INFO', 'switches (entries)', 'user_aliases off, ');
+        // the same for the switches that only narrow what is shown: how the text was read is visible
+        [$code, $out] = self::cli(['diag'], $env + ['ROUNDCUBE_GALBRIDGE_INCLUDE_MAILING_LISTS' => 'false', 'ROUNDCUBE_GALBRIDGE_DOMAIN_EXPORT' => '0', 'ROUNDCUBE_GALBRIDGE_DOMAIN_SEARCHONLY' => 'auto']);
+        self::assertSame(0, $code, $out);
+        self::assertLine($out, 'INFO', 'switches (entries)', 'include_mailing_lists off, ');
+        self::assertLine($out, 'INFO', 'switches (books)', 'domain_export off, domain_searchonly auto, ');
+        // ... and anything else is refused
+        [$code, $out] = self::cli(['diag'], $env + ['ROUNDCUBE_GALBRIDGE_GLOBAL_BOOK' => 'off']);
+        self::assertSame(2, $code, $out);
+        self::assertLine($out, 'FAIL', 'galbridge_global_book', 'environment variable ROUNDCUBE_GALBRIDGE_GLOBAL_BOOK must be 1, 0, true or false: all books are disabled');
+        // the value of an override is never printed (it may be the DSN)
+        [$code, $out] = self::cli(['diag'], $env + ['ROUNDCUBE_GALBRIDGE_DB_DSN' => 'mysql://vmail:Env-Secret-pw@127.0.0.1/vmail']);
+        self::assertSame(2, $code, $out);
+        self::assertLine($out, 'WARN', 'environment', 'ROUNDCUBE_GALBRIDGE_DB_DSN overrides galbridge_db_dsn');
+        self::assertStringNotContainsString('Env-Secret-pw', $out);
+    }
+
+    /**
+     * The connection limit of the account is reported for both engines: the role of the grant
+     * template has one (25), a role without one is a WARN.
+     */
+    #[DataProvider('serverEngines')]
+    public function testDiagReportsTheConnectionLimitOfTheAccount(string $dsn): void
+    {
+        [$engine, $db, $host] = $this->target($dsn);
+        $role = 'gbt_cli_l' . getmypid();
+        self::dropRole($engine, $db, $role);
+        $this->roles[] = [$engine, $db, $role];
+        [$code, $grants] = self::tool(['grants', 'driver' => $engine, 'role' => $role, 'db' => $db, 'host' => $host]);
+        self::assertSame(0, $code, $grants);
+        $this->apply($engine, $db, $role, $grants);
+
+        [$code, $out] = $this->diag(['galbridge_db_dsn' => self::dsnOf($grants)]);
+        self::assertSame(0, $code, $out);
+        self::assertLine($out, 'OK', 'connection limit', '25 (size it to the PHP-FPM pm.max_children of Roundcube)');
+        self::assertLine($out, 'OK', 'table forwardings', 'not readable');
+        self::assertStringNotContainsString('[WARN] connection limit', $out);
+        if ($engine === 'pgsql') {
+            self::assertLine($out, 'OK', 'statement logging', 'off for this role');
+        }
+
+        // a role created by hand without a limit
+        $bare = $this->createRole($dsn, 'nl', self::TEMPLATE_COLUMNS);
+        [$code, $out] = $this->diag(['galbridge_db_dsn' => $bare]);
+        self::assertSame(0, $code, $out);
+        self::assertLine($out, 'WARN', 'connection limit', 'unlimited');
+        if ($engine === 'pgsql') {
+            self::assertLine($out, 'WARN', 'statement logging', 'the server log can record statements of this role with the search terms');
+
+            // A server can also log a SAMPLE of the statements, or of whole transactions, whatever
+            // log_statement and log_min_duration_statement say: diag sees that for the role too.
+            foreach ([
+                'log_min_duration_sample = 0' => 'log_min_duration_sample=0 with log_statement_sample_rate=1',
+                'log_transaction_sample_rate = 0.5' => 'log_transaction_sample_rate=0.5',
+            ] as $setting => $reported) {
+                self::assertSame(0, self::adminScript($engine, $db, "ALTER ROLE {$role} SET {$setting};")[0]);
+                [$code, $out] = $this->diag(['galbridge_db_dsn' => self::dsnOf($grants)]);
+                self::assertSame(0, $code, $out);
+                self::assertLine($out, 'WARN', 'statement logging', $reported);
+                self::assertSame(0, self::adminScript($engine, $db, 'ALTER ROLE ' . $role . ' RESET ' . explode(' ', $setting)[0] . ';')[0]);
+            }
+            // the grant set puts the settings back (--grants-only: the password stays)
+            [$code, $again] = self::tool(['grants', 'driver' => $engine, 'role' => $role, 'db' => $db, 'host' => $host, 'grants-only' => true]);
+            self::assertSame(0, $code, $again);
+            $this->apply($engine, $db, $role, $again);
+            [$code, $out] = $this->diag(['galbridge_db_dsn' => self::dsnOf($grants)]);
+            self::assertLine($out, 'OK', 'statement logging', 'off for this role');
+        }
+    }
+
+    /**
+     * MariaDB/MySQL: a write privilege that reaches the account through a ROLE is not among the
+     * account's own grants. diag asks the server itself, with statements that can change nothing.
+     */
+    #[DataProvider('serverEngines')]
+    public function testDiagFindsWritePrivilegesGrantedThroughARole(string $dsn): void
+    {
+        [$engine, $db] = $this->target($dsn);
+        if ($engine !== 'mysql') {
+            self::markTestSkipped('MariaDB/MySQL roles (PostgreSQL: has_table_privilege() covers inherited privileges)');
+        }
+        if (stripos(self::adminQuery($engine, $db, 'SELECT VERSION()'), 'mariadb') === false) {
+            self::markTestSkipped('uses the MariaDB role syntax');
+        }
+        $roleDsn = $this->createRole($dsn, 'wr', self::TEMPLATE_COLUMNS);
+        $account = (string) (\rcube_db::parse_dsn($roleDsn)['username'] ?? '');
+        $group = 'gbt_cli_grp' . getmypid();
+        self::adminScript($engine, $db, "DROP ROLE IF EXISTS {$group};");
+        try {
+            [$code, , $err] = self::adminScript($engine, $db, "CREATE ROLE {$group}; GRANT UPDATE ON `{$db}`.`alias` TO {$group};"
+                . " GRANT {$group} TO '{$account}'@'localhost', '{$account}'@'%'; SET DEFAULT ROLE {$group} FOR '{$account}'@'localhost'; SET DEFAULT ROLE {$group} FOR '{$account}'@'%';");
+            self::assertSame(0, $code, $err);
+            [$code, $out] = $this->diag(['galbridge_db_dsn' => $roleDsn]);
+            self::assertSame(2, $code, $out);
+            self::assertLine($out, 'FAIL', 'write privileges', 'the role can modify vmail (UPDATE on alias)');
+        } finally {
+            self::adminScript($engine, $db, "DROP ROLE IF EXISTS {$group};");
+        }
+    }
+
+    /**
+     * --user is validated before anything of it is printed: the section title shows the normalised
+     * login or says that the value is no address.
+     */
+    public function testDiagNeverEchoesAnInvalidUserArgument(): void
+    {
+        $dsn = $this->anyServerDsn();
+        foreach (["evil\x1b[31m@x", 'not an address', "a@b\nResult: OK", str_repeat('x', 300)] as $user) {
+            [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn], [], ['--user=' . $user]);
+            self::assertSame(2, $code, $out);
+            self::assertStringContainsString("\n== User (not a valid address)\n", $out);
+            self::assertLine($out, 'FAIL', 'login', 'not a valid address');
+            self::assertStringNotContainsString("\x1b", $out);
+            self::assertStringNotContainsString('evil', $out);
+            self::assertSame(1, substr_count($out, 'Result: '), 'the argument cannot forge a result line');
+        }
+        [, $out] = $this->diag(['galbridge_db_dsn' => $dsn], [], ['--user=  JAN.Kowalski@EXAMPLE.com ']);
+        self::assertStringContainsString("\n== User " . self::JAN . "\n", $out, 'the normalised login');
+    }
+
+    /**
+     * The Roundcube branch is supported as a whole: every 1.7.x core is accepted; an older patch
+     * release is a WARN that asks for the CORE to be updated (never a reason to hold it back).
+     */
+    public function testDiagAcceptsEveryReleaseOfTheSupportedBranch(): void
+    {
+        $dsn = $this->anyServerDsn();
+        [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn]);
+        self::assertSame(0, $code, $out);
+        // the release of the tree the suite runs against (the library alone defines no RCMAIL_VERSION)
+        self::assertSame(1, preg_match("/define\\('RCMAIL_VERSION', '([^']+)'\\)/", (string) file_get_contents(rtrim((string) constant('RCUBE_INSTALL_PATH'), '/') . '/program/include/iniset.php'), $m));
+        $version = $m[1];
+        self::assertSame('1.7', Tool::SUPPORTED_BRANCH);
+        if (preg_match('/^1\.7\.\d+$/', $version) !== 1) {
+            self::assertLine($out, 'WARN', 'Roundcube', '1.7-git');
+        } elseif (version_compare($version, Tool::LATEST_KNOWN_ROUNDCUBE, '<')) {
+            self::assertLine($out, 'WARN', 'Roundcube', $version . ' (supported, but older than ' . Tool::LATEST_KNOWN_ROUNDCUBE . ': later 1.7.x releases fix security problems of Roundcube itself - update the core');
+        } else {
+            self::assertLine($out, 'OK', 'Roundcube', $version);
+        }
+        self::assertStringNotContainsString('[FAIL] Roundcube', $out);
+    }
+
+    /**
+     * include_host_config makes the effective imap_host depend on the Host header: nothing is
+     * derived from it (U-11), and diag cannot see the per-host files.
+     */
+    public function testDiagWarnsAboutHostDependentConfiguration(): void
+    {
+        $dsn = $this->anyServerDsn();
+        [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn], ['include_host_config' => true]);
+        self::assertSame(2, $code, $out);
+        self::assertLine($out, 'WARN', 'include_host_config', 'enabled: imap_host and the galbridge_* options can differ per requested host name');
+        self::assertLine($out, 'FAIL', 'directory hosts', 'plugin disabled: include_host_config is enabled');
+
+        [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn, 'galbridge_imap_hosts' => ['127.0.0.1:143']], ['include_host_config' => true]);
+        self::assertSame(0, $code, $out);
+        self::assertLine($out, 'OK', 'directory hosts', '127.0.0.1:143 (galbridge_imap_hosts)');
+        self::assertLine($out, 'OK', 'imap_host 127.0.0.1', 'covered');
+
+        // a listed port that is not the one Roundcube connects to covers nothing
+        [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn, 'galbridge_imap_hosts' => ['127.0.0.1:993']]);
+        self::assertSame(2, $code, $out);
+        self::assertLine($out, 'FAIL', 'imap_host 127.0.0.1', 'not in galbridge_imap_hosts');
+
+        // several servers: nothing can verify that all of them use this vmail database
+        [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn, 'galbridge_imap_hosts' => ['127.0.0.1', 'imap2.example.com:993']]);
+        self::assertSame(0, $code, $out);
+        self::assertLine($out, 'WARN', 'directory hosts', 'several or user-chosen IMAP servers: EVERY listed server must authenticate against this vmail database');
+    }
+
+    /**
+     * diag --url asks the web server for files of the plugin directory. Against a server that hands
+     * them out it is a FAIL; against one that answers 404 it is OK; an unusable URL is refused.
+     */
+    public function testDiagChecksWhetherTheWebServerServesThePluginDirectory(): void
+    {
+        $dsn = $this->anyServerDsn();
+        foreach (['ftp://mail.example.com/', 'https://mail.example.com/?x=1', 'mail.example.com', 'https://user:pw@mail.example.com/', "https://mail.example.com/\n"] as $bad) {
+            [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn], [], ['--url=' . $bad]);
+            self::assertSame(2, $code, $out);
+            self::assertLine($out, 'FAIL', 'web access', '--url must be the http(s) address of the webmail');
+        }
+
+        // a web server that serves everything below its document root, plugin files included
+        $root = $this->base() . '/htdocs';
+        mkdir($root . '/plugins/galbridge/SQL', 0o700, true);
+        file_put_contents($root . '/plugins/galbridge/composer.json', '{}');
+        file_put_contents($root . '/plugins/galbridge/SQL/grants.mysql.sql', '-- test');
+        // ... and answers like Roundcube at its address: every page of the webmail creates this object
+        file_put_contents($root . '/index.html', '<html><head><script>var rcmail = new rcube_webmail();</script></head><body></body></html>');
+        [$server, $port] = self::webServer($root);
+        try {
+            [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn], [], ['--url=http://127.0.0.1:' . $port . '/']);
+            self::assertSame(2, $code, $out);
+            self::assertLine($out, 'OK', 'web access', 'http://127.0.0.1:' . $port . '/ is the webmail');
+            self::assertLine($out, 'FAIL', 'web access', 'plugins/galbridge/composer.json is SERVED (HTTP 200): deny the plugin directory in the web server (README 2.6)');
+            self::assertLine($out, 'FAIL', 'web access', 'plugins/galbridge/SQL/grants.mysql.sql is SERVED (HTTP 200)');
+            self::assertLine($out, 'OK', 'web access', 'static.php/plugins/galbridge/composer.json is not served (HTTP 404)');
+
+            // the same server without the files: nothing is served
+            unlink($root . '/plugins/galbridge/composer.json');
+            unlink($root . '/plugins/galbridge/SQL/grants.mysql.sql');
+            [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn], [], ['--url=http://127.0.0.1:' . $port]);
+            self::assertSame(0, $code, $out);
+            self::assertSame(5, substr_count($out, '[ OK ] web access'), 'the webmail and four paths that are not served');
+            self::assertStringNotContainsString('not checked: run diag --url', $out);
+
+            // An address that is NOT the webmail - a wrong prefix, another virtual host - answers 404
+            // for everything as well: diag says that its "not served" lines then mean nothing.
+            mkdir($root . '/other');
+            foreach (['other/', 'nowhere/'] as $prefix) {
+                [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn], [], ['--url=http://127.0.0.1:' . $port . '/' . $prefix]);
+                self::assertSame(0, $code, $out);
+                self::assertLine($out, 'WARN', 'web access', 'http://127.0.0.1:' . $port . '/' . $prefix . ' does not answer like the Roundcube webmail (HTTP 404): check the address');
+                self::assertStringNotContainsString('is the webmail', $out);
+            }
+            // a page that is not Roundcube's
+            file_put_contents($root . '/other/index.html', '<html><body>It works!</body></html>');
+            [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn], [], ['--url=http://127.0.0.1:' . $port . '/other/']);
+            self::assertLine($out, 'WARN', 'web access', '/other/ does not answer like the Roundcube webmail (HTTP 200)');
+        } finally {
+            proc_terminate($server);
+            proc_close($server);
+        }
+
+        // nobody answers: a WARN, never a false "not served"
+        [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn], [], ['--url=http://127.0.0.1:1/']);
+        self::assertSame(0, $code, $out);
+        self::assertLine($out, 'WARN', 'web access', 'plugins/galbridge/composer.json: no answer (');
+        self::assertLine($out, 'WARN', 'web access', 'http://127.0.0.1:1/ does not answer like the Roundcube webmail (no answer: ');
+        self::assertStringNotContainsString('[ OK ] web access', $out);
+    }
+
+    /**
+     * What lies in the plugin directory: this checkout is a git clone (tests/, CI and tooling files)
+     * and diag says that such a tree has no place on a mail server.
+     */
+    public function testDiagReportsAGitCloneAndForeignFiles(): void
+    {
+        $dsn = $this->anyServerDsn();
+        [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn]);
+        self::assertSame(0, $code, $out);
+        self::assertLine($out, 'WARN', 'plugin directory', 'a git clone (tests');
+        self::assertStringContainsString('tests/ holds scripts that reset databases and Dovecot', $out);
+        if (self::isRoot()) {
+            self::assertStringNotContainsString('plugin code', $out, 'root can write everything: the check is for the PHP user');
+        } else {
+            self::assertMatchesRegularExpression('/\[( OK |WARN)\] plugin code /', $out);
+        }
+    }
+
+    /**
+     * An installation as the release archive gives it, in a directory that is NOT called
+     * "galbridge" (the target of a symlink, e.g. plugins/galbridge -> /opt/galbridge-1.0.1; __DIR__
+     * resolves it): diag finds only the files of a release there, names what was left behind, and
+     * asks the web server for the path Roundcube serves the plugin under - plugins/galbridge/ - not
+     * for the name of the directory on disk, which would answer 404 and report "not served" for
+     * files that are served.
+     */
+    public function testDiagJudgesAReleaseDirectoryUnderAnotherName(): void
+    {
+        $dsn = $this->anyServerDsn();
+        $config = $this->writeConfig(['galbridge_db_dsn' => $dsn]);
+        $copy = $this->releaseCopy('galbridge-1.0.1');
+
+        [$code, $out, $err] = $this->runDiag($config, [], $copy);
+        self::assertSame(0, $code, $out . $err);
+        self::assertNoPhpErrors($err);
+        self::assertLine($out, 'OK', 'plugin directory', 'only the files of a release');
+        self::assertStringNotContainsString('a git clone', $out);
+        self::assertStringNotContainsString('files that are not part of the plugin', $out);
+
+        $root = $this->base() . '/htdocs-release';
+        mkdir($root . '/plugins/galbridge', 0o700, true);
+        file_put_contents($root . '/plugins/galbridge/composer.json', '{}');
+        [$server, $port] = self::webServer($root);
+        try {
+            [$code, $out] = $this->runDiag($config, ['--url=http://127.0.0.1:' . $port . '/'], $copy);
+            self::assertSame(2, $code, $out);
+            self::assertLine($out, 'FAIL', 'web access', 'plugins/galbridge/composer.json is SERVED (HTTP 200)');
+            self::assertLine($out, 'OK', 'web access', 'static.php/plugins/galbridge/lib/autoload.php is not served (HTTP 404)');
+            self::assertStringNotContainsString('galbridge-1.0.1', $out, 'the web path is the name of the plugin, not of the directory');
+        } finally {
+            proc_terminate($server);
+            proc_close($server);
+        }
+
+        // what an administrator left behind is named (names only), and a clone is told apart
+        file_put_contents($copy . '/grants.sql', '-- test');
+        file_put_contents($copy . '/config.inc.php.bak', '<?php');
+        [$code, $out] = $this->runDiag($config, [], $copy);
+        self::assertSame(0, $code, $out);
+        self::assertLine($out, 'WARN', 'plugin directory', 'files that are not part of the plugin: config.inc.php.bak, grants.sql - keep nothing else here (README 2.6)');
+        self::assertStringNotContainsString('only the files of a release', $out);
+        self::assertStringNotContainsString('a git clone', $out);
+    }
+
+    /**
+     * The lists that describe a release agree: what git exports (.gitattributes) is what the test
+     * above installs - and diag accepts exactly that in a plugin directory. A new top-level file
+     * needs a decision in all three places.
+     */
+    public function testTheReleaseEntriesAreWhatGitExports(): void
+    {
+        $dir = self::pluginDir();
+        if (!is_dir($dir . '/.git')) {
+            self::markTestSkipped('not a git checkout');
+        }
+        [$code, $out] = self::exec(['git', '-C', $dir, 'ls-files', '-z']);
+        if ($code !== 0 || $out === '') {
+            self::markTestSkipped('git cannot read this checkout');
+        }
+        $top = [];
+        foreach (explode("\0", rtrim($out, "\0")) as $file) {
+            $top[explode('/', $file, 2)[0]] = true;
+        }
+        $exported = [];
+        foreach (array_keys($top) as $entry) {
+            [$code, $attr] = self::exec(['git', '-C', $dir, 'check-attr', 'export-ignore', '--', (string) $entry]);
+            self::assertSame(0, $code, $attr);
+            if (!str_ends_with(trim($attr), ': export-ignore: set')) {
+                $exported[] = (string) $entry;
+            }
+        }
+        sort($exported, SORT_STRING);
+        self::assertSame(self::RELEASE_ENTRIES, $exported, 'tracked top-level entries without export-ignore (.gitattributes) and CliToolTest::RELEASE_ENTRIES differ');
+    }
+
+    /**
+     * A consequence of the "(domain)" marker standing first: Roundcube sorts its suggestions by name
+     * and pre-selects the first one. diag says so where it applies, and names the switch.
+     */
+    public function testDiagTellsThatMarkedEntriesAreSuggestedFirst(): void
+    {
+        $dsn = $this->anyServerDsn();
+        $global = ['galbridge_db_dsn' => $dsn, 'galbridge_global_book' => true, 'galbridge_global_viewer_domains' => ['*'], 'galbridge_global_data_domains' => ['example.org']];
+        [$code, $out] = $this->diag($global);
+        self::assertSame(0, $code, $out);
+        self::assertLine($out, 'INFO', 'autocomplete order', 'entries of other domains start with their "(domain)" marker and Roundcube sorts its suggestions by name');
+        self::assertLine($out, 'INFO', 'autocomplete order', 'galbridge_global_autocomplete = false keeps the global book out of autocomplete');
+        foreach (['galbridge_global_autocomplete', 'galbridge_mark_foreign_domains', 'galbridge_global_book'] as $switch) {
+            [$code, $out] = $this->diag([$switch => false] + $global);
+            self::assertSame(0, $code, $out);
+            self::assertStringNotContainsString('autocomplete order', $out, $switch . ' = false');
+        }
+    }
+
+    /**
+     * The "(domain)" marker is part of the name of a foreign entry. A contactlist_name_template that
+     * shows other text of the entry before {name} - or has no {name} - makes the plugin withhold
+     * those fields from foreign entries; diag says so (the administrator would otherwise wonder
+     * where the department went).
+     */
+    public function testDiagTellsWhichFieldsTheNameTemplateTakesFromForeignEntries(): void
+    {
+        $dsn = $this->anyServerDsn();
+        $global = ['galbridge_db_dsn' => $dsn, 'galbridge_global_book' => true, 'galbridge_global_viewer_domains' => ['*'], 'galbridge_global_data_domains' => ['example.org']];
+        [$code, $out] = $this->diag($global, ['contactlist_name_template' => '[{department}] {name}']);
+        self::assertSame(0, $code, $out);
+        self::assertLine($out, 'WARN', 'contactlist_name_template', 'shows department before {name} (or has no {name}): entries of other domains are listed WITHOUT these fields');
+        [$code, $out] = $this->diag($global, ['contactlist_name_template' => '{firstname} {surname} {phone}']);
+        self::assertLine($out, 'WARN', 'contactlist_name_template', 'shows phone:work, phone:mobile before {name}');
+
+        foreach ([[$global, '{name} ({department})'], [$global, '{name}'], [['galbridge_global_book' => false] + $global, '[{department}] {name}'], [['galbridge_mark_foreign_domains' => false] + $global, '{department}']] as [$plugin, $template]) {
+            [$code, $out] = $this->diag($plugin, ['contactlist_name_template' => $template]);
+            self::assertSame(0, $code, $out);
+            self::assertStringNotContainsString('contactlist_name_template', $out, $template);
+        }
+    }
+
+    /**
+     * An IMAP server on a local socket (imap_host = unix:///path, which Roundcube opens with port
+     * -1) is a directory host like any other: derived from imap_host, or listed.
+     */
+    public function testDiagAcceptsAnImapServerOnALocalSocket(): void
+    {
+        $dsn = $this->anyServerDsn();
+        $socket = 'unix:///run/dovecot/imap.sock';
+        [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn], ['imap_host' => $socket]);
+        self::assertSame(0, $code, $out);
+        self::assertLine($out, 'OK', 'directory hosts', $socket . ' (derived from imap_host)');
+        self::assertLine($out, 'OK', 'imap_host ' . $socket, 'covered');
+
+        [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn, 'galbridge_imap_hosts' => [$socket, '127.0.0.1:143']], ['imap_host' => $socket]);
+        self::assertSame(0, $code, $out);
+        self::assertLine($out, 'OK', 'directory hosts', $socket . ', 127.0.0.1:143 (galbridge_imap_hosts)');
+        self::assertLine($out, 'OK', 'imap_host ' . $socket, 'covered');
+
+        // another socket is another server
+        [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn, 'galbridge_imap_hosts' => ['unix:///run/dovecot/other.sock']], ['imap_host' => $socket]);
+        self::assertSame(2, $code, $out);
+        self::assertLine($out, 'FAIL', 'imap_host ' . $socket, 'not in galbridge_imap_hosts');
+
+        // not a socket Roundcube could open: refused, with the accepted forms
+        [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn, 'galbridge_imap_hosts' => ['unix://run/dovecot/imap.sock']]);
+        self::assertSame(2, $code, $out);
+        self::assertLine($out, 'FAIL', 'galbridge_imap_hosts', 'or unix:///path for a local socket');
+        self::assertLine($out, 'FAIL', 'directory hosts', 'plugin disabled: galbridge_imap_hosts is malformed - set galbridge_imap_hosts to the IMAP servers of this vmail database (host, host:port or unix:///path)');
     }
 
     public function testDiagWarnsWhileTheWildcardIsInEffect(): void
@@ -971,17 +2036,30 @@ final class CliToolTest extends TestCase
      *
      * @param list<string>          $args
      * @param array<string, string> $env
+     * @param null|string           $pluginDir another plugin directory than this checkout (releaseCopy())
      *
      * @return array{0: int, 1: string, 2: string}
      */
-    private static function cli(array $args, array $env = []): array
+    private static function cli(array $args, array $env = [], ?string $pluginDir = null): array
     {
         $vars = getenv();
         foreach ($env as $k => $v) {
             $vars[$k] = $v;
         }
         $cwd = defined('RCUBE_INSTALL_PATH') ? rtrim((string) constant('RCUBE_INSTALL_PATH'), '/') : self::pluginDir();
-        return self::exec([PHP_BINARY, '-d', 'display_errors=stderr', self::pluginDir() . '/bin/galbridge.sh', ...$args], null, $vars, $cwd);
+        if (self::isRoot() && !in_array('--no-allow-root', $args, true)) {
+            // the script refuses root unless told otherwise (and then checks who owns the code);
+            // a test machine or container runs the suite as root
+            $args[] = '--allow-root';
+        }
+        $args = array_values(array_diff($args, ['--no-allow-root']));
+        return self::exec([PHP_BINARY, '-d', 'display_errors=stderr', ($pluginDir ?? self::pluginDir()) . '/bin/galbridge.sh', ...$args], null, $vars, $cwd);
+    }
+
+    private static function isRoot(): bool
+    {
+        // as the script decides it: also without the posix extension
+        return Tool::euid() === 0;
     }
 
     /**
@@ -1003,15 +2081,42 @@ final class CliToolTest extends TestCase
      *
      * @return array{0: int, 1: string, 2: string}
      */
-    private function runDiag(string $configDir, array $args = []): array
+    private function runDiag(string $configDir, array $args = [], ?string $pluginDir = null): array
     {
         if (!GALBRIDGE_RC_LOADED) {
-            self::markTestSkipped('needs Roundcube 1.7.7 (GALBRIDGE_RC)');
+            self::markTestSkipped('needs Roundcube 1.7 (GALBRIDGE_RC)');
         }
         return self::cli(['diag', ...$args], [
             'ROUNDCUBE_INSTALL_PATH' => rtrim((string) constant('RCUBE_INSTALL_PATH'), '/'),
             'ROUNDCUBE_CONFIG_DIR' => $configDir,
-        ]);
+        ], $pluginDir);
+    }
+
+    /**
+     * A copy of this plugin as the release archive holds it, in a directory of the given name below
+     * the directory of this test (owner: the user of the test run, nobody else may write).
+     */
+    private function releaseCopy(string $name): string
+    {
+        $target = $this->base() . '/' . $name;
+        mkdir($target, 0o700);
+        foreach (self::RELEASE_ENTRIES as $entry) {
+            self::copyTree(self::pluginDir() . '/' . $entry, $target . '/' . $entry);
+        }
+        return $target;
+    }
+
+    private static function copyTree(string $from, string $to): void
+    {
+        if (is_dir($from)) {
+            mkdir($to, 0o700);
+            foreach (array_diff(scandir($from) ?: [], ['.', '..']) as $entry) {
+                self::copyTree($from . '/' . $entry, $to . '/' . $entry);
+            }
+            return;
+        }
+        self::assertTrue(copy($from, $to), $from);
+        chmod($to, 0o600);
     }
 
     /**
@@ -1025,7 +2130,7 @@ final class CliToolTest extends TestCase
     private function writeConfig(array $plugin, array $core = []): string
     {
         if (!GALBRIDGE_RC_LOADED) {
-            self::markTestSkipped('needs Roundcube 1.7.7 (GALBRIDGE_RC)');
+            self::markTestSkipped('needs Roundcube 1.7 (GALBRIDGE_RC)');
         }
         if (is_file(self::pluginDir() . '/config.inc.php')) {
             self::markTestSkipped('the plugin directory has its own config.inc.php (it would take precedence)');
@@ -1115,6 +2220,96 @@ final class CliToolTest extends TestCase
         return $m[1];
     }
 
+    /**
+     * What the statements of an output carry instead of the placeholder of the template: a VERIFIER
+     * of the password - the mysql_native_password hash (MySQL/MariaDB) or a SCRAM-SHA-256 verifier
+     * (PostgreSQL). It is checked against the password of the printed DSN, so the DSN and the role
+     * always belong together, and the password itself must be in the DSN line only.
+     */
+    private static function secretOf(string $out, string $driver): string
+    {
+        $password = self::passwordOf($out);
+        $withoutDsn = (string) preg_replace('/^-- \\$config.*$/m', '', $out);
+        self::assertStringNotContainsString($password, $withoutDsn, 'the clear text is in the DSN line only');
+        if ($driver === 'mysql') {
+            self::assertGreaterThanOrEqual(1, preg_match_all("/IDENTIFIED WITH mysql_native_password AS '(\\*[0-9A-F]{40})'/", $out, $m), 'a mysql_native_password verifier: ' . $out);
+            self::assertSame([Tool::mysqlVerifier($password)], array_values(array_unique($m[1])), 'the verifier belongs to the password of the DSN line');
+            // the documented way to compute it by hand (SQL/grants.mysql.sql) gives the same value
+            self::assertSame('*' . strtoupper(sha1(sha1($password, true))), $m[1][0]);
+            return $m[1][0];
+        }
+        self::assertSame(1, preg_match_all("/PASSWORD '(SCRAM-SHA-256\\$4096:([A-Za-z0-9+\\/=]+)\\$[A-Za-z0-9+\\/=]+:[A-Za-z0-9+\\/=]+)'/", $out, $m), 'exactly one SCRAM verifier: ' . $out);
+        $verifier = $m[1][0];
+        $salt = (string) base64_decode($m[2][0], true);
+        self::assertSame(16, strlen($salt), 'a 128-bit random salt');
+        self::assertSame($verifier, Tool::scramVerifier($password, $salt), 'the verifier belongs to the password of the DSN line');
+        return $verifier;
+    }
+
+    /**
+     * Non-comment lines of an output that has no DSN trailer (--grants-only).
+     *
+     * @return list<string>
+     */
+    private static function statementsOfAnyOutput(string $out): array
+    {
+        return array_values(array_filter(array_map('trim', explode("\n", $out)), static fn (string $l): bool => $l !== '' && !str_starts_with($l, '--')));
+    }
+
+    /**
+     * PHP's built-in web server on a free loopback port, serving $root.
+     *
+     * @return array{0: resource, 1: int}
+     */
+    private static function webServer(string $root): array
+    {
+        // A router: PHP's built-in server answers a path that does not exist with the index page of
+        // the nearest directory above it (HTTP 200) - no web server in front of Roundcube does that.
+        // Files are served, a directory answers with its own index.html, everything else is 404.
+        $router = dirname($root) . '/router-' . bin2hex(random_bytes(4)) . '.php';
+        file_put_contents($router, <<<'PHP'
+            <?php
+            $path = (string) parse_url((string) $_SERVER['REQUEST_URI'], PHP_URL_PATH);
+            $file = $_SERVER['DOCUMENT_ROOT'] . $path;
+            if (str_contains($path, '..')) {
+                http_response_code(400);
+                return true;
+            }
+            if (is_file($file)) {
+                return false;
+            }
+            if (is_dir($file) && is_file(rtrim($file, '/') . '/index.html')) {
+                header('Content-Type: text/html');
+                readfile(rtrim($file, '/') . '/index.html');
+                return true;
+            }
+            http_response_code(404);
+            echo 'not found';
+            return true;
+            PHP);
+        for ($attempt = 0; $attempt < 10; $attempt++) {
+            $port = random_int(20000, 45000);
+            $proc = proc_open([PHP_BINARY, '-S', '127.0.0.1:' . $port, '-t', $root, $router], [0 => ['file', '/dev/null', 'r'], 1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
+            if (!is_resource($proc)) {
+                continue;
+            }
+            for ($i = 0; $i < 50; $i++) {
+                $socket = @fsockopen('127.0.0.1', $port, $errno, $errstr, 0.2);
+                if (is_resource($socket)) {
+                    fclose($socket);
+                    return [$proc, $port];
+                }
+                usleep(100000);
+                if (!(proc_get_status($proc)['running'] ?? false)) {
+                    break;
+                }
+            }
+            proc_terminate($proc);
+            proc_close($proc);
+        }
+        self::markTestSkipped('cannot start a local web server');
+    }
+
     private static function masked(string $dsn): string
     {
         return (string) preg_replace('~^([a-z]+://[^:]+):[^@]*@~', '$1:***@', $dsn);
@@ -1196,7 +2391,7 @@ final class CliToolTest extends TestCase
             self::markTestSkipped('needs GALBRIDGE_TEST_MYSQL_DSN / GALBRIDGE_TEST_PGSQL_DSN');
         }
         if (!GALBRIDGE_RC_LOADED) {
-            self::markTestSkipped('needs Roundcube 1.7.7 (GALBRIDGE_RC)');
+            self::markTestSkipped('needs Roundcube 1.7 (GALBRIDGE_RC)');
         }
         $parsed = \rcube_db::parse_dsn($dsn);
         $engine = (string) $parsed['phptype'] === 'pgsql' ? 'pgsql' : 'mysql';

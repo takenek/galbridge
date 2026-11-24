@@ -6,7 +6,7 @@ declare(strict_types=1);
  * GAL Bridge - PHPUnit bootstrap.
  *
  * Unit tests need only lib/. Integration tests additionally load Roundcube's library (rcube_db,
- * rcube_addressbook, rcube_config ...) from the Roundcube 1.7.7 installation given in the
+ * rcube_addressbook, rcube_config ...) from the Roundcube 1.7.x installation given in the
  * environment variable GALBRIDGE_RC (e.g. GALBRIDGE_RC=/opt/rcrun/1.7.7). They always run against
  * the SQLite mirror of the vmail fixture, and additionally against the throw-away MariaDB/MySQL and
  * PostgreSQL databases named by GALBRIDGE_TEST_MYSQL_DSN / GALBRIDGE_TEST_PGSQL_DSN

@@ -16,6 +16,7 @@ declare(strict_types=1);
 
 namespace GalBridge\Db;
 
+use GalBridge\Directory\Schema;
 use GalBridge\Exception\GalBridgeException;
 use GalBridge\Log;
 
@@ -34,8 +35,14 @@ final class Connection
 {
     public const OUTAGE_SECONDS = 30;
 
-    /** the vmail tables GAL Bridge may read (column probe) */
-    public const TABLES = ['mailbox', 'domain', 'alias', 'forwardings', 'maillists', 'moderators', 'maillist_owners'];
+    /** the vmail relations GAL Bridge may read (column probe); forwardings only through its view */
+    public const TABLES = ['mailbox', 'domain', 'alias', Schema::FORWARDINGS, 'maillists', 'moderators', 'maillist_owners'];
+
+    /**
+     * Relations the role must not be able to read at all (probed as well): the forwardings table
+     * holds the private forwarding targets of every mailbox.
+     */
+    public const FORBIDDEN_TABLES = [Schema::FORWARDINGS_TABLE];
 
     /** columns whose visibility means the role is too broad (fail closed) */
     public const SECRET_COLUMNS = ['password', 'recovery_email', 'allow_nets'];
@@ -47,6 +54,9 @@ final class Connection
     private string $flavour = '';
 
     private string $lastError = '';
+
+    /** @var list<string> session limits the server refused (diag) */
+    private array $sessionWarnings = [];
 
     /** @var null|\Closure(string): \rcube_db */
     private ?\Closure $factory;
@@ -101,17 +111,47 @@ final class Connection
     }
 
     /**
-     * SQLSTATE of a statement that is expected to fail (diag privilege tripwires); '' if it succeeded.
+     * Run a statement that the role is expected to be DENIED (diag privilege tripwires).
+     *
+     * @return string '' when the statement succeeded (the role has the privilege), 'denied' when the
+     *                server refused it for a missing privilege, otherwise the SQLSTATE of another
+     *                error - which proves nothing about the privilege
      */
-    public function probeFailure(string $sql): string
+    public function probe(string $sql): string
     {
         $db = $this->db();
         $res = $db->query($sql);
-        if ($res === false || $db->is_error($res)) {
-            $info = $db->error_info();
-            return is_array($info) && ($info[0] ?? '') !== '' ? (string) $info[0] : 'ERROR';
+        if ($res !== false && !$db->is_error($res)) {
+            return '';
         }
-        return '';
+        $info = $db->error_info();
+        $state = is_array($info) && ($info[0] ?? '') !== '' ? (string) $info[0] : 'ERROR';
+        $code = is_array($info) ? (int) ($info[1] ?? 0) : 0;
+        // PostgreSQL insufficient_privilege; MariaDB/MySQL database / table / column access denied
+        $denied = $state === '42501' || ($this->driver() === 'mysql' && in_array($code, [1044, 1142, 1143], true));
+        return $denied ? 'denied' : $state;
+    }
+
+    /**
+     * probe() for a data-changing statement on MariaDB/MySQL. The plugin's session is read-only, so
+     * the server would refuse every write before it looks at the privileges; the statement therefore
+     * runs in a read-write transaction that is always rolled back (the callers also pass statements
+     * that can match no row). Other engines: probe().
+     */
+    public function probeWrite(string $sql): string
+    {
+        if ($this->driver() !== 'mysql') {
+            return $this->probe($sql);
+        }
+        $db = $this->db();
+        $db->query('SET SESSION TRANSACTION READ WRITE');
+        $db->startTransaction();
+        try {
+            return $this->probe($sql);
+        } finally {
+            $db->rollbackTransaction();
+            $db->query('SET SESSION TRANSACTION READ ONLY');
+        }
     }
 
     /**
@@ -123,21 +163,22 @@ final class Connection
      */
     public function visibleColumns(): array
     {
-        $out = array_fill_keys(self::TABLES, []);
+        $tables = [...self::TABLES, ...self::FORBIDDEN_TABLES];
+        $out = array_fill_keys($tables, []);
         $driver = $this->driver();
         if ($driver === 'sqlite') {
-            foreach (self::TABLES as $t) {
+            foreach ($tables as $t) {
                 foreach ($this->select('PRAGMA table_info(' . $t . ')') as $row) {
                     $out[$t][] = strtolower((string) $row['name']);
                 }
             }
             return $out;
         }
-        $in = implode(', ', array_fill(0, count(self::TABLES), '?'));
+        $in = implode(', ', array_fill(0, count($tables), '?'));
         $sql = $driver === 'pgsql'
             ? 'SELECT table_name AS t, column_name AS c FROM information_schema.columns WHERE table_schema = current_schema() AND table_name IN (' . $in . ')'
             : 'SELECT TABLE_NAME AS t, COLUMN_NAME AS c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (' . $in . ')';
-        foreach ($this->select($sql, self::TABLES) as $row) {
+        foreach ($this->select($sql, $tables) as $row) {
             $t = strtolower((string) ($row['t'] ?? ''));
             if (isset($out[$t])) {
                 $out[$t][] = strtolower((string) ($row['c'] ?? ''));
@@ -153,6 +194,17 @@ final class Connection
     public function lastError(): string
     {
         return $this->lastError;
+    }
+
+    /**
+     * Session limits (statement timeout, read-only mode) that the server refused when the
+     * connection was set up - the statement names only. Empty before the first query.
+     *
+     * @return list<string>
+     */
+    public function sessionWarnings(): array
+    {
+        return $this->sessionWarnings;
     }
 
     public function close(): void
@@ -229,7 +281,9 @@ final class Connection
         foreach ($statements as $sql) {
             $res = $db->query($sql);
             if ($res === false || $db->is_error($res)) {
-                Log::warning('db', 'session limit not applied', ['statement' => strtok($sql, '=') ?: $sql]);
+                $name = trim(strtok($sql, '=') ?: $sql);
+                $this->sessionWarnings[] = $name;
+                Log::warning('db', 'session limit not applied', ['statement' => $name]);
             }
         }
     }

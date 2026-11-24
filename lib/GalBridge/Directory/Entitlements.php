@@ -33,6 +33,9 @@ final class Entitlements
     public static function enabledIds(Config $config): array
     {
         $ids = [];
+        if (!$config->switchesValid()) {
+            return $ids; // an ambiguous switch disables every book (and no Viewer is ever resolved)
+        }
         if ($config->bool('galbridge_domain_book')) {
             $ids[] = BookDefinition::DOMAIN;
         }
@@ -50,8 +53,9 @@ final class Entitlements
     public static function books(Viewer $viewer, Config $config, callable $label): array
     {
         $books = [];
-        // global deny-lists that protect every book: malformed = no books at all (fail closed)
-        if ($config->hiddenAddresses() === null || $config->hiddenLocalparts() === null || $config->visibilityColumn() === null) {
+        // settings that protect every book - the hidden lists, the visibility column, every switch:
+        // malformed or ambiguous = no books at all (fail closed)
+        if ($config->booksDisabled()) {
             return [];
         }
 
@@ -60,6 +64,7 @@ final class Entitlements
         $home = [$viewer->home];
         $homeOrg = null;
         foreach ($orgs as $orgLabel => $domains) {
+            $orgLabel = (string) $orgLabel; // PHP turns a numeric label key into an int
             foreach ($domains as $d) {
                 $orgLabels[$d] = $orgLabel;
             }
@@ -84,7 +89,7 @@ final class Entitlements
                 excludeDomains: [],
                 homeDomains: $home,
                 grouping: $grouping,
-                searchonly: self::searchonly($config->get('galbridge_domain_searchonly')),
+                searchonly: $config->searchonly('galbridge_domain_searchonly'),
                 autocomplete: $config->bool('galbridge_domain_autocomplete'),
                 export: $config->bool('galbridge_domain_export'),
                 prefixOnly: false,
@@ -118,7 +123,7 @@ final class Entitlements
                     excludeDomains: $all ? array_values(array_unique(array_merge($dataExclude, $minusHome))) : [],
                     homeDomains: $home,
                     grouping: $grouping === 'auto' ? 'none' : $grouping,
-                    searchonly: self::searchonly($config->get('galbridge_global_searchonly')),
+                    searchonly: $config->searchonly('galbridge_global_searchonly'),
                     autocomplete: $config->bool('galbridge_global_autocomplete'),
                     export: $config->bool('galbridge_global_export'),
                     prefixOnly: true,
@@ -144,13 +149,5 @@ final class Entitlements
         }
         $allow = $config->domainAllowList($option);
         return $allow === ['*'] || in_array($home, $allow, true);
-    }
-
-    private static function searchonly(mixed $value): ?bool
-    {
-        if (is_string($value) && strtolower(trim($value)) === 'auto') {
-            return null;
-        }
-        return (bool) $value;
     }
 }

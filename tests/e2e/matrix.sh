@@ -5,7 +5,12 @@
 # combination below that exists on this machine. Entries starting with / are Roundcube directories
 # (e.g. an unpacked official release tarball), anything else is a version under rc_base_dir.
 #
-#   matrix.sh [rc_base_dir]     (default /opt/rcrun, containing 1.7.7 with vendor/)
+#   matrix.sh [rc_base_dir]     (default /opt/rcrun, containing 1.7.0 and 1.7.7 with vendor/)
+#
+# GAL Bridge supports the whole Roundcube 1.7 branch: the matrix covers its oldest release (1.7.0)
+# and the newest one known to this release of the plugin (1.7.7). After a new 1.7.x release, add its
+# directory and run the suite against it:  matrix.sh  with the entries below changed, or directly
+#   python3 tests/e2e/test_e2e.py --rc /path/to/roundcubemail-1.7.N --php php8.4 --db mysql
 #
 # Requirements: tests/e2e/dovecot.sh install; tests/fixtures/vmail/load.sh mysql|pgsql.
 #
@@ -14,9 +19,14 @@ set -u
 BASE="${1:-/opt/rcrun}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LOG="$HERE/run/matrix-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$LOG"
-# the supported PHP branches tested locally x both iRedMail SQL editions (CI covers 8.1 - 8.5 in PHPUnit)
+# the oldest and the newest release of the supported branch; the supported PHP branches tested
+# locally x both iRedMail SQL editions (CI covers 8.1 - 8.5 in PHPUnit)
 runs=(
   # rc     php     vmail db
+  "1.7.0 php8.1 mysql"
+  "1.7.0 php8.1 pgsql"
+  "1.7.0 php8.4 mysql"
+  "1.7.0 php8.4 pgsql"
   "1.7.7 php8.1 mysql"
   "1.7.7 php8.1 pgsql"
   "1.7.7 php8.4 mysql"

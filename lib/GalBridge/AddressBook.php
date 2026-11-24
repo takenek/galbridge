@@ -27,13 +27,15 @@ use GalBridge\Directory\SearchSpec;
 /**
  * A read-only directory address book (one instance per book and request).
  *
- * Contract notes (Roundcube 1.7.7):
+ * Contract notes (Roundcube 1.7):
  *  - reset() and set_search_set() must declare ': void' (abstract parent); parameters stay untyped;
  *  - primary_key 'ID'; a search on 'ID' / primary_key is a strict ID search (compose-to-selected);
  *  - reset() clears filter and result but keeps the group; set_group(0|''|null) clears the group;
  *  - every method fails closed: on any error an empty result (or null / []) and set_error();
- *  - a recipient set is complete or refused with a visible warning - never a truncated prefix
- *    (core asks for page sizes of 999/9999/99999 for group expansion, export and search lists).
+ *  - a recipient set or an export is complete or refused - never a truncated prefix (core asks for
+ *    page sizes of 999/9999/99999 for group expansion, export and search lists). "Complete" is
+ *    decided by the statement that fetches the set (Repository::fullSet(): the cap plus one row),
+ *    never by a bounded count; a search LIST that is only looked at is capped with a notice.
  */
 final class AddressBook extends \rcube_addressbook
 {
@@ -258,6 +260,7 @@ final class AddressBook extends \rcube_addressbook
             $label = mb_strtolower($g['label']);
             $hit = true;
             foreach ($words as [$word, $wordMode]) {
+                $word = Normalizer::labelWord($word); // labels are display text
                 $hit = $hit && match ($wordMode) {
                     self::SEARCH_STRICT => $label === $word,
                     self::SEARCH_PREFIX => str_starts_with($label, $word) || str_contains($label, ' ' . $word),
@@ -312,9 +315,14 @@ final class AddressBook extends \rcube_addressbook
             $key = $domainGrouping
                 ? substr($address, (int) strrpos($address, '@') + 1)
                 : mb_strtolower(trim((string) ($record['department'] ?? '')));
+            if ($key === '') {
+                return []; // no department: member of no department group
+            }
             foreach ($this->repository->groups() as $g) {
-                // group keys come from SQL LOWER(); compare case-insensitively in PHP as well
-                if ($domainGrouping ? $g['key'] === $key : mb_strtolower($g['key']) === $key) {
+                // A department key is the value as SQL computed it (LOWER(TRIM(department))), the
+                // record carries display text ('&' as U+FF06, collapsed whitespace ...): the key is
+                // compared in that notation, case-insensitively in PHP as well
+                if ($domainGrouping ? $g['key'] === $key : mb_strtolower(Normalizer::displayText($g['key'])) === $key) {
                     return [$g['id'] => $g['label']];
                 }
             }
@@ -330,6 +338,11 @@ final class AddressBook extends \rcube_addressbook
     {
         $first = ($this->list_page - 1) * $this->page_size;
         if ($this->groupKey === false || ($this->filter !== null && !$this->queries->canMatch($this->filter))) {
+            return new \rcube_result_set(0, $first);
+        }
+        if ($this->groupKey !== null && $this->selectedGroup() === null) {
+            // a well-formed id that is not one of this book's groups (also when the book shows no
+            // groups because it has more than galbridge_max_groups): nothing, like any unknown id
             return new \rcube_result_set(0, $first);
         }
         // a full-set request: core asks for 999/9999/99999 rows; compose-to-group and group expansion
@@ -356,12 +369,21 @@ final class AddressBook extends \rcube_addressbook
 
         if ($fullSet && $this->groupKey !== null && $this->filter === null) {
             // compose-to-group, group expansion, group export: all members or nothing
-            $total = $this->groupCount();
-            if ($total > $this->limits->groupCap) {
-                return $this->refuse('grouptoolarge', ['max' => (string) $this->limits->groupCap], 'group_too_large');
-            }
-            $records = $this->page(0, max(1, $total));
-            return $this->resultSet($records, count($records), 0, $subset);
+            $cap = $this->limits->groupCap;
+            $set = $this->groupCount() > $cap ? null : $this->fullSet($cap);
+            return $set === null
+                ? $this->refuse('grouptoolarge', ['max' => (string) $cap], 'group_too_large')
+                : $this->complete($set, $subset);
+        }
+
+        if ($fullSet && $this->filter !== null && $this->action === 'export') {
+            // export of a search result: a download cannot show the "first N matches" notice, so it
+            // is complete or refused like every other export
+            $cap = $this->book->maxResults;
+            $set = $this->repository->count($this->filter, $this->groupKey, $cap + 1) > $cap ? null : $this->fullSet($cap);
+            return $set === null
+                ? $this->refuse('exporttoolarge', ['max' => (string) $cap], 'export_too_large')
+                : $this->complete($set, $subset);
         }
 
         if ($fullSet && $this->filter !== null) {
@@ -380,12 +402,13 @@ final class AddressBook extends \rcube_addressbook
             if (!$this->book->export) {
                 return $this->refuse('exportdisabled', [], 'export_disabled');
             }
-            $total = $this->total();
-            if ($total > $this->limits->maxExport) {
-                return $this->refuse('exporttoolarge', ['max' => (string) $this->limits->maxExport], 'export_too_large');
-            }
-            $records = $this->page(0, max(1, $total));
-            return $this->resultSet($records, count($records), 0, $subset);
+            // counted up to the limit of THIS operation plus one (galbridge_max_count bounds list
+            // totals only), then fetched by one statement that would notice a larger set
+            $cap = $this->limits->maxExport;
+            $set = $this->repository->count(null, null, $cap + 1) > $cap ? null : $this->fullSet($cap);
+            return $set === null
+                ? $this->refuse('exporttoolarge', ['max' => (string) $cap], 'export_too_large')
+                : $this->complete($set, $subset);
         }
 
         if ($first >= $this->limits->maxCount) {
@@ -404,9 +427,41 @@ final class AddressBook extends \rcube_addressbook
         return $this->repository->page($this->filter, $this->groupKey, $this->sortColumn(), (string) $this->sort_order, $offset, $limit);
     }
 
+    /**
+     * The complete current set (filter and group as selected) of at most $cap records, or null.
+     *
+     * @return null|array{0: list<array<string, mixed>>, 1: int}
+     */
+    private function fullSet(int $cap): ?array
+    {
+        return $this->repository->fullSet($this->filter, $this->groupKey, $this->sortColumn(), (string) $this->sort_order, $cap);
+    }
+
+    /**
+     * The result of a full-set request: every record, or a refusal when one of the fetched rows
+     * could not be delivered (the set would silently lack an entry).
+     *
+     * @param array{0: list<array<string, mixed>>, 1: int} $set
+     */
+    private function complete(array $set, int $subset): \rcube_result_set
+    {
+        [$records, $dropped] = $set;
+        if ($dropped > 0) {
+            return $this->refuse('incomplete', [], 'set_incomplete', ['dropped' => $dropped]);
+        }
+        return $this->resultSet($records, count($records), 0, $subset);
+    }
+
+    /**
+     * List total for display, bounded by galbridge_max_count (never used to decide whether a
+     * recipient set or an export is complete).
+     */
     private function total(): int
     {
         if ($this->groupKey === false || ($this->filter !== null && !$this->queries->canMatch($this->filter))) {
+            return 0;
+        }
+        if ($this->groupKey !== null && $this->selectedGroup() === null) {
             return 0;
         }
         if ($this->filter === null && $this->groupKey === null && $this->isSearchOnly()) {
@@ -418,15 +473,23 @@ final class AddressBook extends \rcube_addressbook
         return $this->repository->count($this->filter, $this->groupKey, $this->limits->maxCount);
     }
 
+    /**
+     * The group selected with set_group() when it is one of the groups this book offers (the
+     * request's aggregate), else null: a group id is honoured only for a listed group.
+     *
+     * @return null|array{id: string, kind: string, key: string, label: string, count: int}
+     */
+    private function selectedGroup(): ?array
+    {
+        return is_array($this->groupKey) && is_string($this->group_id) ? $this->repository->group($this->group_id) : null;
+    }
+
+    /**
+     * Members of the selected group: the exact COUNT of the group aggregate (not a bounded count).
+     */
     private function groupCount(): int
     {
-        if (is_array($this->groupKey) && is_string($this->group_id)) {
-            $g = $this->repository->group($this->group_id);
-            if ($g !== null) {
-                return $g['count'];
-            }
-        }
-        return $this->repository->count(null, $this->groupKey, $this->limits->maxCount);
+        return $this->selectedGroup()['count'] ?? 0;
     }
 
     private function isSearchOnly(): bool
@@ -546,11 +609,12 @@ final class AddressBook extends \rcube_addressbook
     }
 
     /**
-     * @param array<string, string> $vars
+     * @param array<string, string>     $vars    variables of the user-visible message
+     * @param array<string, int|string> $context further values for the log line only
      */
-    private function refuse(string $label, array $vars, string $code): \rcube_result_set
+    private function refuse(string $label, array $vars, string $code, array $context = []): \rcube_result_set
     {
-        Log::once('warning', 'limits', $code, 'request refused', ['book' => $this->book->id] + $vars);
+        Log::once('warning', 'limits', $code, 'request refused', ['book' => $this->book->id] + $vars + $context);
         $this->set_error(self::ERROR_SEARCH, 'galbridge.' . $label);
         $this->notice($label, $vars);
         return new \rcube_result_set(0, 0);

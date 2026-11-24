@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
 """
-GAL Bridge - browser (headless Chromium) tests of the Roundcube 1.7.7 UI with the plugin (TEST ONLY).
+GAL Bridge - browser (headless Chromium) tests of the Roundcube 1.7.x UI with the plugin (TEST ONLY).
 
 Covers what the HTTP-level E2E suite cannot: that Roundcube's own JavaScript renders the directory
 (source tree with groups, contact list, contact frame), that the quick search and the compose
 autocomplete widget work with the plugin's IDs, that choosing a department group in compose expands
-it into its members, and that no page raises a JavaScript error.
+it into its members, that a display name stays text in the recipient widget of the Elastic skin
+(which inserts names as HTML), and that no page raises a JavaScript error.
 
 Usage: python3 tests/ui/test_ui.py [--rc /opt/rcrun/1.7.7] [--php php8.4] [--db mysql] [--port 8195]
 Requires: chromium, chromium-driver, python3-selenium, the Dovecot test server (tests/e2e/dovecot.sh)
 and the vmail test database (tests/fixtures/vmail/load.sh). The environment is created with
-tests/e2e/setup.sh and the PHP web server is stopped at the end.
+tests/e2e/setup.sh and the PHP web server is stopped at the end. Case U9 adds rows to the fixture
+through the administrator access of load.sh (tests/e2e/fixture_admin.py) and removes them again; it is
+skipped without that access.
 
 @license GPL-3.0-or-later
 """
 import argparse
 import contextlib
 import os
+import re
 import subprocess
 import sys
 import time
@@ -32,7 +36,15 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN = os.path.dirname(os.path.dirname(HERE))
+sys.path.insert(0, os.path.join(PLUGIN, 'tests', 'e2e'))
+
+import fixture_admin  # noqa: E402
+
 RESULTS = []
+
+
+class Skip(Exception):
+    pass
 
 JAN = 'jan.kowalski@example.com'
 BOB = 'bob@example.org'
@@ -243,8 +255,55 @@ def u7(d):
     check('Sprzedaż' not in groups and 'Sales' in groups, 'groups for bob: %r' % groups)
 
 
-@case('U8 no JavaScript errors on any visited page')
-def u8(d):
+def recipient_boxes(d):
+    """The recipient elements of the Elastic widget: [name text, e-mail text, title attribute]."""
+    return js(d, 'return $("#compose_to .recipient-input li.recipient").map(function(){ return [[$(this).find(".name").text(), '
+                 '$(this).find(".email").text(), $(this).attr("title") || ""]]; }).get();') or []
+
+
+@case('U8 audit U-04: a directory name stays text in the suggestion list and in the recipient widget (Elastic)')
+def u8_names(d):
+    with open(os.path.join(C.run, 'galbridge.inc.php')) as f:
+        dsn = re.search(r"galbridge_db_dsn'\] = '([^']+)'", f.read()).group(1)
+    try:
+        fixture_admin.execute(dsn, ['SELECT 1'])
+    except fixture_admin.Unavailable as e:
+        raise Skip(str(e))
+    login(d, JAN)
+    fixture_admin.execute(dsn, fixture_admin.SPOOF_APPLY)
+    try:
+        # what the widget does with a name it is given: it is inserted as HTML, so a character reference
+        # in a name would be shown decoded (recorded only - the plugin must not depend on the core here)
+        probe = compose_to_input(d)
+        probe.send_keys('"ceo&#64;bank.example" <probe@example.com>,')
+        shown = [b[0] for b in recipient_boxes(d)]
+        print('     (core: a typed name "ceo&#64;bank.example" is shown as %r)' % (shown[0] if shown else None))
+        for address in sorted(fixture_admin.SPOOF_ROWS):
+            inp = compose_to_input(d)
+            inp.send_keys(address.split('@')[0])
+            wait(d, lambda x: any(address in i for i in ksearch_items(x)), timeout=10, msg='no suggestion for %s: %r' % (address, ksearch_items(d)))
+            item = [i for i in ksearch_items(d) if address in i][0]
+            check('ceo@' not in item and '@bank' not in item and item.count('@') == 1, 'suggestion shows another address: %r' % item)
+            inp.send_keys(Keys.ENTER)
+            wait(d, lambda x: address in (js(x, 'return $("#_to").val()') or ''), msg='recipient not inserted: %r' % js(d, 'return $("#_to").val()'))
+            boxes = recipient_boxes(d)
+            check(len(boxes) == 1, 'recipient elements: %r' % boxes)
+            name, mail, title = boxes[0]
+            check('@' not in name and '\uff20' not in name, 'the name of the recipient element looks like an address: %r' % name)
+            # the notation of Normalizer::displayText(): '&' full-width, both delimiters of an encoded word split
+            expected = fixture_admin.SPOOF_ROWS[address].replace('&', '\uff06').replace('=?', '= ?').replace('?=', '? =')
+            # (Roundcube quotes a display name that holds special characters)
+            check(name.strip('"') == expected, 'name shown for %s: %r, expected %r' % (address, name, expected))
+            check(address in mail and address in title, 'the element does not carry the real address: %r' % boxes[0])
+            value = js(d, 'return $("#_to").val()')
+            check(value.count('@') == 1 and address in value, 'To field: %r' % value)
+            check('ceo@bank.example' not in value and '=?' not in value, 'To field carries a decoded or encoded address: %r' % value)
+    finally:
+        fixture_admin.execute(dsn, fixture_admin.SPOOF_REVERT)
+
+
+@case('U9 no JavaScript errors on any visited page')
+def u9(d):
     errs = js_errors(d)
     check(not errs, 'JS errors: %r' % errs)
 
@@ -294,6 +353,8 @@ def main():
                 fn(d)
                 ok += 1
                 print('PASS %s (%.1fs)' % (name, time.time() - t))
+            except Skip as e:
+                print('SKIP %s: %s' % (name, e))
             except Exception as e:  # noqa: BLE001
                 bad += 1
                 print('FAIL %s: %s' % (name, e))

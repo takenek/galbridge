@@ -56,7 +56,7 @@ final class AccessPolicyTest extends TestCase
     protected function setUp(): void
     {
         if (!GALBRIDGE_RC_LOADED) {
-            self::markTestSkipped('needs Roundcube 1.7.7 (GALBRIDGE_RC)');
+            self::markTestSkipped('needs Roundcube 1.7 (GALBRIDGE_RC)');
         }
         $_SESSION = [];
         $GLOBALS['galbridge_test_log'] = [];

@@ -12,8 +12,11 @@ is for development only.
 > that Packagist reports the package as **auto-updated** so later tags are synchronized automatically.
 
 1. **CI is green** on `main` for the commit to be released (`.github/workflows/ci.yml`: PHPUnit on
-   PHP 8.1 – 8.5 against Roundcube 1.7.7 with the SQLite mirror, MariaDB 11.8 and PostgreSQL 17,
-   `php -l`, `composer validate --strict`, `composer audit`, PHPStan, PHP-CS-Fixer).
+   PHP 8.1 – 8.5 against the newest Roundcube 1.7.x and on PHP 8.1 and 8.4 against 1.7.0, each with
+   the SQLite mirror, MariaDB 11.8 and PostgreSQL 17; `php -l`, `composer validate --strict`,
+   `composer audit`, PHPStan, PHP-CS-Fixer; the secret scan of history and tree). Each PHPUnit job
+   records the dependency versions it resolved in its job summary: keep the run of the release
+   commit (its URL goes into the release notes).
 2. **Local verification on the exact release commit**, recorded in `docs/TESTING.md` (versions,
    commands, results). Do not tag while any of them is recorded as not run:
    * the full PHPUnit suite on **all three engines** – reload the throw-away databases first, then
@@ -27,19 +30,23 @@ is for development only.
      vendor/bin/phpunit
      ```
 
+     Run it against the **newest** Roundcube 1.7.x tree and against the **oldest** one
+     (`GALBRIDGE_RC=/opt/rcrun/1.7.0`): the whole branch is supported.
+
      The role the tests connect with is built from `SQL/grants.*.sql` (with the commented-out
      personal-data grant enabled), so a passing run also proves that the shipped grants are
      sufficient. The run includes `tests/Integration/CliToolTest.php`, which applies the output of
      `bin/galbridge.sh grants` to both servers and runs `diag` against good, too broad and too narrow
      roles (with the administrator access of `load.sh`: `MYSQL_ADMIN` / `PSQL_ADMIN` or their
      defaults);
-   * PHPStan against a Roundcube **1.7.7** tree (`/opt/rcrun/1.7.7`, see `phpstan.neon.dist`):
+   * PHPStan against the newest Roundcube **1.7.x** tree (`/opt/rcrun/1.7.7`, see `phpstan.neon.dist`):
      `php -d memory_limit=2G vendor/bin/phpstan analyse -c phpstan.neon.dist`;
    * coding style: `vendor/bin/php-cs-fixer fix --dry-run --diff --config=.php-cs-fixer.dist.php`;
    * `composer validate --strict`;
-   * the end-to-end suite against a real Roundcube 1.7.7 for **both** iRedMail SQL editions and the
-     supported PHP branches: `tests/e2e/matrix.sh` runs PHP 8.1, 8.4 and 8.5 × MariaDB and
-     PostgreSQL and fails when a combination is missing (requirements and the Dovecot test server:
+   * the end-to-end suite against a real Roundcube for **both** iRedMail SQL editions and the
+     supported PHP branches: `tests/e2e/matrix.sh` runs the oldest release (1.7.0; PHP 8.1 and 8.4)
+     and the newest one (PHP 8.1, 8.4 and 8.5), each × MariaDB and PostgreSQL, and fails when a
+     combination is missing (requirements and the Dovecot test server:
      `docs/TESTING.md` and the header of `tests/e2e/test_e2e.py`; a single run:
      `python3 tests/e2e/test_e2e.py --rc /opt/rcrun/1.7.7 --php php8.4 --db mysql --port 8181`);
    * the browser tests of Roundcube's own UI with the plugin (headless Chromium):
@@ -48,14 +55,33 @@ is for development only.
      PostgreSQL 16 or later): no FAIL, and every section runs to its end;
    * `bin/galbridge.sh grants --driver=mysql` and `--driver=pgsql` (also with `--role`, `--db`,
      `--host`, `--account-host` and `--connection-limit`): the output applies cleanly to a fresh
-     iRedMail `vmail` database, applies again when re-run, and the printed DSN connects each time.
+     iRedMail `vmail` database and the printed DSN connects; applied a second time it stops at the
+     existing role and changes nothing; the `--reset-password` output changes the password (its DSN
+     connects, the old one does not); the `--grants-only` output applies without changing it. No
+     output contains the password outside its DSN line. (`CliToolTest` does all of this on both
+     servers; repeat it by hand on a real iRedMail database.)
 3. **Platform check.** Look for a newer Roundcube 1.7.x release (<https://roundcube.net/news/>), a
    new iRedMail release and its `update/<version>/vmail.{mysql,pgsql}` scripts (vmail schema
-   changes), and the PHP supported-versions table. A new supported Roundcube release needs the full
-   verification above before these are changed together: `Tool::SUPPORTED_ROUNDCUBE`
-   (`lib/GalBridge/Cli/Tool.php`), `composer.json` `extra.roundcube.min-version` / `max-version`,
-   the Roundcube pin in `.github/workflows/ci.yml`, README section 1, SECURITY.md "Supported
-   versions". Update `Tool::PHP_SECURITY_EOL` when PHP publishes new dates.
+   changes – in particular of the `forwardings` table, which the view `galbridge_forwardings` reads),
+   and the PHP supported-versions table.
+   * **A new Roundcube 1.7.x release** is supported as soon as it is published – users are told to
+     install it without waiting. CI's daily run tests it on the day Packagist has it; a failure
+     there is a bug to fix in a patch release. Within 14 days of the release, run the local
+     verification above against its tree and raise `Tool::LATEST_KNOWN_ROUNDCUBE`
+     (`lib/GalBridge/Cli/Tool.php`; `diag` warns on older cores) and the newest entries of
+     `tests/e2e/matrix.sh` in the next GAL Bridge release.
+   * **A new minor branch** (1.8) needs the full verification before these are changed together:
+     `Tool::SUPPORTED_BRANCH`, `composer.json` `extra.roundcube.min-version` / `max-version`, the
+     Roundcube constraints in `.github/workflows/ci.yml`, README section 1, SECURITY.md "Supported
+     versions".
+   * Update `Tool::PHP_SECURITY_EOL` when PHP publishes new dates.
+   * **Pins that nothing updates automatically**: the digests of the service images in
+     `.github/workflows/ci.yml` (`docker buildx imagetools inspect mariadb:11.8`, the same for
+     `postgres:17`; change tag comment and digest together) and the gitleaks release with its
+     SHA-256 (from the checksums file of the release). Refresh them at least with every release.
+   * Review the entries of the register in SECURITY.md whose review date has passed, and the
+     advisories of the development dependencies (`composer audit` in CI; raise the lower bounds in
+     `composer.json` when a release with an advisory is still allowed).
 4. **Version bump** in one commit:
    * `galbridge::info()` in `galbridge.php` – `'version' => 'X.Y.Z'`;
    * `CHANGELOG.md`: rename `## [Unreleased]` to `## [X.Y.Z] – YYYY-MM-DD` (semantic versioning; any
@@ -66,14 +92,15 @@ is for development only.
 
    ```sh
    git archive --format=tar HEAD | tar -t | sort > /tmp/galbridge-archive.txt
-   grep -E '^(tests/|\.github/|\.gitattributes|\.gitignore|\.gitguardian\.yaml|\.php-cs-fixer\.dist\.php|phpstan\.neon\.dist|phpunit\.xml\.dist|config\.inc\.php$|composer\.lock|vendor/|tmp/)' /tmp/galbridge-archive.txt && echo 'UNEXPECTED FILES'
+   grep -E '^(tests/|\.github/|\.gitattributes|\.gitignore|\.gitguardian\.yaml|\.gitleaks\.toml|\.php-cs-fixer\.dist\.php|phpstan\.neon\.dist|phpunit\.xml\.dist|config\.inc\.php$|composer\.lock|vendor/|tmp/|STAGE_|FINAL_SECURITY_REPORT|DOSTARCZONE)' /tmp/galbridge-archive.txt && echo 'UNEXPECTED FILES'
    ```
 
    The archive must contain `galbridge.php`, `lib/`, `bin/galbridge.sh`, `SQL/grants.mysql.sql`,
    `SQL/grants.postgres.sql`, `localization/`, `config.inc.php.dist`, `.htaccess`, `composer.json`,
    `LICENSE`, `COPYRIGHT`, `README.md`, `SECURITY.md`, `CHANGELOG.md` and `docs/`, and nothing
    from the test suite (including the TEST-ONLY vmail fixtures and harness credentials), CI
-   configuration, developer tooling or security-audit working documents.
+   configuration, developer tooling or security-audit working documents (those are git-ignored:
+   they are kept outside the repository and never committed).
 6. **Signed annotated tag** on the version-bump commit:
 
    ```sh
@@ -85,7 +112,13 @@ is for development only.
    git tag -s vX.Y.Z -m "GAL Bridge X.Y.Z"
    ```
 
-   Never use a lightweight or unsigned tag for a release.
+   Never use a lightweight or unsigned tag for a release. The public part of the signing key
+   must be registered in the maintainer's GitHub account: the CI job `release` runs for every
+   pushed `v*` tag and fails unless the tag is annotated, GitHub reports its signature as verified,
+   its version equals `galbridge::info()` and a CHANGELOG section, and the archive of the tag holds
+   the plugin without development or audit files. README section 2.1 tells administrators to
+   install only from a tag whose signature they verified – publish the installation instructions
+   of a version only once its tag exists.
 7. **Verify** before publishing: `git tag -v vX.Y.Z` (for SSH signatures configure
    `gpg.ssh.allowedSignersFile`, see section 3), and repeat step 5 on the tag:
    `git archive vX.Y.Z | tar -t`.
@@ -109,8 +142,10 @@ composer require "takenek/galbridge:^X.Y"
 ```
 
 `composer update` then stays within the major version; review CHANGELOG.md before upgrading and run
-`bin/galbridge.sh diag` afterwards. A git installation checks out the tag
-(`git -C plugins/galbridge checkout vX.Y.Z`) after verifying it (section 3).
+`bin/galbridge.sh diag` afterwards. Without Composer, administrators unpack the archive of the
+verified tag into `plugins/galbridge` (README 2.1: `git verify-tag`, then `git archive | tar -x`);
+a git clone inside `plugins/` is not an installation method – it would bring the test suite onto
+the mail server.
 
 ## 3. Verifying a tag signature
 

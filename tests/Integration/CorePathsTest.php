@@ -29,7 +29,7 @@ use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Every Roundcube 1.7.7 core path that reads an address book, replayed exactly as
+ * Every Roundcube 1.7 core path that reads an address book, replayed exactly as
  * program/actions/** call the book: the same method order, page sizes (addressbook_pagesize,
  * autocomplete_max, 9999, 99999, count + 2, max_group_members ?: 999), reset() / set_group(0)
  * sequences, SEARCH_GROUPS in the mode and the required 'email' / 'photo' fields. Where core reads
@@ -65,7 +65,16 @@ final class CorePathsTest extends TestCase
         'first and last name' => '{firstname} {surname}',
         'last and first name with address' => '{surname} {firstname} <{email}>',
         'name and department' => '{name} - {department}',
+        'name and department in brackets' => '{name} ({department})',
+        'name and department in square brackets' => '{name} [{department}]',
+        // text of the entry before its name, and a template without {name}: a foreign entry would be
+        // shown with text of its own domain before the "(domain)" marker, or without the marker
+        'department in square brackets first' => '[{department}] {name}',
+        'first and last name with department' => '{firstname} {surname} ({department})',
     ];
+
+    /** the templates of NAME_TEMPLATES in which {department} stands before {name}, or without it */
+    private const TEXT_BEFORE_NAME = ['department in square brackets first', 'first and last name with department'];
 
     /** @var array<string, mixed> */
     private array $savedGlobals = [];
@@ -154,7 +163,7 @@ final class CorePathsTest extends TestCase
                 return \rcube_db::factory($effective, '', false);
             });
         };
-        $resolver = new ViewerResolver($config, $connect, 1, $login, Env::IMAP_HOST, Env::IMAP_HOST);
+        $resolver = new ViewerResolver($config, $connect, 1, $login, Env::IMAP_HOST, Env::IMAP_HOST, Env::IMAP_PORT);
         return new Factory($config, $resolver, $connect, static fn (string $l): string => $l);
     }
 
@@ -702,13 +711,13 @@ final class CorePathsTest extends TestCase
         // the global book: prefix mode, every word must reach the minimum, never a domain fragment
         $options = ['galbridge_global_book' => true, 'galbridge_global_viewer_domains' => ['*'], 'galbridge_global_data_domains' => ['example.org', 'xn--bcher-kva.example']];
         $global = fn (string $q): array => array_keys(self::autocomplete(self::book($dsn, $options, self::JAN, 'autocomplete', $n, BookDefinition::GLOBAL), BookDefinition::GLOBAL, $q));
-        // format_email_recipient() quotes the marked name: "Bob Smith (example.org)" <bob@example.org>
-        self::assertSame(['"Bob Smith (example.org)" <bob@example.org>'], $global('bob'));
-        self::assertSame(['"Bob Smith (example.org)" <bob@example.org>'], $global('smi'));
+        // format_email_recipient() quotes the marked name: "(example.org) Bob Smith" <bob@example.org>
+        self::assertSame(['"(example.org) Bob Smith" <bob@example.org>'], $global('bob'));
+        self::assertSame(['"(example.org) Bob Smith" <bob@example.org>'], $global('smi'));
         self::assertSame([], $global('mith'), 'prefix mode in the global book');
         self::assertSame([], $global('example'), 'a domain fragment never lists a tenant');
         self::assertSame([], $global('bob s'), 'every word must reach the minimum in the global book');
-        self::assertSame(['"Klaus Müller (xn--bcher-kva.example)" <klaus@xn--bcher-kva.example>'], $global('klaus'));
+        self::assertSame(['"(xn--bcher-kva.example) Klaus Müller" <klaus@xn--bcher-kva.example>'], $global('klaus'));
     }
 
     #[DataProviderExternal(Env::class, 'engines')]
@@ -1113,6 +1122,13 @@ final class CorePathsTest extends TestCase
         $out['contactlist_name_template: first and last name, mode 1'] = [1, 'first and last name'];
         $out['contactlist_name_template: last and first name with address, mode 3'] = [3, 'last and first name with address'];
         $out['contactlist_name_template: name and department, mode 2'] = [2, 'name and department'];
+        $out['contactlist_name_template: name and department in brackets, mode 0'] = [0, 'name and department in brackets'];
+        $out['contactlist_name_template: name and department in brackets, mode 1'] = [1, 'name and department in brackets'];
+        $out['contactlist_name_template: name and department in square brackets, mode 0'] = [0, 'name and department in square brackets'];
+        $out['contactlist_name_template: department in square brackets first, mode 0'] = [0, 'department in square brackets first'];
+        $out['contactlist_name_template: department in square brackets first, mode 2'] = [2, 'department in square brackets first'];
+        $out['contactlist_name_template: first and last name with department, mode 0'] = [0, 'first and last name with department'];
+        $out['contactlist_name_template: first and last name with department, mode 1'] = [1, 'first and last name with department'];
         return $out;
     }
 
@@ -1153,26 +1169,76 @@ final class CorePathsTest extends TestCase
             self::assertStringNotContainsString('@', str_replace($email, '', $name), "{$label}: an at-sign outside the entry's own address");
             if (str_starts_with($label, 'foreign')) {
                 // either marked, or no name at all (the bare address is shown)
-                self::assertTrue(str_contains($name, ' (example.org)') || !preg_match('/Bob|Smith|ceo|Sales/', $name), "{$label}: unmarked foreign name '{$name}'");
+                self::assertTrue(str_starts_with($name, '(example.org) ') || !preg_match('/Bob|Smith|ceo|Sales/', $name), "{$label}: unmarked foreign name '{$name}'");
             }
             // the recipient core builds from it (autocomplete, group-expand)
             $recipient = format_email_recipient($email, $name);
             self::assertStringNotContainsString('@', str_replace($email, '', $recipient), "{$label}: {$recipient}");
         }
 
+        // A foreign entry carries no text that this template shows before its name or without it: the
+        // marker is part of the name. An entry of the viewer's own domain keeps every field.
+        $withheld = RecordMapper::textBeforeName($template);
+        self::assertSame(in_array($templateKey, self::TEXT_BEFORE_NAME, true) ? ['department'] : [], $withheld);
+        self::assertSame($withheld === [], isset($records['foreign']['department']), 'the department of a foreign entry');
+        self::assertSame('Sprzedaż', $records['home']['department'] ?? null);
+        if ($withheld !== []) {
+            self::assertStringNotContainsString('Sales', $names['foreign']);
+        }
+
+        // Names that become an RFC 2047 encoded-word - or an HTML character reference - only once
+        // core has composed the list name: it DELETES empty bracket pairs (with the whitespace before
+        // them) when a template is set, which joins the text on both sides; a text that starts with a
+        // closing bracket pairs with the bracket of the template; and an entry without any name gets
+        // the local part of its address, which may hold '&', '#', '=' and '?'.
+        $word = '?UTF-8?B?Y2VvQGJhbmsuZXhhbXBsZQ==?=';
+        $hostile = [
+            'deleted brackets' => $mapper->person(['username' => 'h1@example.com', 'domain' => 'example.com', 'name' => '=()' . $word, 'first_name' => '=[]' . $word,
+                'last_name' => '= ()?utf-8?q?ceo=40bank.example?=', 'department' => '=([()])' . $word]),
+            'bracket of the template' => $mapper->person(['username' => 'h2@example.com', 'domain' => 'example.com', 'name' => 'Jan =', 'first_name' => 'Jan', 'last_name' => '=',
+                'department' => ')' . $word]),
+            'square bracket of the template' => $mapper->person(['username' => 'h3@example.com', 'domain' => 'example.com', 'name' => $word, 'first_name' => $word, 'last_name' => 'x',
+                'department' => 'Sales =[']),
+            'foreign, deleted brackets' => $mapper->person(['username' => 'h4@example.org', 'domain' => 'example.org', 'name' => '=()' . $word, 'department' => ')' . $word]),
+            'local part as the name: character reference' => $mapper->person(['username' => 'ceo&#64bank.example@example.com', 'domain' => 'example.com', 'name' => '']),
+            'local part as the name: encoded-word' => $mapper->person(['username' => '=?UTF-8?B?Y2Vv?=@example.com', 'domain' => 'example.com', 'name' => '']),
+            'local part as the name, foreign' => $mapper->person(['username' => 'boss&#64bank.example@example.org', 'domain' => 'example.org', 'name' => '"', 'first_name' => '@x']),
+            'list without a name' => $mapper->mailList('l', ['address' => 'all&#64bank.example@example.com', 'domain' => 'example.com', 'name' => '']),
+        ];
+        foreach ($hostile as $label => $record) {
+            self::assertIsArray($record, $label);
+            $email = $record['email:work'][0];
+            $name = \rcube_addressbook::compose_list_name($record);
+            // the entry's own address may appear in a template ({email}) and is what it is
+            $text = str_replace($email, '', $name);
+            $label .= ": {$name}";
+            self::assertStringNotContainsString('=?', $text, $label);
+            self::assertSame($text, \rcube_mime::decode_header($text, 'UTF-8'), $label . ' (decoded as a header)');
+            self::assertStringNotContainsString('&', $text, $label);
+            self::assertSame($text, html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8'), $label . ' (decoded as HTML)');
+            self::assertStringNotContainsString('@', $text, $label);
+            $recipient = format_email_recipient($email, $name);
+            self::assertSame(str_replace($email, '', $recipient), \rcube_mime::decode_header(str_replace($email, '', $recipient), 'UTF-8'), $label);
+            if (str_ends_with($email, '@example.org')) {
+                // marked - or no text of the entry at all (a template of first and last name only:
+                // a foreign entry carries neither, the bare address is shown)
+                self::assertTrue(str_contains($name, '(example.org) ') || trim($text, ' <>()[]-') === '', $label . ': an unmarked foreign name');
+            }
+        }
+
         if ($template === '{name}') {
             $expected = [
-                0 => ['Jan Kowalski', 'Anna Nowak', 'CEO', 'Bob Smith (example.org)', 'Bob (example.org)', 'ceo Smith (example.org)'],
-                1 => ['Jan Kowalski', 'Anna Nowak', 'ceo Smith', 'Bob Smith (example.org)', 'Bob (example.org)', 'ceo Smith (example.org)'],
-                2 => ['Kowalski Jan', 'Nowak Anna', 'Smith ceo', 'Bob Smith (example.org)', 'Bob (example.org)', 'ceo Smith (example.org)'],
-                3 => ['Kowalski, Jan', 'Nowak, Anna', 'Smith, ceo', 'Bob Smith (example.org)', 'Bob (example.org)', 'ceo Smith (example.org)'],
+                0 => ['Jan Kowalski', 'Anna Nowak', 'CEO', '(example.org) Bob Smith', '(example.org) Bob', '(example.org) ceo Smith'],
+                1 => ['Jan Kowalski', 'Anna Nowak', 'ceo Smith', '(example.org) Bob Smith', '(example.org) Bob', '(example.org) ceo Smith'],
+                2 => ['Kowalski Jan', 'Nowak Anna', 'Smith ceo', '(example.org) Bob Smith', '(example.org) Bob', '(example.org) ceo Smith'],
+                3 => ['Kowalski, Jan', 'Nowak, Anna', 'Smith, ceo', '(example.org) Bob Smith', '(example.org) Bob', '(example.org) ceo Smith'],
             ][$mode];
             self::assertSame($expected, array_values($names));
 
             // end to end: autocomplete of the global book from the database
             $options = ['galbridge_global_book' => true, 'galbridge_global_viewer_domains' => ['*'], 'galbridge_global_data_domains' => ['example.org']];
             $book = self::book(Env::sqliteDsn(), $options, self::JAN, 'autocomplete', $n, BookDefinition::GLOBAL);
-            self::assertSame(['"Bob Smith (example.org)" <bob@example.org>'], array_keys(self::autocomplete($book, BookDefinition::GLOBAL, 'bob')));
+            self::assertSame(['"(example.org) Bob Smith" <bob@example.org>'], array_keys(self::autocomplete($book, BookDefinition::GLOBAL, 'bob')));
         }
     }
 
@@ -1203,6 +1269,39 @@ final class CorePathsTest extends TestCase
         );
         $viewer = new Viewer(self::JAN, 'example.com', [self::JAN], ['mailbox' => ['username', 'name', 'domain', 'first_name', 'last_name', 'department']]);
         return new RecordMapper($book, new FieldMap(['name', 'firstname', 'surname', 'email', 'department'], $viewer, false, false), [], []);
+    }
+
+    /**
+     * @return array<string, array{mixed, list<string>}>
+     */
+    public static function nameTemplates(): array
+    {
+        return [
+            'default' => ['{name}', []],
+            'the example of defaults.inc.php' => ['{name} ({organization})', []],
+            'department after the name' => ['{name} - {department}', []],
+            'telephone after the name' => ['{name}, {phone}', []],
+            'literal text before the name' => ['Contact: {name} ({department})', []],
+            'address and organization before the name' => ['{email} {organization}: {name}', []],
+            'department before the name' => ['[{department}] {name}', ['department']],
+            'telephone before the name' => ['{phone} {name}', ['phone:work', 'phone:mobile']],
+            'both before the name' => ['{department} / {phone} / {name} / {department}', ['department', 'phone:work', 'phone:mobile']],
+            'no name: first and last name with department' => ['{firstname} {surname} ({department})', ['department']],
+            'no name: department only' => ['{department}', ['department']],
+            'no name: first and last name only' => ['{firstname} {surname}', []],
+            'no placeholder' => ['Contact', []],
+            'not a string' => [['{department}'], []],
+            'null' => [null, []],
+        ];
+    }
+
+    /**
+     * @param list<string> $expected
+     */
+    #[DataProvider('nameTemplates')]
+    public function testTextThatATemplateShowsBeforeTheNameIsFound(mixed $template, array $expected): void
+    {
+        self::assertSame($expected, RecordMapper::textBeforeName($template));
     }
 
     // ------------------------------------------------------------------ page sizes above max_pagesize

@@ -30,10 +30,10 @@ bound.
 
 | | `sql_global_addressbooks` | GAL Bridge |
 |---|---|---|
-| Data source | a VIEW `global_addressbook` in the **Roundcube** database, read through Roundcube's own connection; MySQL: `DEFINER = root` / `SQL SECURITY DEFINER` over `vmail.mailbox`; PostgreSQL: a `dblink` view whose definition contains `user=vmail password=...` | the `vmail` database directly, through `galbridge_db_dsn` and a dedicated read-only role with column-level grants (README 2.2); no views, `dblink` or `DEFINER` objects |
-| Roundcube 1.7 | does not load: its backend declares `reset()` and `set_search_set()` without the `: void` that Roundcube 1.7 requires (fatal error) | Roundcube 1.7.7 |
+| Data source | a VIEW `global_addressbook` in the **Roundcube** database, read through Roundcube's own connection; MySQL: `DEFINER = root` / `SQL SECURITY DEFINER` over `vmail.mailbox`; PostgreSQL: a `dblink` view whose definition contains `user=vmail password=...` | the `vmail` database directly, through `galbridge_db_dsn` and a dedicated read-only role with column-level grants (README 2.2). No `dblink` and no stored credentials; the only object GAL Bridge adds is one view **inside `vmail`**, `galbridge_forwardings`, which narrows what the role can read (alias and list rows of `forwardings`, never the private forwarding targets) – the opposite of the old view, which widened what Roundcube's role could read |
+| Roundcube 1.7 | does not load: its backend declares `reset()` and `set_search_set()` without the `: void` that Roundcube 1.7 requires (fatal error) | every Roundcube 1.7.x release |
 | Source IDs | `domain`, `global`, and the name of each support book | `galbridge_domain`, `galbridge_global` |
-| Scope of the domain book | the domain part of the login string | `mailbox.domain` of the login's vmail row, or every domain of its organization (`galbridge_organizations`) |
+| Scope of the domain book | the domain part of the login string | `mailbox.domain` of the login's vmail row (which must be the login's own domain), or every domain of its organization (`galbridge_organizations`) |
 | Who is listed | MySQL views: every row of `vmail.mailbox` (no `WHERE`, disabled accounts included); PostgreSQL view: `active = 1` | deliverable entries only (README 3.7), alias accounts and mlmmj lists filtered by `accesspolicy` (README 3.6) |
 | Request parameters | `_source`, `_gid` and `_cid` were trusted (any book, any domain as a group, any ID) | the scope comes from the login and the configuration only (docs/THREAT_MODEL.md) |
 
@@ -56,7 +56,7 @@ bound.
 6. **Remove the old plugin**: `rm -r plugins/sql_global_addressbooks` (its `config.inc.php` goes with
    it).
 
-There is no way back to the old plugin on Roundcube 1.7.7 (step 1 of section 1), so do not keep the
+There is no way back to the old plugin on Roundcube 1.7 (step 1 of section 1), so do not keep the
 old view "just in case".
 
 ## 3. Configuration key map
@@ -136,7 +136,7 @@ Then **treat the `vmail` password as disclosed and rotate it**:
 * **Search starts at two characters** (`galbridge_min_search_length`); compose autocomplete follows.
 * **The global book** is search-only, uses prefix search, shows at most 100 matches, has no groups
   and cannot be exported as a whole by default; entries outside the user's own domain are shown as
-  `Name (domain)` (also in the recipient fields), without a separate first and last name.
+  `(domain) Name` (also in the recipient fields), without a separate first and last name.
 * **Organizations**: users of any domain of an organization see the colleagues of all its domains in
   their domain book.
 * **Exports** of the whole domain book are limited to `galbridge_max_export` (2000) entries. A

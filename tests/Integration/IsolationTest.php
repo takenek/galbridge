@@ -50,7 +50,7 @@ final class IsolationTest extends TestCase
     protected function setUp(): void
     {
         if (!GALBRIDGE_RC_LOADED) {
-            self::markTestSkipped('needs Roundcube 1.7.7 (GALBRIDGE_RC)');
+            self::markTestSkipped('needs Roundcube 1.7 (GALBRIDGE_RC)');
         }
         $_SESSION = [];
         $GLOBALS['galbridge_test_log'] = [];
@@ -776,7 +776,7 @@ final class IsolationTest extends TestCase
             $connects++;
             return $connection ??= new Connection(new Dsn($config->string('galbridge_db_dsn'), $config), 3);
         };
-        return new ViewerResolver($config, $connect, $uid, $login, $host, $host);
+        return new ViewerResolver($config, $connect, $uid, $login, $host, $host, Env::IMAP_PORT);
     }
 
     /**
@@ -799,7 +799,7 @@ final class IsolationTest extends TestCase
                 },
             );
         };
-        $resolver = new ViewerResolver($config, $connect, $uid, self::JAN, $host, $host);
+        $resolver = new ViewerResolver($config, $connect, $uid, self::JAN, $host, $host, Env::IMAP_PORT);
         $notify = static function (string $label, array $vars) use (&$notices): void {
             $notices[] = [$label, $vars];
         };
@@ -831,7 +831,7 @@ final class IsolationTest extends TestCase
                 },
             );
         };
-        $resolver = new ViewerResolver($config, $connect, 1, $login, Env::IMAP_HOST, Env::IMAP_HOST);
+        $resolver = new ViewerResolver($config, $connect, 1, $login, Env::IMAP_HOST, Env::IMAP_HOST, Env::IMAP_PORT);
         return new Factory($config, $resolver, $connect, static fn (string $l): string => $l);
     }
 

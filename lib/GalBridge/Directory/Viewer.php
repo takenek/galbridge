@@ -60,6 +60,9 @@ final class Viewer
             return null;
         }
         $addresses = array_values(array_filter($a['addresses'], 'is_string'));
+        if (!in_array($a['login'], $addresses, true)) {
+            return null; // the address set always holds the login: anything else is not our cache entry
+        }
         $columns = [];
         foreach ($a['columns'] as $t => $cols) {
             if (is_string($t) && is_array($cols)) {

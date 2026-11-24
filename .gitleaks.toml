@@ -1,0 +1,45 @@
+# GAL Bridge - gitleaks configuration (secret scanning, .github/workflows/ci.yml job "security").
+#
+# The default rules of the pinned gitleaks release apply to the whole repository and its history.
+# The only exceptions are the TEST-ONLY files that have to carry credentials of throw-away test
+# environments - the same narrow, named exceptions as in .gitguardian.yaml. Everything else,
+# including the rest of tests/, is scanned. A new harness file with other throw-away credentials
+# must be named here explicitly.
+
+title = "GAL Bridge"
+
+[extend]
+useDefault = true
+
+# TEST-ONLY vmail fixture (upstream schema, seed.sql with canary values such as {SSHA512}SECRET-HASH-1
+# that the suite proves are never readable, load.sh with the password of the throw-away read-only
+# role) and the E2E harness files with the credentials of the throw-away databases and of the
+# Dovecot test mailboxes.
+[[allowlists]]
+description = "TEST-ONLY vmail fixture and E2E harness credentials"
+paths = [
+    '''(^|/)tests/fixtures/vmail/''',
+    '''(^|/)tests/e2e/(setup\.sh|dovecot\.sh|rc\.py)$''',
+]
+
+# Local run directories and tool caches (git-ignored; never part of a checkout).
+[[allowlists]]
+description = "git-ignored run directories and caches"
+paths = [
+    '''(^|/)tests/e2e/run/''',
+    '''(^|/)tmp/phpstan/''',
+    '''(^|/)vendor/''',
+]
+
+# The throw-away values of the CI and local test environments, ignored by value only: the files
+# that mention them (.github/workflows/ci.yml, docs, tests) are still scanned for anything else.
+#   ci-throwaway   administrator password of the CI service containers
+#   testonly-ro    password of the read-only test role (tests/fixtures/vmail/load.sh)
+#   testpass       password of the Dovecot E2E test mailboxes (tests/e2e/dovecot.sh)
+# A regular expression on the WHOLE secret, not a stop word: a stop word matches as a part of any
+# secret, so "testpass" would also excuse a real password that merely contains those letters.
+[[allowlists]]
+description = "throw-away values of the CI and local test environments"
+regexes = [
+    '''^(?:ci-throwaway|testonly-ro|testpass)$''',
+]

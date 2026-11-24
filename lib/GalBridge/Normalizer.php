@@ -43,6 +43,12 @@ final class Normalizer
     public const INVISIBLE = '[\x{061C}\x{180E}\x{200B}-\x{200F}\x{2028}-\x{202E}\x{2060}-\x{206F}\x{FEFF}]';
 
     /**
+     * What an ASCII ampersand becomes in display text: U+FF06 FULLWIDTH AMPERSAND. It keeps "R&D"
+     * readable but can never start an HTML character reference.
+     */
+    public const AMPERSAND = "\u{FF06}";
+
+    /**
      * Normalise a domain: trim, NFC, lower case, IDNA to ASCII, trailing dot removed, validated.
      */
     public static function domain(mixed $value): ?string
@@ -170,6 +176,20 @@ final class Normalizer
      * Text from the directory for display: NFC, control / bidi / zero-width characters, CR/LF and the
      * characters \ " < > removed (they would break or spoof a recipient header), collapsed
      * whitespace, length-capped.
+     *
+     * Two notations that a later consumer would DECODE are neutralised as well, so that the text
+     * checked here (e.g. by containsAt()) is the text a user finally sees:
+     *  - '&' becomes U+FF06: Roundcube's recipient widget (Elastic skin) inserts names as HTML after
+     *    escaping only '<' and '>', so "&#64;" or "&commat;" would be shown as an at-sign;
+     *  - "=?" and "?=" (the delimiters of an RFC 2047 encoded-word) are split: an ASCII name of that
+     *    form would be decoded by the recipients' mail clients into arbitrary text.
+     *
+     * What Roundcube itself DELETES later is deleted here first, because a deletion joins the text on
+     * both sides of it: with a contactlist_name_template other than "{name}", core removes every
+     * empty bracket pair - "()" and "[]", with the whitespace before it - from the composed name
+     * (rcube_addressbook::compose_search_name()), so "=()?" would become "=?" again after the split.
+     * For the same reason a text never starts with a closing or ends with an opening bracket: it
+     * would form such a pair with a bracket of the template ("{name} ({department})").
      */
     public static function displayText(mixed $value, int $max = 128): string
     {
@@ -188,8 +208,24 @@ final class Normalizer
         // Hangul fillers): collapsed like spaces, so padding cannot push text out of view
         $s = (string) preg_replace('/[\p{Z}\x{2800}\x{3164}\x{115F}\x{1160}\x{FFA0}]/u', ' ', $s);
         $s = trim((string) preg_replace('/\s+/u', ' ', $s));
+        if (mb_strlen($s) > 16 * $max) {
+            // nothing that far behind the cap is ever shown; it bounds the work of the loop below for
+            // a value from a column that is not the VARCHAR(255) of the iRedMail schema
+            $s = mb_substr($s, 0, 16 * $max);
+        }
+        // what core deletes later (see above), until nothing is left to delete: "=(())?" as well
+        do {
+            $before = $s;
+            $s = (string) preg_replace('/\s*(?:\(\)|\[\])/u', '', $s);
+            $s = (string) preg_replace('/^[\s)\]]+|[\s(\[]+$/u', '', $s);
+        } while ($s !== $before);
+        // notations decoded later (see above). Every character removed at the top left a space and
+        // the deletions are done, so neither notation can be re-assembled from the pieces around a
+        // removed part
+        $s = str_replace(['&', '=?', '?='], [self::AMPERSAND, '= ?', '? ='], $s);
         if (mb_strlen($s) > $max) {
-            $s = rtrim(mb_substr($s, 0, $max));
+            // cutting the end joins nothing; it can only leave an opening bracket or a space there
+            $s = (string) preg_replace('/[\s(\[]+$/u', '', mb_substr($s, 0, $max));
         }
         return $s;
     }
@@ -201,6 +237,15 @@ final class Normalizer
     public static function containsAt(string $value): bool
     {
         return str_contains($value, '@') || preg_match('/[\x{FF20}\x{FE6B}]/u', $value) === 1;
+    }
+
+    /**
+     * A search word as it has to be compared with display text (labels of groups and
+     * organizations), which went through displayText().
+     */
+    public static function labelWord(string $word): string
+    {
+        return str_replace(['&', '=?', '?='], [self::AMPERSAND, '= ?', '? ='], $word);
     }
 
     /**

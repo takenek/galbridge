@@ -29,6 +29,10 @@ use GalBridge\Normalizer;
  * forwardings / moderators / maillist_owners are only ever used in semi-joins (EXISTS / IN), so
  * result rows are unique by primary key and counts and paging are exact.
  *
+ * "forwardings" is never the iRedMail table itself but the restricted view Schema::FORWARDINGS
+ * (created by the grant templates): it has no row of a private mailbox forwarding, so the role
+ * cannot read forwarding targets at all.
+ *
  * Search input is turned into predicates here (never into SQL text): words are normalised,
  * LIKE-escaped and bound.
  */
@@ -39,6 +43,9 @@ final class QueryBuilder
     public const KIND_LIST = IdCodec::MAILLIST;
 
     private const MAX_WORDS = 5;
+
+    /** per-user alias rows f joined with the domain fd of the alias ADDRESS */
+    private const USER_ALIAS_FROM = '`' . Schema::FORWARDINGS . '` f JOIN `domain` fd ON fd.`domain` = f.`domain`';
 
     /**
      * @param list<string> $hiddenAddresses
@@ -75,6 +82,9 @@ final class QueryBuilder
         $visibility = $config->visibilityColumn();
         if ($hidden === null || $localparts === null || $visibility === null) {
             throw new GalBridgeException('config_invalid', 'malformed deny-list or visibility column');
+        }
+        if ($config->booksDisabled()) {
+            throw new GalBridgeException('config_invalid', 'ambiguous switch: every book is disabled');
         }
         return new self(
             driver: $driver,
@@ -117,16 +127,20 @@ final class QueryBuilder
 
     /**
      * Entity kinds this book contains (persons always; aliases/lists when enabled and readable).
+     * With galbridge_hide_expired the "expired" column of the kind is needed as well: without it an
+     * expired alias account or list could not be told from a valid one, so the whole kind is left
+     * out (fail closed) instead of being listed unfiltered.
      *
      * @return list<string>
      */
     public function kinds(): array
     {
         $kinds = [self::KIND_PERSON];
-        if ($this->includeAliases && $this->hasAll('forwardings', ['is_list']) && $this->hasAll('alias', ['address', 'name', 'accesspolicy', 'domain', 'active'])) {
+        $columns = ['address', 'name', 'accesspolicy', 'domain', 'active', ...($this->hideExpired ? ['expired'] : [])];
+        if ($this->includeAliases && $this->hasAll(Schema::FORWARDINGS, ['address', 'is_list', 'active']) && $this->hasAll('alias', $columns)) {
             $kinds[] = self::KIND_ALIAS;
         }
-        if ($this->includeLists && $this->hasAll('forwardings', ['is_maillist']) && $this->hasAll('maillists', ['address', 'name', 'accesspolicy', 'domain', 'active'])) {
+        if ($this->includeLists && $this->hasAll(Schema::FORWARDINGS, ['address', 'is_maillist', 'active']) && $this->hasAll('maillists', $columns)) {
             $kinds[] = self::KIND_LIST;
         }
         return $kinds;
@@ -179,11 +193,10 @@ final class QueryBuilder
             Sql::raw('a.active = 1 AND d.active = 1 AND d.backupmx = 0'),
         ];
         if ($this->hideExpired) {
-            $parts[] = $this->viewer->hasColumn('alias', 'expired')
-                ? Sql::raw('a.expired > ? AND d.expired > ?', [$this->now, $this->now])
-                : Sql::raw('d.expired > ?', [$this->now]);
+            // kinds() lists alias accounts only when a.expired is readable
+            $parts[] = Sql::raw('a.expired > ? AND d.expired > ?', [$this->now, $this->now]);
         }
-        $parts[] = Sql::exists('SELECT 1 FROM `forwardings` f WHERE f.address = a.address AND f.is_list = 1 AND f.active = 1');
+        $parts[] = Sql::exists('SELECT 1 FROM `' . Schema::FORWARDINGS . '` f WHERE f.address = a.address AND f.is_list = 1 AND f.active = 1');
         $parts[] = (new AccessPolicy($this->listPolicy, $this->viewer))->alias();
         $parts[] = $this->hidden('a.address');
         return Sql::and(...$parts);
@@ -196,11 +209,10 @@ final class QueryBuilder
             Sql::raw('ml.active = 1 AND d.active = 1 AND d.backupmx = 0'),
         ];
         if ($this->hideExpired) {
-            $parts[] = $this->viewer->hasColumn('maillists', 'expired')
-                ? Sql::raw('ml.expired > ? AND d.expired > ?', [$this->now, $this->now])
-                : Sql::raw('d.expired > ?', [$this->now]);
+            // kinds() lists mailing lists only when ml.expired is readable
+            $parts[] = Sql::raw('ml.expired > ? AND d.expired > ?', [$this->now, $this->now]);
         }
-        $parts[] = Sql::exists('SELECT 1 FROM `forwardings` f WHERE f.address = ml.address AND f.is_maillist = 1 AND f.active = 1');
+        $parts[] = Sql::exists('SELECT 1 FROM `' . Schema::FORWARDINGS . '` f WHERE f.address = ml.address AND f.is_maillist = 1 AND f.active = 1');
         $parts[] = (new AccessPolicy($this->listPolicy, $this->viewer))->mailingList();
         $parts[] = $this->hidden('ml.address');
         return Sql::and(...$parts);
@@ -219,6 +231,28 @@ final class QueryBuilder
         foreach ($this->hiddenLocalparts as $lp) {
             $parts[] = Sql::not(Sql::like($this->driver, $addressColumn, Sql::escapeLike($lp) . '@%'));
         }
+        return Sql::and(...$parts);
+    }
+
+    /**
+     * The ONE predicate for per-user alias addresses (USER_ALIAS_FROM). An alias is shown next to its
+     * owner and matched by e-mail searches under exactly the same conditions: an active alias row
+     * that belongs to an active (and unexpired) non-backup-MX domain inside the data scope of the
+     * book, and whose address is on neither hidden list. A hidden alias - or a row of a domain this
+     * book does not cover - is therefore neither listed nor usable as a search oracle for its owner.
+     *
+     * "Belongs to" is forwardings.domain: iRedAdmin stores the owner's primary domain there, also
+     * for an address in an alias domain (jan@example.net of example.com), which has no row in the
+     * domain table of its own.
+     */
+    private function userAliasRoot(): Sql
+    {
+        $parts = [Sql::raw('f.is_alias = 1 AND f.active = 1 AND fd.active = 1 AND fd.backupmx = 0')];
+        if ($this->hideExpired) {
+            $parts[] = Sql::raw('fd.expired > ?', [$this->now]);
+        }
+        $parts[] = $this->scope('f');
+        $parts[] = $this->hidden('f.address');
         return Sql::and(...$parts);
     }
 
@@ -454,10 +488,10 @@ final class QueryBuilder
         };
         $parts = [Sql::like($this->driver, $col, $pattern)];
         if ($kind === self::KIND_PERSON && $this->fields->userAliases()) {
-            $parts[] = Sql::raw(
-                'm.username IN (SELECT f.forwarding FROM `forwardings` f WHERE f.is_alias = 1 AND f.active = 1 AND f.address ' . ($this->driver === 'pgsql' ? 'ILIKE' : 'LIKE') . " ? ESCAPE '!')",
-                [$pattern],
-            );
+            // the same visibility predicate as for showing the alias: a search must never match
+            // an alias that is not displayed
+            $alias = Sql::and($this->userAliasRoot(), Sql::like($this->driver, 'f.address', $pattern));
+            $parts[] = Sql::raw('m.username IN (SELECT f.forwarding FROM ' . self::USER_ALIAS_FROM . ' WHERE ' . $alias->sql . ')', $alias->params);
         }
         return Sql::or(...$parts);
     }
@@ -470,8 +504,11 @@ final class QueryBuilder
         if ($this->book->prefixOnly) {
             $mode = \rcube_addressbook::SEARCH_STRICT;
         }
+        // labels went through Normalizer::displayText(): compare the word in the same notation
+        $word = Normalizer::labelWord($word);
         foreach ($this->book->orgLabels as $domain => $label) {
-            $l = mb_strtolower($label);
+            $domain = (string) $domain;
+            $l = mb_strtolower((string) $label);
             $hit = match ($mode) {
                 \rcube_addressbook::SEARCH_STRICT => $l === $word,
                 \rcube_addressbook::SEARCH_PREFIX => str_starts_with($l, $word) || str_contains($l, ' ' . $word),
@@ -591,7 +628,7 @@ final class QueryBuilder
     }
 
     /**
-     * Per-user alias addresses of the given (already visible) persons.
+     * Per-user alias addresses of the given (already visible) persons, under userAliasRoot().
      *
      * @param list<string> $usernames
      *
@@ -599,8 +636,8 @@ final class QueryBuilder
      */
     public function userAliasesQuery(array $usernames): array
     {
-        $where = Sql::and(Sql::raw('f.is_alias = 1 AND f.active = 1 AND fd.active = 1 AND fd.backupmx = 0'), Sql::in('f.forwarding', $usernames));
-        return ['SELECT f.forwarding, f.address FROM `forwardings` f JOIN `domain` fd ON fd.`domain` = f.`domain` WHERE ' . $where->sql . ' ORDER BY f.address', $where->params];
+        $where = Sql::and($this->userAliasRoot(), Sql::in('f.forwarding', $usernames));
+        return ['SELECT f.forwarding, f.address, f.`domain` FROM ' . self::USER_ALIAS_FROM . ' WHERE ' . $where->sql . ' ORDER BY f.forwarding, f.address', $where->params];
     }
 
     /**

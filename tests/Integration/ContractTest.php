@@ -30,7 +30,7 @@ use PHPUnit\Framework\Attributes\DataProviderExternal;
 use PHPUnit\Framework\TestCase;
 
 /**
- * The rcube_addressbook contract of Roundcube 1.7.7, method by method, against the production
+ * The rcube_addressbook contract of Roundcube 1.7, method by method, against the production
  * wiring (Config -> ViewerResolver -> Factory -> AddressBook) on every engine (SQLite mirror,
  * MariaDB/MySQL and PostgreSQL with the role built from SQL/grants.*.sql).
  *
@@ -109,7 +109,7 @@ final class ContractTest extends TestCase
                 return \rcube_db::factory($effective, '', false);
             });
         };
-        $resolver = new ViewerResolver($config, $connect, 1, $login, Env::IMAP_HOST, Env::IMAP_HOST);
+        $resolver = new ViewerResolver($config, $connect, 1, $login, Env::IMAP_HOST, Env::IMAP_HOST, Env::IMAP_PORT);
         return new Factory($config, $resolver, $connect, static fn (string $l): string => $l);
     }
 
@@ -1277,9 +1277,9 @@ final class ContractTest extends TestCase
         $alias = $mapper->mailList(IdCodec::ALIAS, ['address' => 'team@example.com', 'name' => "Board\u{FF20}bank.example", 'domain' => 'example.com']);
         self::assertSame('Board', $alias['name'] ?? null);
         $list = $mapper->mailList(IdCodec::MAILLIST, ['address' => 'orgteam@example.org', 'name' => 'ceo@bank.example' . str_repeat("\u{2800}", 80), 'domain' => 'example.org']);
-        self::assertSame('ceo (example.org)', $list['name'] ?? null);
+        self::assertSame('(example.org) ceo', $list['name'] ?? null);
         $unnamed = $mapper->mailList(IdCodec::MAILLIST, ['address' => 'orgteam@example.org', 'name' => "\u{FE6B}", 'domain' => 'example.org']);
-        self::assertSame('orgteam (example.org)', $unnamed['name'] ?? null);
+        self::assertSame('(example.org) orgteam', $unnamed['name'] ?? null);
         foreach ([$alias, $list, $unnamed] as $record) {
             self::assertArrayNotHasKey('firstname', $record);
             self::assertArrayNotHasKey('surname', $record);
@@ -1297,18 +1297,18 @@ final class ContractTest extends TestCase
         $bob = ['username' => 'bob@example.org', 'domain' => 'example.org', 'first_name' => 'Bob', 'last_name' => 'Smith'];
 
         $record = $mapper->person($bob + ['name' => 'Bob Smith']);
-        self::assertSame('Bob Smith (example.org)', $record['name'] ?? null);
+        self::assertSame('(example.org) Bob Smith', $record['name'] ?? null);
         self::assertArrayNotHasKey('firstname', (array) $record);
         self::assertArrayNotHasKey('surname', (array) $record);
 
         // composed from first + last name, then marked
-        self::assertSame('Bob Smith (example.org)', $mapper->person($bob + ['name' => ''])['name'] ?? null);
+        self::assertSame('(example.org) Bob Smith', $mapper->person($bob + ['name' => ''])['name'] ?? null);
         // padding cannot push the marker out of view
         foreach (["\u{2800}", "\u{3164}", "\u{FFA0}", "\u{00A0}", "\u{3000}", "\u{00AD}", "\u{E0020}"] as $pad) {
-            self::assertSame('Bob (example.org)', $mapper->person($bob + ['name' => 'Bob' . str_repeat($pad, 200)])['name'] ?? null, sprintf('U+%04X', mb_ord($pad)));
+            self::assertSame('(example.org) Bob', $mapper->person($bob + ['name' => 'Bob' . str_repeat($pad, 200)])['name'] ?? null, sprintf('U+%04X', mb_ord($pad)));
         }
         // an at-sign in a foreign first name still cannot reach the composed name
-        self::assertSame('evil Smith (example.org)', $mapper->person(['first_name' => "evil\u{FF20}bank.example"] + $bob + ['name' => ''])['name'] ?? null);
+        self::assertSame('(example.org) evil Smith', $mapper->person(['first_name' => "evil\u{FF20}bank.example"] + $bob + ['name' => ''])['name'] ?? null);
 
         // the viewer's own domain: not foreign, first/last name kept, no marker
         $jan = $mapper->person(['username' => self::JAN, 'domain' => 'example.com', 'name' => 'Jan Kowalski', 'first_name' => 'Jan', 'last_name' => 'Kowalski']);
@@ -1330,7 +1330,7 @@ final class ContractTest extends TestCase
         $book->set_pagesize(50);
         $bob = self::records($book->search('*', 'bob'));
         self::assertCount(1, $bob);
-        self::assertSame('Bob Smith (example.org)', $bob[0]['name']);
+        self::assertSame('(example.org) Bob Smith', $bob[0]['name']);
         self::assertArrayNotHasKey('firstname', $bob[0]);
         self::assertArrayNotHasKey('surname', $bob[0]);
         self::assertSame($bob[0], $book->get_record($bob[0]['ID'], true), 'get_record gives the same shape');
@@ -1338,7 +1338,7 @@ final class ContractTest extends TestCase
         self::assertSame('Jan Kowalski', $jan[0]['name'] ?? null);
         self::assertSame('Jan', $jan[0]['firstname'] ?? null);
         self::assertSame('Kowalski', $jan[0]['surname'] ?? null);
-        self::assertSame('Org Team (example.org)', self::records($book->search('*', 'org team'))[0]['name'] ?? null);
+        self::assertSame('(example.org) Org Team', self::records($book->search('*', 'org team'))[0]['name'] ?? null);
     }
 
     // ------------------------------------------------------------------ row re-check log codes
@@ -1554,7 +1554,7 @@ final class ContractTest extends TestCase
         $connect = static function () use ($config, &$connection): Connection {
             return $connection ??= new Connection(new Dsn($config->string('galbridge_db_dsn'), $config), 3);
         };
-        $resolver = new ViewerResolver($config, $connect, 1, $login, Env::IMAP_HOST, Env::IMAP_HOST);
+        $resolver = new ViewerResolver($config, $connect, 1, $login, Env::IMAP_HOST, Env::IMAP_HOST, Env::IMAP_PORT);
         return new Factory($config, $resolver, $connect, static fn (string $l): string => $l);
     }
 }

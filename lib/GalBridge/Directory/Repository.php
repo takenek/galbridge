@@ -24,12 +24,27 @@ use GalBridge\Normalizer;
 /**
  * Executes QueryBuilder statements and maps the rows. Keeps a per-request memo of the book's groups
  * (one aggregate query answers list_groups, get_group and the group counts core asks for).
+ *
+ * Before its first statement it asks the guard whether the session may still read the directory
+ * (ViewerResolver::confirm()): a cached entitlement is confirmed by every request that reads
+ * directory data, but never by a request that only instantiates the book.
  */
 final class Repository
 {
+    /** per-user alias addresses shown for one person ("other" e-mail addresses) */
+    public const ALIASES_PER_PERSON = 20;
+
+    /** statements spent on the per-user aliases of one page (see userAliases()) */
+    public const ALIAS_PASSES = 4;
+
     /** @var null|list<array{id: string, kind: string, key: string, label: string, count: int}> */
     private ?array $groups = null;
 
+    private bool $confirmed = false;
+
+    /**
+     * @param null|\Closure(): bool $guard may this session (still) read the directory?
+     */
     public function __construct(
         private readonly Connection $connection,
         private readonly QueryBuilder $queries,
@@ -37,6 +52,7 @@ final class Repository
         private readonly FieldMap $fields,
         private readonly string $grouping,
         private readonly int $maxGroups,
+        private readonly ?\Closure $guard = null,
     ) {
     }
 
@@ -56,9 +72,36 @@ final class Repository
      */
     public function page(?SearchSpec $spec, null|false|array $group, string $sortCol, string $order, int $offset, int $limit): array
     {
+        $this->guard();
         [$sql, $params] = $this->queries->pageQuery($spec, $group, $sortCol, $order);
         $rows = $this->connection->select($sql, $params, $offset, $limit);
         return $this->records($rows);
+    }
+
+    /**
+     * A COMPLETE set of at most $cap records (a recipient set, an export), or null when the set is
+     * larger. ONE statement fetches up to $cap + 1 rows, so the answer depends neither on a bounded
+     * count nor on a count taken by an earlier statement (rows added in between cannot be cut off).
+     *
+     * @param null|false|array{kind: string, key: string} $group
+     *
+     * @return null|array{0: list<array<string, mixed>>, 1: int} the records, and how many fetched rows
+     *                                                          could not be delivered (dropped by the
+     *                                                          row re-check or gone before their
+     *                                                          details were read): 0 = complete
+     *
+     * @throws GalBridgeException
+     */
+    public function fullSet(?SearchSpec $spec, null|false|array $group, string $sortCol, string $order, int $cap): ?array
+    {
+        $this->guard();
+        [$sql, $params] = $this->queries->pageQuery($spec, $group, $sortCol, $order);
+        $rows = $this->connection->select($sql, $params, 0, $cap + 1);
+        if (count($rows) > $cap) {
+            return null;
+        }
+        $records = $this->records($rows);
+        return [$records, count($rows) - count($records)];
     }
 
     /**
@@ -68,6 +111,7 @@ final class Repository
      */
     public function count(?SearchSpec $spec, null|false|array $group, int $bound): int
     {
+        $this->guard();
         [$sql, $params] = $this->queries->countQuery($spec, $group, $bound);
         $rows = $this->connection->select($sql, $params);
         return (int) ($rows[0]['n'] ?? 0);
@@ -86,6 +130,7 @@ final class Repository
         if ($this->groups !== null) {
             return $this->groups;
         }
+        $this->guard();
         $query = $this->queries->groupsQuery($this->grouping);
         if ($query === null) {
             return $this->groups = [];
@@ -135,6 +180,91 @@ final class Repository
     }
 
     /**
+     * @throws GalBridgeException 'no_mailbox' when the session may no longer read the directory
+     */
+    private function guard(): void
+    {
+        if ($this->confirmed || $this->guard === null) {
+            return;
+        }
+        if (!($this->guard)()) {
+            throw new GalBridgeException('no_mailbox', 'the mailbox of this session is no longer usable');
+        }
+        $this->confirmed = true;
+    }
+
+    /**
+     * The per-user aliases shown for the persons of a page: at most ALIASES_PER_PERSON per person
+     * (the first ones in address order), read with bounded statements.
+     *
+     * A statement returns the rows ordered by owner and address and at most ALIASES_PER_PERSON rows
+     * per owner asked for (plus one). When that limit cuts the result - somebody has far more aliases
+     * than are shown - the owners it did not reach are asked for again, so one person with thousands
+     * of aliases cannot take the aliases of everybody else on the page away. Every statement settles
+     * at least one owner; after ALIAS_PASSES statements the rest is shown without aliases.
+     *
+     * @param list<string> $owners mailbox addresses of the page
+     *
+     * @return array<string, list<string>> owner => alias addresses
+     *
+     * @throws GalBridgeException
+     */
+    private function userAliases(array $owners): array
+    {
+        $book = $this->queries->book();
+        $aliases = [];
+        $capped = false;
+        $pending = array_values(array_unique($owners));
+        for ($pass = 0; $pending !== []; $pass++) {
+            if ($pass === self::ALIAS_PASSES) {
+                Log::once('warning', 'records', 'aliases_skipped', 'per-user aliases are not shown for some entries of this page (too many aliases)', ['book' => $book->id]);
+                break;
+            }
+            $limit = self::ALIASES_PER_PERSON * count($pending);
+            [$sql, $params] = $this->queries->userAliasesQuery($pending);
+            $rows = $this->connection->select($sql, $params, 0, $limit + 1);
+            $seen = [];
+            $last = null;
+            foreach ($rows as $r) {
+                $owner = (string) $r['forwarding'];
+                $seen[$owner] = ($seen[$owner] ?? 0) + 1;
+                $last = $owner;
+                if ($seen[$owner] > self::ALIASES_PER_PERSON) {
+                    $capped = true;
+                    continue;
+                }
+                // re-check of the row's domain against the book (defence in depth, as for records)
+                $domain = Normalizer::domain($r['domain'] ?? null);
+                if ($domain === null || !$book->inScope($domain)) {
+                    Log::once('error', 'scope', 'row_out_of_scope', 'row outside the book scope dropped (please report)', ['book' => $book->id]);
+                    continue;
+                }
+                $aliases[$owner][] = (string) $r['address'];
+            }
+            if (count($rows) <= $limit) {
+                break; // every row of the owners asked for was read
+            }
+            // cut by the limit: an owner without a row may only have been pushed out of the result,
+            // and the owner of the last row may lack rows
+            $capped = true;
+            $next = [];
+            foreach ($pending as $owner) {
+                if (!isset($seen[$owner])) {
+                    $next[] = $owner;
+                } elseif ($owner === $last && $seen[$owner] < self::ALIASES_PER_PERSON) {
+                    unset($aliases[$owner]);
+                    $next[] = $owner;
+                }
+            }
+            $pending = $next;
+        }
+        if ($capped) {
+            Log::once('warning', 'records', 'aliases_capped', 'more per-user aliases than shown', ['book' => $book->id, 'max' => self::ALIASES_PER_PERSON]);
+        }
+        return $aliases;
+    }
+
+    /**
      * Map (kind, address) rows to full records, preserving their order.
      *
      * @param list<array<string, ?string>> $rows
@@ -157,13 +287,7 @@ final class Repository
         $details = [];
         if (!empty($byKind[QueryBuilder::KIND_PERSON])) {
             $addresses = $byKind[QueryBuilder::KIND_PERSON];
-            $aliases = [];
-            if ($this->fields->userAliases()) {
-                [$sql, $params] = $this->queries->userAliasesQuery($addresses);
-                foreach ($this->connection->select($sql, $params) as $r) {
-                    $aliases[(string) $r['forwarding']][] = (string) $r['address'];
-                }
-            }
+            $aliases = $this->fields->userAliases() ? $this->userAliases($addresses) : [];
             [$sql, $params] = $this->queries->personDetailsQuery($addresses);
             foreach ($this->connection->select($sql, $params) as $r) {
                 $u = (string) $r['username'];

@@ -11,7 +11,7 @@ declare(strict_types=1);
  *
  * GAL Bridge - Global Address List for Roundcube
  *
- * Read-only domain and global address books and groups for Roundcube 1.7.7, read from the SQL
+ * Read-only domain and global address books and groups for Roundcube 1.7, read from the SQL
  * (vmail) database of iRedMail 1.8 (MySQL/MariaDB and PostgreSQL editions).
  *
  * @author    Marek Królikowski (TaKeN)
@@ -44,11 +44,18 @@ class galbridge extends rcube_plugin
 
     private ?Connection $connection = null;
 
+    /** the warnings of the DSN policy were written to the log in this request */
+    private bool $dsnWarned = false;
+
     /** a GAL Bridge book refused the current export (a download cannot carry a message) */
     private bool $exportRefused = false;
 
-    /** refusal labels that can occur during contacts/export */
-    private const EXPORT_REFUSALS = ['exportdisabled', 'exporttoolarge', 'grouptoolarge', 'toomanyids'];
+    /**
+     * Messages that mean "this export is not complete": limits, an unreadable entry and an
+     * unavailable directory. An export is a download and cannot show any of them, so the
+     * addressbook_export hook answers 204 instead of delivering a file that silently lacks entries.
+     */
+    private const EXPORT_REFUSALS = ['exportdisabled', 'exporttoolarge', 'grouptoolarge', 'toomanyids', 'incomplete', 'unavailable'];
 
     #[\Override]
     public function init(): void
@@ -88,7 +95,7 @@ class galbridge extends rcube_plugin
         return [
             'name' => 'GAL Bridge',
             'vendor' => 'TaKeN.PL Usługi Informatyczne Marek Królikowski',
-            'version' => '1.0.0',
+            'version' => '1.0.1',
             'license' => 'GPL-3.0-or-later',
             'uri' => 'https://github.com/takenek/galbridge',
         ];
@@ -180,8 +187,14 @@ class galbridge extends rcube_plugin
                     (string) $config->adminCore('db_dsnw', ''),
                     $config->passwordPluginDsn(),
                 );
-                foreach ($dsn->warnings() as $w) {
-                    Log::once('warning', 'db', 'dsn_warning', $w);
+                if (!$this->dsnWarned) {
+                    // EVERY warning has to reach the log of the web process (diag runs in another
+                    // environment) - each on a line of its own, once per request. Log::once() would
+                    // write the first one only: it knows a reason code, not its text.
+                    $this->dsnWarned = true;
+                    foreach ($dsn->warnings() as $w) {
+                        Log::warning('db', 'dsn_warning: ' . $w);
+                    }
                 }
                 $this->connection = new Connection($dsn, $config->int('galbridge_db_timeout', 1, 30));
             }
@@ -194,6 +207,7 @@ class galbridge extends rcube_plugin
             (string) $user->get_username(),
             (string) ($user->data['mail_host'] ?? ''),
             (string) ($_SESSION['storage_host'] ?? ''),
+            (int) ($_SESSION['storage_port'] ?? 0),
         );
         $rc = $this->rc;
         $notify = function (string $label, array $vars) use ($rc): void {

@@ -1,29 +1,46 @@
 # GAL Bridge - continuous integration.
 #
-# Deliberate choices, so that a later audit does not re-report them:
+# Design notes (the decisions behind them, their owner and review date: SECURITY.md, section
+# "Accepted risks and design decisions"):
 # - third-party actions are pinned to full commit SHAs (tag in the comment); update both together
 #   (Dependabot does, .github/dependabot.yml);
 # - read-only token (permissions: contents: read), no secrets, no pull_request_target: untrusted
 #   pull requests run with the same minimal rights as pushes;
 # - composer.lock is git-ignored (a plugin, not an application), so every PHP version resolves its
-#   own dependency set - exactly what an installation on that PHP version gets;
-# - Roundcube is not a runtime dependency of the plugin; the copy that roundcube/plugin-installer
-#   pulls into vendor/ is pinned to 1.7.7, the only supported core ("composer require --no-update"
-#   edits composer.json on the runner only, after "composer validate"), and assembled into the
-#   directory GALBRIDGE_RC expects (docs/TESTING.md). A security advisory against the pinned core
-#   fails the run on purpose: move the pin and composer.json "min-version" together;
+#   own dependency set - what an installation on that PHP version gets. Every job writes the set it
+#   resolved (package versions and the SHA-256 of the generated composer.lock) to its job summary
+#   and "composer audit" checks it, so a run can be reproduced and reviewed afterwards;
+# - Roundcube is not a runtime dependency of the plugin. GAL Bridge supports the whole 1.7 branch,
+#   so the suite runs against the OLDEST release (1.7.0) and against the NEWEST 1.7.x that
+#   Packagist has on the day of the run (constraint "~1.7.0"; "composer require --no-update" edits
+#   composer.json on the runner only, after "composer validate"). The daily run therefore tests a
+#   new patch release of the core without any change here. The advisory check is made with the
+#   newest core - a security advisory against it fails the run on purpose; the 1.7.0 leg proves
+#   compatibility only (its core has known advisories, which is why nobody should run it).
+#   Composer (2.9 and later) by itself leaves releases with a security advisory out of the
+#   dependency resolution: the pinned 1.7.0 would then not install at all, and for "~1.7.0" an
+#   older release would silently replace a newest one that has an advisory. COMPOSER_NO_BLOCKING
+#   switches that off - the jobs install exactly what they ask for, and it is "composer audit"
+#   that reports advisories;
 # - MariaDB 11.8 and PostgreSQL 17 are throw-away service containers on the job's ephemeral runner
-#   and hold only the TEST-ONLY fixture (tests/fixtures/vmail). "ci-throwaway" is their
-#   administrator password (named in .gitguardian.yaml); the read-only role the tests connect with
-#   is created by load.sh from the plugin's own SQL/grants.*.sql, so every run proves that the
+#   and hold only the TEST-ONLY fixture (tests/fixtures/vmail). They are pinned by digest: refresh
+#   tag and digest together (docs/RELEASING.md). "ci-throwaway" is their administrator password
+#   (named in .gitleaks.toml and .gitguardian.yaml); the read-only role the tests connect with is
+#   created by load.sh from the plugin's own SQL/grants.*.sql, so every run proves that the
 #   documented grants are sufficient. The fixture is loaded with the client inside each container
-#   (docker exec): client and server versions always match and nothing depends on the database
-#   clients of the runner image. The images use their official version tags (test data only).
+#   (docker exec): client and server versions always match;
+# - job "security": the history and the tree are scanned for secrets with a gitleaks release that
+#   is verified by its SHA-256 before it runs (.gitleaks.toml). The static security checks of the
+#   production code (no process execution, dynamic code, deserialisation or file writes; SQL in one
+#   class) are part of the PHPUnit suite (tests/Unit/SourceGuardTest.php) and so run in every leg;
+# - job "release" (tags only): the tag must be annotated and carry a signature that GitHub verifies,
+#   and its version must be the one in galbridge.php and CHANGELOG.md (docs/RELEASING.md).
 name: CI
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
   # Recheck resolved dependencies daily, even without source changes (05:23 UTC).
@@ -42,18 +59,32 @@ defaults:
   run:
     shell: bash
 
+env:
+  # install what is asked for; advisories are reported by "composer audit" (see the notes above)
+  COMPOSER_NO_BLOCKING: '1'
+
 jobs:
   tests:
-    name: PHPUnit (PHP ${{ matrix.php }})
+    name: PHPUnit (PHP ${{ matrix.php }}, Roundcube ${{ matrix.core }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         php: ['8.1', '8.2', '8.3', '8.4', '8.5']
+        # the newest 1.7.x release on the day of the run ...
+        core: ['~1.7.0']
+        # ... and the oldest release of the supported branch
+        include:
+          - php: '8.1'
+            core: '1.7.0'
+          - php: '8.4'
+            core: '1.7.0'
+    env:
+      CORE: ${{ matrix.core }}
     services:
       mariadb:
-        image: mariadb:11.8
+        image: mariadb:11.8@sha256:e1d5495f445654134f226f55a41ce0da227116f6f27f283101f405c794d841fc
         env:
           MARIADB_ROOT_PASSWORD: ci-throwaway
         ports:
@@ -64,7 +95,7 @@ jobs:
           --health-timeout=5s
           --health-retries=30
       postgres:
-        image: postgres:17
+        image: postgres:17@sha256:87c8b42f423b45d5247e6aa8fdb2e7762fec164c68a50fe3eb07e7bfcaf4dbcf
         env:
           POSTGRES_PASSWORD: ci-throwaway
         ports:
@@ -86,23 +117,42 @@ jobs:
           extensions: mbstring, intl, dom, pdo, pdo_mysql, pdo_pgsql, pdo_sqlite, sqlite3
           coverage: none
 
-      # GAL Bridge supports Roundcube 1.7.7 only: pin the core that roundcube/plugin-installer
-      # pulls in (a runner-local edit of composer.json, never committed).
-      - name: Pin Roundcube 1.7.7
-        run: composer require --dev --no-update --no-interaction "roundcube/roundcubemail:1.7.7"
+      # The core that roundcube/plugin-installer pulls in: the oldest or the newest release of the
+      # supported 1.7 branch (a runner-local edit of composer.json, never committed).
+      - name: Select the Roundcube release
+        run: composer require --dev --no-update --no-interaction "roundcube/roundcubemail:$CORE"
 
       - name: Install dependencies
         run: composer install --no-interaction --no-progress
 
-      # Audit this PHP version's installed packages, including dev and transitive dependencies.
+      # What this leg really tested: kept with the run (job summary) for later review.
+      - name: Record the resolved dependency set
+        env:
+          PHP_LEG: ${{ matrix.php }}
+        run: |
+          {
+            echo "### Resolved dependencies (PHP $PHP_LEG, Roundcube constraint $CORE)"
+            echo
+            echo '```'
+            composer show --no-interaction --format=text | awk '{ print $1, $2 }'
+            echo '```'
+            echo
+            echo "composer.lock SHA-256: \`$(sha256sum composer.lock | cut -d' ' -f1)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Audit this PHP version's installed packages, including dev and transitive dependencies and
+      # the newest core. Not for the 1.7.0 leg: that core has advisories (fixed by later 1.7.x).
       - name: Audit dependencies
+        if: matrix.core != '1.7.0'
         run: composer audit --no-interaction --format=plain
 
-      # The git-sourced package reports "1.7-git" in its constants, so the pin is verified through
-      # Composer's installed metadata. logs/ and temp/ mirror a real installation.
+      # The git-sourced package reports "1.7-git" in its constants, so the release is verified
+      # through Composer's installed metadata. logs/ and temp/ mirror a real installation.
       - name: Assemble the Roundcube directory for integration tests
         run: |
-          test "$(php -r 'require "vendor/autoload.php"; echo Composer\InstalledVersions::getPrettyVersion("roundcube/roundcubemail");')" = '1.7.7'
+          installed="$(php -r 'require "vendor/autoload.php"; echo Composer\InstalledVersions::getPrettyVersion("roundcube/roundcubemail");')"
+          echo "Roundcube $installed"
+          if [ "$CORE" = '1.7.0' ]; then test "$installed" = '1.7.0'; else [[ "$installed" =~ ^1\.7\.[0-9]+$ ]]; fi
           rc="$RUNNER_TEMP/rc"
           mkdir -p "$rc/logs" "$rc/temp"
           for d in program config plugins SQL; do
@@ -165,8 +215,8 @@ jobs:
       - name: Validate composer.json
         run: composer validate --strict --no-check-lock --no-interaction
 
-      - name: Pin Roundcube 1.7.7
-        run: composer require --dev --no-update --no-interaction "roundcube/roundcubemail:1.7.7"
+      - name: Select the newest Roundcube 1.7.x
+        run: composer require --dev --no-update --no-interaction "roundcube/roundcubemail:~1.7.0"
 
       - name: Install dependencies
         run: composer install --no-interaction --no-progress
@@ -175,11 +225,14 @@ jobs:
       - name: Audit dependencies
         run: composer audit --no-interaction --format=plain
 
-      # phpstan.neon.dist scans Roundcube at /opt/rcrun/1.7.7 (its documented default location);
-      # the scanned tree must be 1.7.7 (rcube_addressbook's ': void' return types).
+      # phpstan.neon.dist scans Roundcube at /opt/rcrun/1.7.7 (its documented default location for a
+      # tree of the supported branch); the scanned tree must be a 1.7.x release (rcube_addressbook's
+      # ': void' return types). The newest one is linked there.
       - name: Assemble the Roundcube directory for analysis
         run: |
-          test "$(php -r 'require "vendor/autoload.php"; echo Composer\InstalledVersions::getPrettyVersion("roundcube/roundcubemail");')" = '1.7.7'
+          installed="$(php -r 'require "vendor/autoload.php"; echo Composer\InstalledVersions::getPrettyVersion("roundcube/roundcubemail");')"
+          echo "Roundcube $installed"
+          [[ "$installed" =~ ^1\.7\.[0-9]+$ ]]
           rc="$RUNNER_TEMP/rc"
           mkdir -p "$rc"
           for d in program config plugins SQL; do
@@ -210,8 +263,8 @@ jobs:
           extensions: mbstring, intl, dom, pdo, pdo_mysql, pdo_pgsql, pdo_sqlite, sqlite3
           coverage: none
 
-      - name: Pin Roundcube 1.7.7
-        run: composer require --dev --no-update --no-interaction "roundcube/roundcubemail:1.7.7"
+      - name: Select the newest Roundcube 1.7.x
+        run: composer require --dev --no-update --no-interaction "roundcube/roundcubemail:~1.7.0"
 
       - name: Install dependencies
         run: composer install --no-interaction --no-progress
@@ -219,3 +272,96 @@ jobs:
       # Check only: the configured rules are not risky, but CI never rewrites code.
       - name: PHP-CS-Fixer (dry run)
         run: vendor/bin/php-cs-fixer fix --dry-run --diff --using-cache=no --config=.php-cs-fixer.dist.php
+
+  security:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      # SHA-256 of gitleaks_8.30.1_linux_x64.tar.gz as published in the release's checksums file
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      # the whole history is scanned, not only the last commit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install gitleaks (verified by its SHA-256)
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check --strict -
+          mkdir -p "$RUNNER_TEMP/gitleaks"
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/gitleaks" gitleaks
+          "$RUNNER_TEMP/gitleaks/gitleaks" version
+
+      # A scan that finds nothing proves nothing unless the scanner works with this configuration:
+      # a key-shaped text (assembled here, so that this file holds no such text) outside the
+      # allow-listed paths must be reported.
+      - name: Control - a planted key is detected
+        run: |
+          mkdir -p "$RUNNER_TEMP/control/lib"
+          {
+            printf -- '-----BEGIN %s PRIVATE KEY-----\n' RSA
+            head -c 480 /dev/urandom | base64 -w 64
+            printf -- '-----END %s PRIVATE KEY-----\n' RSA
+          } > "$RUNNER_TEMP/control/lib/planted.txt"
+          if "$RUNNER_TEMP/gitleaks/gitleaks" dir --no-banner --redact --config .gitleaks.toml "$RUNNER_TEMP/control"; then
+            echo "gitleaks did not report the planted key: the scan below would prove nothing" >&2
+            exit 1
+          fi
+
+      - name: Scan the history
+        run: |
+          "$RUNNER_TEMP/gitleaks/gitleaks" git --no-banner --redact --config .gitleaks.toml .
+
+      - name: Scan the checked-out tree
+        run: |
+          "$RUNNER_TEMP/gitleaks/gitleaks" dir --no-banner --redact --config .gitleaks.toml .
+
+  release:
+    name: Release checks (signed tag, versions, archive)
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The tag object is read through the API: a checkout stores an annotated tag as a plain
+      # reference to its commit. "verified" is GitHub's own check of the signature against the keys
+      # of the tagger's account.
+      - name: The tag is annotated and its signature is verified
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          read -r type sha < <(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.type + " " + .object.sha')
+          test "$type" = tag || { echo "$TAG is a lightweight tag: releases are signed, annotated tags (docs/RELEASING.md)" >&2; exit 1; }
+          verified="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$sha" --jq '.verification.verified')"
+          test "$verified" = true || { echo "the signature of $TAG is not verified by GitHub (docs/RELEASING.md)" >&2; exit 1; }
+
+      - name: The tag, the plugin and the changelog name the same version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          grep -q -F "'version' => '$version'" galbridge.php
+          grep -q -F "## [$version]" CHANGELOG.md
+
+      # .gitattributes keeps tests, CI and tooling files out of the archive that installations use
+      - name: The release archive holds the plugin and nothing else
+        run: |
+          git archive --format=tar HEAD | tar -t > "$RUNNER_TEMP/archive.txt"
+          for f in galbridge.php composer.json LICENSE README.md SECURITY.md CHANGELOG.md .htaccess config.inc.php.dist \
+                   bin/galbridge.sh lib/autoload.php SQL/grants.mysql.sql SQL/grants.postgres.sql localization/en_US.inc; do
+            grep -q -x -F "$f" "$RUNNER_TEMP/archive.txt" || { echo "missing in the archive: $f" >&2; exit 1; }
+          done
+          if grep -E '^(tests/|\.github/|\.git[a-z]+|phpunit\.xml|phpstan\.neon|\.php-cs-fixer|STAGE_|FINAL_SECURITY_REPORT|DOSTARCZONE)' "$RUNNER_TEMP/archive.txt"; then
+            echo "the archive contains development or audit files" >&2
+            exit 1
+          fi

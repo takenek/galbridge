@@ -85,21 +85,21 @@ final class AccessPolicy
                 $this->membersExist($v),
             );
             if ($hasModerators) {
+                $who = Sql::or(Sql::in('mo.moderator', $v), Sql::eq('mo.moderator', '*@' . $h));
                 $branches[] = Sql::and(
                     Sql::raw($policy . " IN ('moderatorsonly', 'allowedonly', 'membersandmoderatorsonly')"),
-                    Sql::exists(
-                        'SELECT 1 FROM `moderators` mo WHERE mo.address = a.address AND (mo.moderator IN (' . self::marks($v) . ') OR mo.moderator = ?)',
-                        [...$v, '*@' . $h],
-                    ),
+                    Sql::exists('SELECT 1 FROM `moderators` mo WHERE mo.address = a.address AND ' . $who->sql, $who->params),
                 );
             }
         } else {
             $managers = [];
             if ($hasModerators) {
-                $managers[] = Sql::exists('SELECT 1 FROM `moderators` mo WHERE mo.address = ml.address AND mo.moderator IN (' . self::marks($v) . ')', $v);
+                $who = Sql::in('mo.moderator', $v);
+                $managers[] = Sql::exists('SELECT 1 FROM `moderators` mo WHERE mo.address = ml.address AND ' . $who->sql, $who->params);
             }
             if ($this->viewer->hasColumn('maillist_owners', 'owner') && $this->viewer->hasColumn('maillist_owners', 'address')) {
-                $managers[] = Sql::exists('SELECT 1 FROM `maillist_owners` mw WHERE mw.address = ml.address AND mw.owner IN (' . self::marks($v) . ')', $v);
+                $who = Sql::in('mw.owner', $v);
+                $managers[] = Sql::exists('SELECT 1 FROM `maillist_owners` mw WHERE mw.address = ml.address AND ' . $who->sql, $who->params);
             }
             $branches[] = Sql::and(
                 Sql::raw($policy . " IN ('membersonly', 'moderatorsonly', 'allowedonly', 'membersandmoderatorsonly')"),
@@ -111,21 +111,17 @@ final class AccessPolicy
     }
 
     /**
+     * Sql::in() gives the value lists a defined meaning when the viewer has no address at all
+     * (IN () is FALSE): such a viewer matches no member, moderator or owner.
+     *
      * @param list<string> $v
      */
     private function membersExist(array $v): Sql
     {
+        $who = Sql::in('fm.forwarding', $v);
         return Sql::exists(
-            'SELECT 1 FROM `forwardings` fm WHERE fm.address = a.address AND fm.is_list = 1 AND fm.active = 1 AND fm.forwarding IN (' . self::marks($v) . ')',
-            $v,
+            'SELECT 1 FROM `' . Schema::FORWARDINGS . '` fm WHERE fm.address = a.address AND fm.is_list = 1 AND fm.active = 1 AND ' . $who->sql,
+            $who->params,
         );
-    }
-
-    /**
-     * @param list<string> $values
-     */
-    private static function marks(array $values): string
-    {
-        return implode(', ', array_fill(0, max(1, count($values)), '?'));
     }
 }

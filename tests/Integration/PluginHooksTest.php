@@ -15,7 +15,7 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
- * The real galbridge plugin class on Roundcube 1.7.7's plugin API (docs/ARCHITECTURE.md 3, 15):
+ * The real galbridge plugin class on Roundcube 1.7's plugin API (docs/ARCHITECTURE.md 3, 15):
  * init() registers only addressbooks_list and addressbook_get (plus addressbook_export for
  * addressbook/export) and never touches the database; the autocomplete options are wired for
  * mail/compose, mail/bounce (the Redirect dialog) and mail/autocomplete only; addressbooks_list
@@ -48,7 +48,7 @@ final class PluginHooksTest extends TestCase
     protected function setUp(): void
     {
         if (!GALBRIDGE_RC_LOADED) {
-            self::markTestSkipped('needs Roundcube 1.7.7 (GALBRIDGE_RC)');
+            self::markTestSkipped('needs Roundcube 1.7 (GALBRIDGE_RC)');
         }
         require_once dirname(__DIR__, 2) . '/galbridge.php';
         $this->previousInstance = (new \ReflectionProperty(\rcube::class, 'instance'))->getValue();
@@ -232,6 +232,9 @@ final class PluginHooksTest extends TestCase
             $out["{$engine}: more entries than galbridge_max_export"] = [$dsn, ['galbridge_max_export' => 5], 'book'];
             $out["{$engine}: a group above the expansion cap"] = [$dsn, ['galbridge_max_group_members' => 1], 'group'];
             $out["{$engine}: more selected contacts than galbridge_max_ids"] = [$dsn, ['galbridge_max_ids' => 1], 'selected'];
+            // a search result with more matches than the list cap: on a page it is cut with a notice,
+            // in a download it would be a file that silently lacks entries
+            $out["{$engine}: more search matches than galbridge_max_results"] = [$dsn, ['galbridge_max_results' => 10], 'search'];
         }
         return $out;
     }
@@ -269,7 +272,7 @@ final class PluginHooksTest extends TestCase
     #[DataProvider('engines')]
     public function testAllowedExportIsNotIntercepted(string $dsn): void
     {
-        foreach (['book' => 13, 'group' => 2, 'selected' => 2] as $what => $count) {
+        foreach (['book' => 13, 'group' => 2, 'selected' => 2, 'search' => 13] as $what => $count) {
             $this->boot($dsn, [], task: 'addressbook', action: 'export');
             $book = $this->api->exec_hook('addressbook_get', ['id' => BookDefinition::DOMAIN, 'writeable' => false])['instance'];
             self::assertInstanceOf(AddressBook::class, $book);
@@ -287,6 +290,74 @@ final class PluginHooksTest extends TestCase
         $book = $this->api->exec_hook('addressbook_get', ['id' => BookDefinition::DOMAIN, 'writeable' => false])['instance'];
         self::coreExport($book, 'book');
         self::assertSame([['galbridge.exportdisabled', 'warning', []]], $this->output->messages);
+
+        // the same capped search outside an export: a LIST may be cut, with the notice on the page
+        $this->boot($dsn, ['galbridge_max_results' => 10], task: 'addressbook', action: 'search');
+        $book = $this->api->exec_hook('addressbook_get', ['id' => BookDefinition::DOMAIN, 'writeable' => false])['instance'];
+        self::assertCount(10, self::coreExport($book, 'search')->records);
+        self::assertSame([['galbridge.toomanyresults', 'warning', ['max' => '10']]], $this->output->messages);
+        self::assertSame([], $this->output->exits);
+    }
+
+    /**
+     * A database that fails during an export must not produce a contacts.vcf without the directory
+     * entries (nobody would know that it is incomplete): the export answers 204 like every refusal.
+     */
+    public function testAFailingDirectoryRefusesTheExport(): void
+    {
+        $file = sys_get_temp_dir() . '/galbridge-export-' . bin2hex(random_bytes(8)) . '.sqlite';
+        try {
+            $pdo = new \PDO('sqlite:' . $file);
+            $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+            $dir = dirname(__DIR__) . '/fixtures/vmail/';
+            $pdo->exec((string) file_get_contents($dir . 'schema.sqlite.sql'));
+            $pdo->exec((string) file_get_contents($dir . 'seed.sql'));
+            $pdo = null;
+            $dsn = 'sqlite:///' . $file . '?mode=0600';
+
+            foreach (['book', 'group', 'search'] as $what) {
+                $this->boot($dsn, [], task: 'addressbook', action: 'export');
+                $book = $this->api->exec_hook('addressbook_get', ['id' => BookDefinition::DOMAIN, 'writeable' => false])['instance'];
+                self::assertInstanceOf(AddressBook::class, $book);
+                if ($what === 'group') {
+                    self::assertNotNull($book->get_group(IdCodec::groupId('d', IdCodec::GROUP_DEPARTMENT, 'sprzedaż')));
+                }
+                $pdo = new \PDO('sqlite:' . $file);
+                $pdo->exec('ALTER TABLE mailbox RENAME TO mailbox_gone'); // every directory statement fails now
+                $pdo = null;
+                try {
+                    $result = self::coreExport($book, $what);
+                    self::assertSame([], $result->records, $what);
+                    self::assertSame([], $this->output->messages, 'a download cannot show a message');
+                    try {
+                        $this->api->exec_hook('addressbook_export', ['result' => $result]);
+                        self::fail($what . ': the export of a failing directory went on to send a file');
+                    } catch (\LogicException $e) {
+                        self::assertSame('sendExit', $e->getMessage());
+                    }
+                    self::assertSame([['', ['HTTP/1.1 204 No Content']]], $this->output->exits, $what);
+                } finally {
+                    $pdo = new \PDO('sqlite:' . $file);
+                    $pdo->exec('ALTER TABLE mailbox_gone RENAME TO mailbox');
+                    $pdo = null;
+                }
+            }
+            self::assertStringContainsString('db_error', implode("\n", $GLOBALS['galbridge_test_log']));
+
+            // outside an export the user is told instead
+            $this->boot($dsn, [], task: 'addressbook', action: 'list');
+            $book = $this->api->exec_hook('addressbook_get', ['id' => BookDefinition::DOMAIN, 'writeable' => false])['instance'];
+            $pdo = new \PDO('sqlite:' . $file);
+            $pdo->exec('ALTER TABLE mailbox RENAME TO mailbox_gone');
+            $pdo = null;
+            self::assertSame([], self::coreExport($book, 'book')->records);
+            self::assertSame([['galbridge.unavailable', 'warning', []]], $this->output->messages);
+            self::assertSame([], $this->output->exits);
+        } finally {
+            foreach (['', '-wal', '-shm', '-journal'] as $suffix) {
+                @unlink($file . $suffix);
+            }
+        }
     }
 
     /**
@@ -344,6 +415,11 @@ final class PluginHooksTest extends TestCase
         if ($what === 'group') {
             $book->set_group(IdCodec::groupId('d', IdCodec::GROUP_DEPARTMENT, 'sprzedaż'));
         }
+        if ($what === 'search') {
+            // contacts/export with _search: the search set of the session is replayed, then page 1 / 99999
+            $book->search('email', 'example', 0, false);
+            $book->set_search_set($book->get_search_set());
+        }
         $book->set_page(1);
         $book->set_pagesize(99999);
         return $book->list_records(null, 0, true);
@@ -399,8 +475,12 @@ final class PluginHooksTest extends TestCase
         foreach (Env::engines() as $engine => [$dsn]) {
             $out["{$engine}: markup in the configured name"] = [$dsn, ['galbridge_domain_book_name' => '<img src=x onerror=alert(1)> & "Co"'],
                 '&lt;img src=x onerror=alert(1)&gt; &amp; &quot;Co&quot;'];
+            // an organization label is display text (it is also the "organization" field of every
+            // record): its ampersand is the full-width form, which needs no escaping
             $out["{$engine}: ampersand in an organization label"] = [$dsn, ['galbridge_organizations' => ['Smith & Sons' => ['example.com', 'example.org']]],
-                'Smith &amp; Sons'];
+                "Smith \u{FF06} Sons"];
+            $out["{$engine}: markup in an organization label"] = [$dsn, ['galbridge_organizations' => ['<b>Smith</b> &amp; "Sons"' => ['example.com', 'example.org']]],
+                "b Smith /b \u{FF06}amp; Sons"];
         }
         return $out;
     }
@@ -611,6 +691,36 @@ final class PluginHooksTest extends TestCase
         self::assertSame([], $this->api->exec_hook('addressbooks_list', ['sources' => []])['sources']);
     }
 
+    /**
+     * Every warning of the DSN policy reaches the log of the web process - diag runs with the
+     * environment of a shell and would not see what the PHP process inherits. Each one has a line
+     * of its own (a joined line would be cut at the length limit of a log line), once per request.
+     */
+    public function testEveryWarningOfTheDsnPolicyIsLogged(): void
+    {
+        $dsn = getenv('GALBRIDGE_TEST_PGSQL_DSN');
+        if (!is_string($dsn) || $dsn === '') {
+            self::markTestSkipped('needs GALBRIDGE_TEST_PGSQL_DSN (the libpq environment applies to PostgreSQL only)');
+        }
+        putenv('PGOPTIONS=-c application_name=galbridge-test');
+        putenv('PGSSLMODE=prefer');
+        try {
+            $this->boot($dsn, [], task: 'addressbook', action: 'list');
+            $book = $this->api->exec_hook('addressbook_get', ['id' => BookDefinition::DOMAIN, 'writeable' => false])['instance'];
+            self::assertInstanceOf(AddressBook::class, $book, 'the connection works with both settings');
+            $lines = array_values(preg_grep('/dsn_warning/', $GLOBALS['galbridge_test_log']) ?: []);
+            self::assertCount(2, $lines, implode("\n", $GLOBALS['galbridge_test_log']));
+            self::assertStringStartsWith('WARN db: dsn_warning: the environment variable PGOPTIONS of the PHP process also applies to this connection', $lines[0]);
+            self::assertStringStartsWith('WARN db: dsn_warning: the environment variable PGSSLMODE of the PHP process also applies to this connection', $lines[1]);
+            // another book of the same request uses the same connection: nothing is written twice
+            self::assertInstanceOf(AddressBook::class, $this->api->exec_hook('addressbook_get', ['id' => BookDefinition::DOMAIN, 'writeable' => false])['instance']);
+            self::assertCount(2, preg_grep('/dsn_warning/', $GLOBALS['galbridge_test_log']) ?: []);
+        } finally {
+            putenv('PGOPTIONS');
+            putenv('PGSSLMODE');
+        }
+    }
+
     // ------------------------------------------------------------------ harness
 
     /**
@@ -626,7 +736,7 @@ final class PluginHooksTest extends TestCase
     {
         // a new request: the once-per-request "unavailable" notice may be shown again
         (new \ReflectionProperty(AddressBook::class, 'unavailableShown'))->setValue(null, false);
-        $_SESSION = ['storage_host' => $host];
+        $_SESSION = ['storage_host' => $host, 'storage_port' => Env::IMAP_PORT];
         $admin = $options + ['galbridge_db_dsn' => $dsn, 'imap_host' => 'tls://' . Env::IMAP_HOST . ':143'];
         $config = new \rcube_config();
         foreach (array_merge($admin, $prefs) as $k => $v) {

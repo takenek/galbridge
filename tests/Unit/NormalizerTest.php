@@ -468,7 +468,19 @@ final class NormalizerTest extends TestCase
         yield 'quotes and brackets' => ['Jan "The Boss" <ceo@evil.test>', 'Jan The Boss ceo@evil.test'];
         yield 'backslash' => ['Dom\\ain\\user', 'Dom ain user'];
         yield 'header breaking' => ['"Jan" <jan@firma.pl>, "Eve" <eve@evil.test>', 'Jan jan@firma.pl , Eve eve@evil.test'];
-        yield 'html stays text' => ['<b>Jan</b> & Co', 'b Jan /b & Co'];
+        yield 'html stays text' => ['<b>Jan</b> & Co', "b Jan /b \u{FF06} Co"];
+        yield 'ampersand becomes its full-width form' => ['R&D', "R\u{FF06}D"];
+        yield 'encoded-word delimiters are split' => ['=?UTF-8?Q?x?=', '= ?UTF-8?Q?x? ='];
+        yield 'question and equals signs alone stay' => ['Why? a=b', 'Why? a=b'];
+        yield 'empty round brackets are removed' => ['Jan () Kowalski', 'Jan Kowalski'];
+        yield 'empty square brackets are removed' => ['Jan[] Kowalski', 'Jan Kowalski'];
+        yield 'nested empty brackets are removed' => ['Jan ([()]) Kowalski', 'Jan Kowalski'];
+        yield 'brackets around removed characters keep a space (core does not delete those)' => ['Jan ("") Kowalski', 'Jan ( ) Kowalski'];
+        yield 'brackets with content stay' => ['Jan Kowalski (IT) [PL]', 'Jan Kowalski (IT) [PL]'];
+        yield 'a telephone number keeps its brackets' => ['(22) 123-45-67', '(22) 123-45-67'];
+        yield 'a closing bracket at the start is dropped' => [') ] Jan', 'Jan'];
+        yield 'an opening bracket at the end is dropped' => ['Jan ( [', 'Jan'];
+        yield 'only brackets' => [')(', ''];
         yield 'no-break space collapsed' => ["Jan\u{00A0}Kowalski", 'Jan Kowalski'];
         yield 'NFC' => ["Z\u{0307}aneta", 'Żaneta'];
         yield 'int' => [42, '42'];
@@ -647,11 +659,157 @@ final class NormalizerTest extends TestCase
         }
     }
 
+    /**
+     * Notations that a LATER consumer decodes: an HTML character reference (Roundcube's recipient
+     * widget inserts names as HTML after escaping only the angle brackets) and an RFC 2047
+     * encoded-word (decoded by the mail clients of the recipients). Each would turn into an at-sign
+     * - or any other text - after the anti-impersonation check has run.
+     *
+     * @return iterable<string, array{0: string}>
+     */
+    public static function decodedNotations(): iterable
+    {
+        yield 'numeric character reference' => ['ceo&#64;bank.example'];
+        yield 'numeric reference without semicolon' => ['ceo&#64bank.example'];
+        yield 'hexadecimal character reference' => ['ceo&#x40;bank.example'];
+        yield 'upper-case hexadecimal reference' => ['ceo&#X40;bank.example'];
+        yield 'zero-padded reference' => ['ceo&#0000064;bank.example'];
+        yield 'named character reference' => ['ceo&commat;bank.example'];
+        yield 'full-width at as a reference' => ['ceo&#xFF20;bank.example'];
+        yield 'angle brackets as references' => ['&lt;img src=x&gt;'];
+        yield 'double-encoded reference' => ['ceo&amp;#64;bank.example'];
+        yield 'reference split by a removed character' => ["ceo&\u{200B}#64;bank.example"];
+        yield 'reference split by a control character' => ["ceo&\x00#64;bank.example"];
+        yield 'base64 encoded-word' => ['=?UTF-8?B?Y2VvQGJhbmsuZXhhbXBsZQ==?='];
+        yield 'quoted-printable encoded-word' => ['=?utf-8?q?ceo=40bank.example?='];
+        yield 'encoded-word inside a name' => ['Jan =?UTF-8?B?Y2VvQGJhbms=?= Kowalski'];
+        yield 'doubled opener' => ['==??UTF-8?B?Y2VvQGJhbms=?='];
+        yield 'opener split by a removed character' => ["=\u{200B}?UTF-8?B?Y2VvQGJhbms=?="];
+        yield 'opener split by a quote' => ['="?UTF-8?B?Y2VvQGJhbms=?='];
+        yield 'both notations' => ['=?UTF-8?Q?a?= &#64; &commat;'];
+        // what Roundcube deletes when it composes a name from contactlist_name_template
+        yield 'opener split by empty round brackets' => ['=()?UTF-8?B?Y2VvQGJhbmsuZXhhbXBsZQ==?='];
+        yield 'opener split by empty square brackets' => ['=[]?UTF-8?B?Y2VvQGJhbmsuZXhhbXBsZQ==?='];
+        yield 'opener split by a space and empty brackets' => ['= ()?UTF-8?B?Y2VvQGJhbmsuZXhhbXBsZQ==?='];
+        yield 'opener split by nested empty brackets' => ['=([()])?UTF-8?B?Y2VvQGJhbmsuZXhhbXBsZQ==?='];
+        yield 'opener split by brackets around a removed character' => ["=(\u{200B})?UTF-8?B?Y2VvQGJhbmsuZXhhbXBsZQ==?="];
+        yield 'opener split by angle brackets' => ['=<>?UTF-8?B?Y2VvQGJhbmsuZXhhbXBsZQ==?='];
+        yield 'closer split by empty brackets' => ['=?UTF-8?B?Y2VvQGJhbmsuZXhhbXBsZQ==?()='];
+        yield 'both delimiters split by empty brackets' => ['Jan =[]?utf-8?q?ceo=40bank.example?[]= Kowalski'];
+        yield 'reference split by empty brackets' => ['ceo&()#64;bank.example'];
+    }
+
+    #[DataProvider('decodedNotations')]
+    public function testDisplayTextNeutralisesNotationsThatAreDecodedLater(string $hostile): void
+    {
+        $out = Normalizer::displayText($hostile);
+        self::assertStringNotContainsString('&', $out, 'no character reference can start');
+        self::assertStringNotContainsString('=?', $out, 'no encoded-word can start');
+        self::assertSame($out, Normalizer::displayText($out), 'idempotent');
+        self::assertTrue(mb_check_encoding($out, 'UTF-8'));
+        // what is left is literal text: decoding it as HTML or as a header changes nothing
+        self::assertSame($out, html_entity_decode($out, ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+        // (Roundcube's own header decoder is asked in ContractTest, where the core is loaded)
+        self::assertDoesNotMatchRegularExpression('/=\\?[^?\\s]+\\?[bBqQ]\\?[^?\\s]*\\?=/', $out, 'no RFC 2047 encoded-word is left');
+        self::assertFalse(Normalizer::containsAt(html_entity_decode($out, ENT_QUOTES | ENT_HTML5, 'UTF-8')), 'no at-sign appears after decoding');
+        self::assertStringNotContainsString('?=', $out, 'no encoded-word can end');
+
+        // ... and it stays that way in a name that core composes from a template: alone, in brackets
+        // of the template, and next to a text that ends where an encoded-word would start
+        foreach (['{a}', '{a} ({b})', '{b} ({a})', '[{a}] {b}', '{b} [{a}]', '{a} - {b}', '({a})', '{b} <{a}>'] as $template) {
+            foreach (['', 'Sales', Normalizer::displayText('Jan ='), Normalizer::displayText('=')] as $other) {
+                $composed = self::composedByCore($template, ['a' => $out, 'b' => $other]);
+                $label = "{$template} with '{$other}': {$composed}";
+                self::assertStringNotContainsString('=?', $composed, $label);
+                self::assertDoesNotMatchRegularExpression('/=\\?[^?\\s]+\\?[bBqQ]\\?[^?\\s]*\\?=/', $composed, $label);
+                self::assertStringNotContainsString('&', $composed, $label);
+            }
+        }
+    }
+
+    /**
+     * What rcube_addressbook::compose_search_name() (Roundcube 1.7) does with a template once the
+     * field values are in: it collapses whitespace, DELETES empty bracket pairs together with the
+     * whitespace before them, and trims. (The real function is exercised in CorePathsTest.)
+     *
+     * @param array<string, string> $values
+     */
+    private static function composedByCore(string $template, array $values): string
+    {
+        foreach ($values as $key => $value) {
+            $template = str_replace('{' . $key . '}', $value, $template);
+        }
+        $template = (string) preg_replace('/\\s+/u', ' ', $template);
+        $template = (string) preg_replace('/\\s*(<>|\\(\\)|\\[\\])/u', '', $template);
+        return trim($template, '/ ');
+    }
+
+    /**
+     * Two texts that are harmless each, joined by a template: the first ends where an encoded-word
+     * starts, the second begins with the bracket that closes the template's own - core would delete
+     * that pair and join them.
+     */
+    public function testTextsCannotFormAnEncodedWordAcrossTheBracketsOfATemplate(): void
+    {
+        $tail = '?UTF-8?B?Y2VvQGJhbmsuZXhhbXBsZQ==?=';
+        foreach ([[')', '{a} ({b})'], [']', '{a} [{b}]'], [') ', '{a} ({b})'], ['))', '{a} ({b})'], [' ])', '{a} ({b})']] as [$closer, $template]) {
+            foreach (['Jan =', '=', 'x =('] as $head) {
+                $a = Normalizer::displayText($head);
+                $b = Normalizer::displayText($closer . $tail);
+                $composed = self::composedByCore($template, ['a' => $a, 'b' => $b]);
+                self::assertStringNotContainsString('=?', $composed, "'{$head}' + '{$closer}{$tail}' in {$template}: {$composed}");
+            }
+        }
+        // the rule behind it: a text never ends with an opening bracket (also where the length cap
+        // cut it) and never starts with a closing one
+        foreach (['Jan =(', 'Jan =[', 'Jan = ( [', str_repeat('a', 127) . '(x)', str_repeat('a', 126) . ' [x]'] as $text) {
+            self::assertDoesNotMatchRegularExpression('/[\s(\[]$/', Normalizer::displayText($text), $text);
+        }
+        self::assertSame(str_repeat('a', 127), Normalizer::displayText(str_repeat('a', 127) . '(x)'));
+        foreach ([') Jan', '] Jan', ' )] Jan', '()) Jan'] as $text) {
+            self::assertSame('Jan', Normalizer::displayText($text), $text);
+        }
+    }
+
+    /**
+     * The loop that removes nested empty brackets is bounded: a value far longer than a column of
+     * the iRedMail schema (megabytes of nested brackets) is cut before it, not worked through.
+     */
+    public function testNestedBracketsOfAnyLengthAreHandledInBoundedTime(): void
+    {
+        $start = hrtime(true);
+        self::assertSame('', Normalizer::displayText(str_repeat('(', 500000) . str_repeat(')', 500000)));
+        self::assertSame('', Normalizer::displayText(str_repeat('([', 250000) . str_repeat('])', 250000)));
+        self::assertSame('Jan', Normalizer::displayText('Jan ' . str_repeat('(', 900) . str_repeat(')', 900)));
+        self::assertSame('Jan = ?x', Normalizer::displayText('Jan =' . str_repeat('[(', 400) . str_repeat(')]', 400) . '?x'));
+        $out = Normalizer::displayText(str_repeat('a()', 1000000));
+        self::assertSame(str_repeat('a', 128), $out);
+        self::assertLessThan(10.0, (hrtime(true) - $start) / 1e9, 'megabytes of nested brackets must not take minutes');
+    }
+
+    public function testLabelWordsUseTheNotationOfDisplayText(): void
+    {
+        foreach (['R&D', 'a=?b', 'a?=b', '=?UTF-8?Q?x?='] as $word) {
+            self::assertSame(Normalizer::displayText($word), Normalizer::labelWord($word), $word);
+        }
+    }
+
+    public function testAmpersandStaysReadable(): void
+    {
+        self::assertSame("Johnson \u{FF06} Johnson", Normalizer::displayText('Johnson & Johnson'));
+        self::assertSame("AT\u{FF06}T", Normalizer::displayText('AT&T'));
+        self::assertSame(Normalizer::AMPERSAND, "\u{FF06}");
+        // a search word typed with '&' is compared with labels in the same notation
+        self::assertSame("r\u{FF06}d", Normalizer::labelWord('r&d'));
+        self::assertSame('sales', Normalizer::labelWord('sales'));
+        self::assertSame(mb_strtolower(Normalizer::displayText('R&D Lab')), Normalizer::labelWord('r&d lab'));
+    }
+
     public function testDisplayTextOutputIsSafeForRecipientHeaders(): void
     {
         $hostile = "Eve\u{202E}lp.amrif@evil\r\n\"Admin\" <admin@firma.pl>\\\u{200B}\x1B[31m\u{FEFF}";
         $out = Normalizer::displayText($hostile);
-        self::assertDoesNotMatchRegularExpression('/[\x00-\x1F\x7F\\\\"<>]/', $out);
+        self::assertDoesNotMatchRegularExpression('/[\x00-\x1F\x7F\\\\"<>&]/', $out);
         self::assertDoesNotMatchRegularExpression('/[\x{0080}-\x{009F}\x{200B}-\x{200F}\x{2028}-\x{202E}\x{2060}-\x{206F}\x{FEFF}]/u', $out);
         self::assertTrue(mb_check_encoding($out, 'UTF-8'));
         self::assertSame($out, Normalizer::displayText($out), 'idempotent');

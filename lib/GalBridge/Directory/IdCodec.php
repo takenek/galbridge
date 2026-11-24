@@ -21,7 +21,7 @@ use GalBridge\Normalizer;
 /**
  * Contact and group identifiers.
  *
- * Roundcube 1.7.7 moves IDs through HTML ids, JavaScript strings, comma-separated lists, "ID-source"
+ * Roundcube 1.7 moves IDs through HTML ids, JavaScript strings, comma-separated lists, "ID-source"
  * pairs (split at the last '-' in PHP, at the first in JavaScript) and GET URLs (export of the
  * selected contacts joins all of them). The only safe character set is [A-Za-z0-9_]: no '-', ',',
  * '+', '/' or '=' - base64url is NOT safe.

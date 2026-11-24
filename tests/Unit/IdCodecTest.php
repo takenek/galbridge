@@ -16,7 +16,7 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Contact and group IDs (docs/ARCHITECTURE.md section 9): Roundcube 1.7.7 moves them through HTML ids,
+ * Contact and group IDs (docs/ARCHITECTURE.md section 9): Roundcube 1.7 moves them through HTML ids,
  * JS strings, comma lists, "ID-source" pairs and GET URLs, so they must stay inside [A-Za-z0-9_],
  * be reversible and canonical (one row = one ID), and decoding must reject everything else without
  * ever throwing.

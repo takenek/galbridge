@@ -24,3 +24,4 @@ $messages['toomanyresults'] = 'Only the first $max directory matches are shown. 
 $messages['toomanyids'] = 'At most $max directory contacts can be used at once.';
 $messages['exportdisabled'] = 'Exporting this directory is not allowed.';
 $messages['exporttoolarge'] = 'The directory has more than $max entries and cannot be exported at once. Export a search result or a group instead.';
+$messages['incomplete'] = 'Not every entry of this selection could be read from the directory, so it was not used. Try again; if the problem persists, ask your administrator.';

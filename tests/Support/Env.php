@@ -26,6 +26,9 @@ final class Env
 {
     public const IMAP_HOST = '127.0.0.1';
 
+    /** the port of imap_host below: part of the derived IMAP binding */
+    public const IMAP_PORT = 143;
+
     private static ?string $sqlite = null;
 
     /**
@@ -46,16 +49,27 @@ final class Env
     public static function sqliteDsn(): string
     {
         if (self::$sqlite === null) {
-            $file = sys_get_temp_dir() . '/galbridge-vmail-' . getmypid() . '.sqlite';
-            @unlink($file);
+            // a private directory with an unpredictable name: mkdir() fails when the name exists, so
+            // nobody else on the machine can plant a file or a link where the fixture is written
+            $dir = sys_get_temp_dir() . '/galbridge-test-' . bin2hex(random_bytes(12));
+            if (!mkdir($dir, 0o700)) {
+                throw new \RuntimeException('cannot create a private directory for the SQLite fixture');
+            }
+            $file = $dir . '/vmail.sqlite';
             // loaded BEFORE rcube_db connects: the driver initialises an EMPTY file with Roundcube's schema
             $pdo = new \PDO('sqlite:' . $file);
             $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
-            $dir = dirname(__DIR__) . '/fixtures/vmail/';
-            $pdo->exec((string) file_get_contents($dir . 'schema.sqlite.sql'));
-            $pdo->exec((string) file_get_contents($dir . 'seed.sql'));
+            $fixtures = dirname(__DIR__) . '/fixtures/vmail/';
+            $pdo->exec((string) file_get_contents($fixtures . 'schema.sqlite.sql'));
+            $pdo->exec((string) file_get_contents($fixtures . 'seed.sql'));
             $pdo = null;
-            register_shutdown_function(static fn () => @unlink($file));
+            // the mirror, the files SQLite keeps next to it, and the private directory
+            register_shutdown_function(static function () use ($file, $dir): void {
+                foreach (['', '-wal', '-shm', '-journal'] as $suffix) {
+                    @unlink($file . $suffix);
+                }
+                @rmdir($dir);
+            });
             self::$sqlite = 'sqlite:///' . $file . '?mode=0600';
         }
         return self::$sqlite;
@@ -67,7 +81,7 @@ final class Env
     public static function config(string $dsn, array $options = []): Config
     {
         \rcube::get_instance(); // rcube_db reads the core config through the singleton
-        $values = ['galbridge_db_dsn' => $dsn, 'imap_host' => 'tls://' . self::IMAP_HOST . ':143'] + $options;
+        $values = ['galbridge_db_dsn' => $dsn, 'imap_host' => 'tls://' . self::IMAP_HOST . ':' . self::IMAP_PORT] + $options;
         $config = new \rcube_config();
         foreach ($values as $k => $v) {
             $config->set($k, $v);
@@ -78,7 +92,7 @@ final class Env
     /**
      * @param list<array{string, array<string, string>}> $notices collects user-visible warnings
      */
-    public static function factory(Config $config, string $login, string $action = '', ?array &$notices = null, int $userId = 1, string $host = self::IMAP_HOST): Factory
+    public static function factory(Config $config, string $login, string $action = '', ?array &$notices = null, int $userId = 1, string $host = self::IMAP_HOST, int $port = self::IMAP_PORT): Factory
     {
         $_SESSION = [];
         $notices = [];
@@ -86,7 +100,7 @@ final class Env
         $connect = static function () use ($config, &$connection): Connection {
             return $connection ??= new Connection(new Dsn($config->string('galbridge_db_dsn'), $config), 3);
         };
-        $resolver = new ViewerResolver($config, $connect, $userId, $login, $host, $host);
+        $resolver = new ViewerResolver($config, $connect, $userId, $login, $host, $host, $port);
         $notify = static function (string $label, array $vars) use (&$notices): void {
             $notices[] = [$label, $vars];
         };

@@ -5,12 +5,14 @@
 /.gitattributes export-ignore
 /.gitignore export-ignore
 /.gitguardian.yaml export-ignore
+/.gitleaks.toml export-ignore
 /.php-cs-fixer.dist.php export-ignore
 /phpstan.neon.dist export-ignore
 /phpunit.xml.dist export-ignore
 # CI configuration
 /.github export-ignore
-# security audit working documents and delivered artefacts (never part of a release)
+# security audit working documents and delivered artefacts: git-ignored (.gitignore) and, should a
+# copy ever be committed by mistake, still never part of a release archive
 /FINAL_SECURITY_REPORT.md export-ignore
 /STAGE_*.md export-ignore
 /DOSTARCZONE export-ignore

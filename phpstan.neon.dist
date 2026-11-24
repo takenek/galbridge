@@ -4,10 +4,11 @@
 #   php -d memory_limit=2G vendor/bin/phpstan analyse -c phpstan.neon.dist
 #
 # Roundcube is not a Composer dependency of the plugin; its classes are resolved from a Roundcube
-# 1.7.7 installation via scanDirectories. The paths below point to the test installation; copy this
-# file to phpstan.neon (git-ignored) and adjust them, or symlink your Roundcube to /opt/rcrun/1.7.7.
-# The scanned tree MUST be 1.7.7: its rcube_addressbook declares the ': void' return types that a
-# backend has to repeat (a 1.6 tree would hide that class of fatal errors).
+# 1.7.x installation via scanDirectories. The paths below point to the test installation (the newest
+# release of the supported branch, 1.7.7 when this was written); copy this file to phpstan.neon
+# (git-ignored) and adjust them, or symlink your Roundcube 1.7.x tree to /opt/rcrun/1.7.7.
+# The scanned tree MUST be a 1.7 release: its rcube_addressbook declares the ': void' return types
+# that a backend has to repeat (a 1.6 tree would hide that class of fatal errors).
 
 parameters:
     level: 8

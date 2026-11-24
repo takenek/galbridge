@@ -1,7 +1,7 @@
 {
     "name": "takenek/galbridge",
     "type": "roundcube-plugin",
-    "description": "GAL Bridge - read-only Global Address List for Roundcube 1.7.7 from the iRedMail 1.8 SQL (vmail) database: domain and global address books, groups and mailing lists, MySQL/MariaDB and PostgreSQL.",
+    "description": "GAL Bridge - read-only Global Address List for Roundcube 1.7 from the iRedMail 1.8 SQL (vmail) database: domain and global address books, groups and mailing lists, MySQL/MariaDB and PostgreSQL.",
     "keywords": ["roundcube", "plugin", "addressbook", "gal", "global-address-list", "iredmail", "vmail"],
     "license": "GPL-3.0-or-later",
     "homepage": "https://github.com/takenek/galbridge",
@@ -31,7 +31,7 @@
     "require-dev": {
         "friendsofphp/php-cs-fixer": "^3.95",
         "phpstan/phpstan": "^2.1",
-        "phpunit/phpunit": "^10.5 || ^11.5 || ^13.4.4"
+        "phpunit/phpunit": "^10.5.62 || ^11.5.50 || ^13.4.4"
     },
     "autoload": {
         "psr-4": {
@@ -45,7 +45,7 @@
     },
     "extra": {
         "roundcube": {
-            "min-version": "1.7.7",
+            "min-version": "1.7.0",
             "max-version": "1.7.999"
         }
     },

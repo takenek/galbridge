@@ -38,7 +38,7 @@ final class EntitlementsTest extends TestCase
     protected function setUp(): void
     {
         if (!GALBRIDGE_RC_LOADED) {
-            self::markTestSkipped('needs Roundcube 1.7.7 (GALBRIDGE_RC)');
+            self::markTestSkipped('needs Roundcube 1.7 (GALBRIDGE_RC)');
         }
         $_SESSION = [];
         $GLOBALS['galbridge_test_log'] = [];
@@ -245,7 +245,7 @@ final class EntitlementsTest extends TestCase
         $book->set_pagesize(200);
         self::assertSame(['bob@example.org', 'orglist@example.org', 'orgteam@example.org'], self::emails($book->list_records()));
         // entries outside the viewer's home are marked (galbridge_mark_foreign_domains)
-        self::assertSame('Bob Smith (example.org)', $book->get_record('u_bobAexampleDorg', true)['name'] ?? null);
+        self::assertSame('(example.org) Bob Smith', $book->get_record('u_bobAexampleDorg', true)['name'] ?? null);
 
         // bob is not a viewer of the global book
         self::assertDenied(Env::factory(Env::config($dsn, $options), self::BOB), BookDefinition::GLOBAL, 'globalbook');

@@ -2,10 +2,12 @@
 
 This document lists what GAL Bridge protects, against whom, and how. The threats GB-01 to GB-28 come
 from the security review of the design (before implementation) and were re-checked against the
-1.0.0 code; each entry names the implemented controls (classes under `lib/GalBridge/`) and the tests
-that exercise them (`tests/Integration/*Test`, `tests/Unit/*Test`, `tests/e2e/`). Where the
-implementation differs from the original proposal of the review, the entry describes the
-implementation. Section references ("ARCHITECTURE 11") point to
+1.0.0 code; GB-29 to GB-32 and the changes to the other entries come from the security audit of
+1.0.0, whose findings were remediated in 1.0.1 (identifiers U-xx / I-xx in
+[CHANGELOG.md](../CHANGELOG.md)). Each entry names the implemented controls (classes under
+`lib/GalBridge/`) and the tests that exercise them (`tests/Integration/*Test`, `tests/Unit/*Test`,
+`tests/e2e/`, `tests/ui/`). Where the implementation differs from the original proposal of the
+review, the entry describes the implementation. Section references ("ARCHITECTURE 11") point to
 [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Assets
@@ -13,7 +15,7 @@ implementation. Section references ("ARCHITECTURE 11") point to
 | Asset | Where |
 |---|---|
 | Directory data of every tenant: names, addresses, departments, phone numbers, birthdays, alias accounts, list addresses | iRedMail `vmail` database (`mailbox`, `domain`, `alias`, `maillists`, `forwardings`, `moderators`, `maillist_owners`) |
-| Secrets in the same database: password hashes, recovery e-mail addresses, `allow_nets`, per-user settings, private forwarding targets | `vmail.mailbox`, `vmail.forwardings` (never readable by the plugin's role) |
+| Secrets in the same database: password hashes, recovery e-mail addresses, `allow_nets`, per-user settings, private forwarding targets | `vmail.mailbox`, `vmail.forwardings`. Not readable by the plugin's role: its grants are column-level, and of `forwardings` it gets a view with the alias and list rows only (`galbridge_forwardings`), never the table with the forwarding targets. A role that can read a secret column or that table is refused |
 | Organisational structure: who is in which department, which tenants a provider hosts, who may post to which list | derived from the same tables |
 | Credentials of the plugin's database role | `plugins/galbridge/config.inc.php` or `config/galbridge.inc.php` |
 | Integrity of recipient sets (group expansion, compose to selected contacts) | Roundcube compose |
@@ -31,8 +33,11 @@ implementation. Section references ("ARCHITECTURE 11") point to
   names) is attacker-controlled from the point of view of every other viewer.
 * User preferences (`users.preferences`) can be written by the user for some keys and by anyone with
   database access to Roundcube's database; they are not trusted for administrator options.
-* The configured directory IMAP hosts authenticate users against the same `vmail` database (the
-  Roundcube login equals `mailbox.username`). An IMAP server chosen by the client is not trusted.
+* **Every** configured directory IMAP server (host and port) authenticates users against the same
+  `vmail` database (the Roundcube login equals `mailbox.username`). The plugin cannot verify this:
+  it is an obligation of the administrator, repeated by `diag` when more than one server is
+  allowed. An IMAP server chosen by the client, or selected through the `Host` header
+  (`include_host_config`), is not trusted.
 * The `vmail` database is trusted for integrity; GAL Bridge only reads it. A database server on
   another host is reached over an untrusted network.
 * Roundcube's session storage is trusted (it is server-side; whoever can write it can take over any
@@ -42,20 +47,22 @@ implementation. Section references ("ARCHITECTURE 11") point to
 
 ### GB-01 Loss of availability through fatal errors
 
-*Threat.* The backend or the hooks fail on Roundcube 1.7.7 / PHP 8.x and take the mail and
+*Threat.* The backend or the hooks fail on a Roundcube 1.7.x release / PHP 8.x and take the mail and
 address-book tasks down (the old plugin declared `reset()` / `set_search_set()` without the `: void`
 that 1.7 requires, and broke on unvalidated configuration).
 
-*Controls.* `AddressBook` and `DeniedBook` repeat every 1.7.7 signature, including `: void`;
+*Controls.* `AddressBook` and `DeniedBook` repeat every signature of the 1.7 core, including `: void`;
 `declare(strict_types=1)`, final classes and typed properties only. Every option is read through
 typed, clamped `Config` getters with defaults. Both hook handlers catch `Throwable`, log the
 exception class (`Log::exception`, message only with `galbridge_debug`) and degrade to an empty or
 inert book; `addressbook_get` always sets an instance for our source IDs, so core's fatal error 700
 cannot be triggered. composer requires `php >=8.1 <8.6`; PHPStan level 8 analyses the code against
-the Roundcube 1.7.7 tree.
+a Roundcube 1.7.x tree. The whole 1.7 branch is supported, so that an installation never has to
+hold back a security release of the core for the sake of the plugin.
 
-*Tests.* CI runs the whole suite on PHP 8.1 – 8.5 against Roundcube 1.7.7 with `failOnWarning`,
-`failOnNotice` and `failOnDeprecation`; `ContractTest` (the `rcube_addressbook` contract,
+*Tests.* CI runs the whole suite on PHP 8.1 – 8.5 against the newest Roundcube 1.7.x on the day of
+the run, and on PHP 8.1 and 8.4 against the oldest release (1.7.0), with `failOnWarning`,
+`failOnNotice` and `failOnDeprecation`; `CliToolTest::testDiagAcceptsEveryReleaseOfTheSupportedBranch`; `ContractTest` (the `rcube_addressbook` contract,
 `testDeniedBookContract`), `CorePathsTest::testEveryOwnSourceIdResolvesToAnInstance`,
 `PluginHooksTest::testAddressbookGetAlwaysAnswersOurIds`, `OldPluginRegressionTest`
 (`testDefect01BackendDeclarationsAreCompatibleWithRoundcube17`,
@@ -128,19 +135,26 @@ prefix.
 *Tests.* `ContractTest::testIdSearch`, `CorePathsTest::testMailtoSelectedContactsAndGroup`,
 `OldPluginRegressionTest::testDefect05ComposeToSelectedSendsOnlyTheSelectedContacts`.
 
-### GB-06 Unbounded queries, mass harvesting and wrong totals
+### GB-06 Unbounded queries, mass harvesting, wrong totals and silently incomplete sets
 
 *Threat.* Core asks for page sizes of 999, 9999 and 99999 and passes `_page` unbounded; the old
-plugin had no LIMIT and `count()` always returned 1.
+plugin had no LIMIT and `count()` always returned 1. A recipient set or an export that is cut
+without a word is taken for the whole.
 
 *Controls.* `set_page()` ≥ 1; the page size is capped at max(core `max_pagesize`,
 `addressbook_pagesize`), clamped to 10–1000 (`Limits::corePageCap`), so the page size Roundcube's own
 lists use is never mistaken for a full-set request. A larger size on page 1 is a full-set request
-handled explicitly (ARCHITECTURE 11): a group without a filter is counted first and returned
-completely or refused above the expansion cap; an ID search is limited by `galbridge_max_ids`; a
-search list is capped at `galbridge_max_results` / `galbridge_global_max_results` with a notice; a
-whole-book export follows the book's export policy and `galbridge_max_export`. A refused export
-downloads nothing (`204 No Content` from the `addressbook_export` hook) instead of an empty file.
+handled explicitly (ARCHITECTURE 11): the set is read by **one statement up to the limit of the
+operation plus one row** (`Repository::fullSet`) and is returned completely or refused – a group
+above the expansion cap, a whole book above `galbridge_max_export` (and only when the book's export
+policy allows it), an ID search above `galbridge_max_ids`. The bound of counting
+(`galbridge_max_count`) never takes part in that decision, whatever the relation between the
+limits. A set of which a fetched row could not be delivered is refused as well (`set_incomplete`).
+A group ID is honoured only for a group of the book's own aggregate: a book that shows no groups
+selects nothing by one. A search *list* is capped at `galbridge_max_results` /
+`galbridge_global_max_results` with a notice; in an export the same result is complete or refused.
+A refused export – also one that fails because of a database error – downloads nothing (`204 No
+Content` from the `addressbook_export` hook) instead of an empty or shortened file.
 `count()` is a `COUNT` over the same root predicate inside a `LIMIT` subquery bounded by
 `galbridge_max_count`; list offsets beyond it return an empty page. All membership predicates are
 semi-joins (`EXISTS` / `IN`), so rows are unique by primary key and totals and paging are exact; the
@@ -150,10 +164,13 @@ order is stable (sort key, address, kind).
 `testCountHonoursScopeFilterGroupAndPage`), `CorePathsTest`
 (`testFullSetSearchListsAreCappedWithANotice`, `testGroupExpandReturnsAllMembersOrRefuses`,
 `testMailtoGroupWithCoreMaxGroupMembersIsCompleteOrRefused`, `testExportPaths`),
+`AuditRegressionTest` (`testExportsAndRecipientSetsDoNotDependOnTheCountBound`,
+`testAFullSetThatLacksARowIsRefused`), `PluginHooksTest` (`testRefusedExportAnswersNoContent`,
+`testAFailingDirectoryRefusesTheExport`), E2E case 33,
 `OldPluginRegressionTest::testDefect06CountIsTheRealTotalAndListsArePaged`.
 
-*Residual risk.* An export is a file download: when a search-result export is capped, or an
-export is refused, no message can be shown (README 4 and 10).
+*Residual risk.* An export is a file download: when it is refused, no message can be shown with
+it (README 4 and 10).
 
 ### GB-07 SQL injection and engine-specific SQL errors
 
@@ -235,44 +252,78 @@ organization.
 
 *Threat.* With a user-chosen or templated IMAP host (`%d` from the client's `Host` header), an
 attacker authenticates against their own IMAP server as `ceo@tenant-a.example`; the old plugin took
-the scope from the domain part of the login string.
+the scope from the domain part of the login string. Two IMAP services on one host name (other
+ports) with different user databases, or a per-host configuration selected by the `Host` header
+(`include_host_config`), lead to the same confusion.
 
-*Controls.* IMAP-host binding (`ViewerResolver::allowedImapHosts`): the allowed hosts are
-`galbridge_imap_hosts`, or – only when that list is empty – the host part of the administrator's
-`imap_host` (read from a fresh configuration, never a user preference) when it is a single string
-without `%`; `parse_host()` is never called. Both `$_SESSION['storage_host']` and the user's stored
-`mail_host` must match. Otherwise the plugin stays disabled for the session. The home domain is
-`mailbox.domain` of the login's row (an active mailbox in an active, non-backup-MX domain; with
-`galbridge_hide_expired` neither of them may be expired), never the domain part of the login string;
-no row means no books.
+*Controls.* IMAP-server binding (`ViewerResolver::allowedImapHosts`): the allowed servers are
+`galbridge_imap_hosts` – entries `host`, `host:port` or a local socket `unix:///path` – or, only
+when that list is empty, host and port of the administrator's `imap_host` (read from a fresh
+configuration, never a user preference) when it is a single string without `%`; `parse_host()` is
+never called. With `include_host_config` nothing is derived: the list must be explicit. Both the
+session's IMAP server (`$_SESSION['storage_host']` **and** `storage_port`) and the user's stored
+`mail_host` must be covered; the cached Viewer is bound to host and port. Otherwise the plugin
+stays disabled for the session. A local socket (Roundcube opens it with port -1) has neither host
+name nor port: it is covered by the entry of that very socket – the path as written – and by
+nothing else; the rule that lets a host entry cover a host without a known port never applies to
+it, so a host called `unix` is not "the host part" of a socket URI. The home domain is `mailbox.domain` of the login's row (an active mailbox in an active,
+non-backup-MX domain; with `galbridge_hide_expired` neither of them may be expired) and must be
+the domain of the login itself – a row where the two differ opens no directory; no row means no
+books.
 
 *Tests.* `ConfigTest` (`testAllowedImapHostIsDerivedOnlyFromAFixedAdministratorHost`,
 `testUserSelectableImapHostWithoutExplicitListDisablesThePlugin`,
-`testSessionAndStoredImapHostMustBothMatch`), `IsolationTest::testLoginsWithoutAVisibleMailboxGetNoBooks`,
-`IsolationTest::testCachedViewerIsBoundToTheImapHost`.
+`testSessionAndStoredImapHostMustBothMatch`, `testExplicitImapHostsMayNameAPort`,
+`testTheImapPortOfTheSessionIsPartOfTheBinding`, `testCachedViewerIsBoundToTheImapPort`,
+`testHostDependentConfigurationNeedsAnExplicitHostList`, `testALocalSocketIsAnEndpointOfItsOwn`,
+`testASessionOnALocalSocketIsBoundToThatSocket`),
+`IsolationTest::testLoginsWithoutAVisibleMailboxGetNoBooks`,
+`IsolationTest::testCachedViewerIsBoundToTheImapHost`,
+`AuditRegressionTest::testADisabledMailboxLosesTheDirectoryWithItsNextRequest` (the row whose
+domain column was changed), `CliToolTest` (`testDiagWarnsAboutHostDependentConfiguration`,
+`testDiagAcceptsAnImapServerOnALocalSocket`), E2E case 32.
 
 *Residual risk.* A login under an alias domain gets no books (the login must equal
-`mailbox.username`).
+`mailbox.username`). The plugin compares host and port but cannot verify that a listed server
+authenticates against this vmail database (assumption above; SECURITY.md register GB-11).
 
 ### GB-12 Stale entitlements
 
 *Threat.* A disabled or moved account, or a tightened configuration, keeps directory access for the
-life of the session.
+life of the session – or for the life of a cache entry.
 
 *Controls.* The resolved Viewer is cached in `$_SESSION['galbridge']`, bound to the user id, login,
-IMAP host and the configuration fingerprint (a hash of every effective `galbridge_*` value and
-`imap_host`), for `galbridge_scope_ttl` (300 s, 30–3600). A configuration change applies on the next
-request; a database outage is cached separately for 30 s and never as "no entitlement". When the
-re-resolution of an expired Viewer fails with a database error, the expired Viewer is used only to
-keep listing the session's books as inert DeniedBooks that answer "The directory is temporarily
-unavailable."; it never reads directory data and is never written back. Directory content is never
-cached: every list and search re-applies all visibility predicates.
+IMAP server and the configuration fingerprint (an HMAC, keyed with Roundcube's `des_key`, over
+every effective `galbridge_*` value, `imap_host` and `include_host_config`), for
+`galbridge_scope_ttl` (300 s, 30–3600). Switches enter the fingerprint as they are in effect: for
+one that is set through the environment Roundcube hands out its own conversion of the text, which
+is `true` for "true" and for "false" alike. A configuration change applies on the next request; a
+database outage is cached separately for 30 s and never as "no entitlement". **A cached
+entitlement is confirmed before it is used to read**: the first statement of every request that
+reads directory data is one lookup of the mailbox row with the predicates of the full resolution
+(`ViewerResolver::confirm`, called by `Repository` before its first query). When the mailbox is
+gone, disabled, expired or no longer in its domain, that request reads nothing and the session
+entry is overwritten with "no mailbox" – overwritten, not unset: Roundcube merges the stored
+session with the one of the request, a key that is only unset would come back. Requests that merely
+instantiate a book (the sender-photo lookup of every opened message) do not pay for the statement.
+A session entry that claims an entitlement but carries no usable Viewer is ignored and resolved
+again. When the re-resolution of an expired Viewer fails with a database error, the expired Viewer
+is used only to keep listing the session's books as inert DeniedBooks that answer "The directory is
+temporarily unavailable."; it never reads directory data and is never written back. Directory
+content is never cached: every list and search re-applies all visibility predicates.
 
 *Tests.* `IsolationTest` (`testViewerIsCachedInTheSessionAndBoundToItsContext`,
 `testConfigurationChangeOrExpiredTtlInvalidatesTheCache`, `testNegativeDecisionsAreCachedToo`,
-`testOutageIsMemoisedAndNeverCachedAsNoEntitlement`), `ConfigTest::testPreferencesDoNotChangeTheFingerprint`.
+`testOutageIsMemoisedAndNeverCachedAsNoEntitlement`), `ConfigTest`
+(`testPreferencesDoNotChangeTheFingerprint`, `testFingerprintIsKeyedWithTheServerSecret`,
+`testTheFingerprintFollowsSwitchesSetThroughTheEnvironment`),
+`AuditRegressionTest` (`testADisabledMailboxLosesTheDirectoryWithItsNextRequest`,
+`testTheConfirmationRunsOncePerReadingRequestOnly`,
+`testAViewerWithoutAddressesMatchesNoRestrictedList`), E2E case 34 (through Roundcube's own session
+handler).
 
-*Residual risk.* A change of the user's own home domain or aliases in vmail applies after the TTL.
+*Residual risk.* A new own alias of the viewer (it can make a restricted list visible) and a
+changed column grant apply after the TTL.
 
 ### GB-13 Global-book over-exposure in multi-tenant hosting
 
@@ -286,7 +337,7 @@ disable the book when malformed. The viewer's own domain-book scope is subtracte
 `galbridge_global_include_home`. Defaults: no groups (and no groups at all while search-only),
 search-only, prefix search, every word at the minimum length, the `organization` field matched by
 its complete label only, result cap 100, no whole-book export, foreign entries marked
-`Name (domain)`.
+`(domain) Name`.
 The domain book itself can be restricted per viewer domain (`galbridge_domain_viewer_domains`,
 `..._exclude`).
 
@@ -302,15 +353,30 @@ forwarding targets (`is_forwarding`); groups expand into recipients.
 
 *Controls.* Groups are department or domain groups of **persons only**; alias accounts and mailing
 lists are individual entries whose members are never listed or expanded. Alias accounts and lists
-are shown only to viewers who may post to them under iRedAPD's `accesspolicy` (`AccessPolicy`);
-unknown policy values are hidden (fail closed). Forwarding targets, catch-all rows and external list
-members are never selected; per-user aliases are shown only with `galbridge_user_aliases`. Every
-`forwardings` / `moderators` / `maillist_owners` predicate is a semi-join.
+are shown only to viewers who may post to them under iRedAPD's `accesspolicy` (`AccessPolicy`;
+compared with the iRedAPD sources, ARCHITECTURE 6); unknown policy values are hidden (fail closed).
+The plugin does not read the `forwardings` table at all: every statement names the view
+`galbridge_forwardings`, which holds the alias, alias-member and list rows only, and the role has no
+grant on the table – forwarding targets are out of reach of the role, not merely unselected.
+Catch-all rows and external list members are never selected. Per-user aliases are shown only with
+`galbridge_user_aliases`, and then **shown and matched under one predicate**
+(`QueryBuilder::userAliasRoot`): the alias row belongs to a domain in the book's scope that is
+active, not a backup MX and (with `galbridge_hide_expired`) not expired, and the alias is on
+neither hidden list. A hidden or out-of-scope alias is therefore not shown and cannot be used to
+find its owner. The aliases shown per person (20) and the viewer's own aliases used for the list
+policies (200, of deliverable domains only) are bounded. With `galbridge_hide_expired`, alias
+accounts and lists whose `expired` column the role cannot read are left out instead of being listed
+unfiltered. Every forwardings / `moderators` / `maillist_owners` predicate is a semi-join.
 
 *Tests.* `AccessPolicyTest` (`testListingShowsExactlyThePostableAliasesAndLists`,
 `testHiddenEntriesAreUnreachableByIdAndSearch`, `testGlobalBookAppliesThePolicyOfTheViewer`,
 `testGroupsContainPersonsOnly`), `LeakageTest::testNoOutputEverContainsACanary`,
-`ContractTest::testListGroupsAndGroupSearch`.
+`ContractTest::testListGroupsAndGroupSearch`, `AuditRegressionTest`
+(`testHiddenUserAliasIsNeitherShownNorMatched`, `testAliasRowsOutsideTheBookAreNeitherShownNorMatched`,
+`testExpiredListKindsAreLeftOutWhenTheirExpiryIsNotReadable`, `testAliasSetsAreBounded`,
+`testThePluginReadsTheForwardingsViewOnly`), `DsnPolicyTest`
+(`testTheTemplateRoleCannotReadPrivateForwardingTargets`,
+`testRoleThatCanReadTheForwardingsTableIsRefused`), E2E case 31.
 
 ### GB-15 Cache poisoning across users or tenants
 
@@ -334,12 +400,16 @@ preference (saved by a plugin or written into the database) could widen the dire
 
 *Controls.* `Config::get()` ignores every preference named `galbridge_*` and returns the
 administrator's value from a fresh `rcube_config` (main configuration plus the plugin
-configuration) or the built-in default. Core options the plugin needs from the administrator
+configuration) or the built-in default. An option that no configuration file sets is read through
+that fresh configuration as well, so a `ROUNDCUBE_<OPTION>` environment variable – the only place
+such an option may be set in a container deployment – applies exactly as it does for a user without
+the preference (`rcube_config::all()` applies those variables to the options of the files only). Core options the plugin needs from the administrator
 (`imap_host`, `db_dsnw`, `password_db_dsn`) are read the same way. SECURITY.md recommends listing
 the security-relevant options in `dont_override` as well.
 
 *Tests.* `ConfigTest` (`testUserPreferencesNeverOverrideAdministratorOptions`,
-`testInjectedPreferencesCannotWidenTheDirectory`, `testGuardReadsAFreshConfigurationWhenAdminValuesAreNotGiven`),
+`testInjectedPreferencesCannotWidenTheDirectory`, `testGuardReadsAFreshConfigurationWhenAdminValuesAreNotGiven`,
+`testThePreferenceGuardReadsOptionsSetThroughTheEnvironmentAlone`),
 `PluginHooksTest::testStoredGalbridgePreferencesAreIgnoredByThePlugin`.
 
 ### GB-17 Core options a user controls are used unsafely
@@ -384,15 +454,48 @@ zero-width, soft hyphen, tag characters), CR/LF and `\ " < >` removed; separator
 characters (U+2800, U+3164, U+115F, U+1160, U+FFA0) collapsed, so padding cannot push a marker out
 of view; capped at 128 characters. The display name **and** the first and last names (core builds
 recipient names from them for `addressbook_name_listing` 1-3 and `contactlist_name_template`) are
-cut at the first at-sign, including the look-alikes U+FF20 and U+FE6B. Addresses are canonical
-lower-case ASCII (A-labels, no homographs) and must pass `rcube_utils::check_email()`; rows that fail
-are dropped (`row_invalid`, or `row_out_of_scope` for a row outside the book's scope). In the global
-book, entries outside the viewer's home domain(s) are shown as `Name (domain)` with the ASCII domain
-and carry no first or last name, so every listing mode shows the marker.
+cut at the first at-sign, including the look-alikes U+FF20 and U+FE6B. That check is only as good
+as the text it sees, so the two notations a later reader **decodes** are neutralised before it:
+`&` becomes U+FF06 (the recipient widget of the Elastic skin inserts names as HTML after escaping
+only `<` and `>`, so `&#64;` or `&commat;` would be displayed as an at-sign and travel on into the
+recipient header), and `=?` and `?=`, the delimiters of an RFC 2047 encoded word that the mail
+clients of the recipients would decode into arbitrary text, are split. A later **deletion** joins
+the text on both sides of it, so what Roundcube deletes is deleted before the split: with a
+`contactlist_name_template` other than `{name}`, `rcube_addressbook::compose_search_name()` removes
+every empty bracket pair (`()`, `[]`, with the whitespace before it) from the composed name –
+`=()?` would be `=?` again. Empty pairs are therefore removed until none is left, and a text never
+starts with a closing or ends with an opening bracket (it would form such a pair with a bracket of
+the template, `{name} ({department})`). An entry without any name gets the local part of its
+address as the name; an address may hold `&`, `#`, `=` and `?`, so that fallback is treated like
+every other text. Addresses are canonical lower-case ASCII (A-labels, no homographs) and must pass
+`rcube_utils::check_email()`; rows that fail are dropped (`row_invalid`, or `row_out_of_scope` for
+a row outside the book's scope). In the global book, entries outside the viewer's home domain(s)
+are shown as `(domain) Name` with the ASCII domain – the marker first, because a recipient field
+shortens a long name at its end – and carry no first or last name, so every listing mode shows the
+marker. The marker is part of the name, so nothing of such an entry may stand before the name:
+under a `contactlist_name_template` that shows another field of the entry before `{name}`, or has
+no `{name}`, foreign entries do not carry that field (department, telephone numbers;
+`RecordMapper::textBeforeName`), and `diag` names it.
 
-*Tests.* `NormalizerTest::testDisplayTextOutputIsSafeForRecipientHeaders`,
-`NormalizerTest::testDisplayTextRemovesInvisibleCharacters`, `LeakageTest`,
-`ContractTest::testRecordShapeAndColtypes`.
+*Tests.* `NormalizerTest` (`testDisplayTextOutputIsSafeForRecipientHeaders`,
+`testDisplayTextRemovesInvisibleCharacters`, `testDisplayTextNeutralisesNotationsThatAreDecodedLater`,
+`testAmpersandStaysReadable`, `testTextsCannotFormAnEncodedWordAcrossTheBracketsOfATemplate`),
+`LeakageTest`, `ContractTest::testRecordShapeAndColtypes`, `CorePathsTest`
+(`testListNamesKeepTheProtectionsInEveryListingMode` – the names as Roundcube's own
+`compose_list_name()` composes them, for the four listing modes and nine templates, each in a
+process of its own; `testTextThatATemplateShowsBeforeTheNameIsFound`),
+`AuditRegressionTest` (`testNamesCannotBecomeAnAddressWhenDecodedLater`,
+`testTheForeignDomainMarkerCannotBePushedOutOfSight`), `CliToolTest`
+(`testDiagTellsWhichFieldsTheNameTemplateTakesFromForeignEntries`,
+`testDiagTellsThatMarkedEntriesAreSuggestedFirst`), E2E case 35, browser case U8 (the recipient
+widget and the suggestion list of the Elastic skin in Chromium).
+
+*Residual risk.* Roundcube sorts the autocomplete suggestions of all address books by name (ICU
+collation) and pre-selects the first one; a name that starts with the marker sorts before letters
+and digits, so entries of other domains are suggested **before** unmarked names (SECURITY.md
+register GB-19; `galbridge_global_autocomplete = false` keeps the global book out of
+autocomplete). Texts are treated field by field: a name template that joins two fields with
+nothing between them is outside what that can cover.
 
 ### GB-20 Over-exposure of personal data
 
@@ -458,44 +561,61 @@ driver error texts, exception messages and schema hints.
 
 *Threat.* With iRedMail's `vmail` role (SELECT on every column) or `roundcube` role (UPDATE on
 `vmail.mailbox`) any plugin bug could read password hashes or modify vmail; the old plugin's
-PostgreSQL view embedded the `vmail` password in a `dblink` connection string.
+PostgreSQL view embedded the `vmail` password in a `dblink` connection string. A role that can read
+the whole `forwardings` table can read where every mailbox forwards its mail.
 
 *Controls.* A mandatory, separate `galbridge_db_dsn`. `Dsn` refuses the roles in
-`galbridge_db_refused_users` (iRedMail's roles, `root`, `postgres`), the `db_dsnw` user and the
-`password_db_dsn` user. `ViewerResolver` probes `information_schema.columns` and denies every book
-when `mailbox.password`, `recovery_email` or `allow_nets` is visible (`role_too_broad`). The grant
-templates create a new role with column-level `SELECT` only (PostgreSQL: `NOINHERIT`, read-only
-transactions, statement timeout, connection limit); the personal-data columns (`telephone`,
-`mobile`, `birthday`) are a commented-out grant. `bin/galbridge.sh grants` prints them with a fresh
-password that the statements also apply to an existing role (so the printed DSN always works) and
-never writes into the plugin directory. No views, `dblink` or `DEFINER` objects. `diag` checks that
-`SELECT password` is denied and reads the role's write privileges from the catalogs (PostgreSQL
-`has_table_privilege` / `has_any_column_privilege`, MariaDB/MySQL `information_schema` privileges);
-a statement probe would only hit the plugin's own read-only session and could never report a
-write-capable role.
+`galbridge_db_refused_users` (iRedMail's roles, `root`, `postgres`; a value that is not a list
+leaves the built-in list in force), the `db_dsnw` user and the `password_db_dsn` user.
+`ViewerResolver` probes `information_schema.columns` and denies every book when `mailbox.password`,
+`recovery_email` or `allow_nets` is visible, or when the role can read the `forwardings` table
+(`role_too_broad`). The grant templates create a new role with column-level `SELECT` only and the
+view `galbridge_forwardings` (MariaDB/MySQL `SQL SECURITY DEFINER`, PostgreSQL `security_barrier`;
+alias, alias-member and list rows) instead of a grant on the table; on both engines the account is
+limited (connections, statement time; PostgreSQL also `NOINHERIT` and read-only transactions); the
+personal-data columns (`telephone`, `mobile`, `birthday`) are a commented-out grant. The view is
+the only object GAL Bridge adds to `vmail`; no `dblink`, no stored credentials. `diag` accepts the
+password-column check only when the server refuses the statement for lack of privilege, checks that
+the `forwardings` table is not readable, and reads the role's write privileges from the catalogs
+(PostgreSQL `has_table_privilege` / `has_any_column_privilege`, MariaDB/MySQL `information_schema`
+privileges) – and, on MariaDB/MySQL, also asks the server with statements that can change nothing,
+which finds privileges granted through a database role as well.
 
 *Tests.* `DsnPolicyTest` (`testIredmailAndSuperuserRolesAreRefused`,
 `testRoundcubeAndPasswordPluginUsersAreRefused`, `testRoleThatCanReadSecretColumnsDisablesEveryBook`,
-`testRoleWithoutARequiredColumnFailsClosed`),
-`OldPluginRegressionTest::testDefect11PortableSqlLeastPrivilegeAndStableIds`, `CliToolTest` (the
-`grants` output applied to both servers as a new role, re-run included; `diag` against a
-write-capable role); CI and the local integration databases connect with a role created from the
-shipped templates (`tests/fixtures/vmail/load.sh`, with the commented-out personal-data grant
-enabled).
+`testRoleWithoutARequiredColumnFailsClosed`, `testTheTemplateRoleCannotReadPrivateForwardingTargets`,
+`testRoleThatCanReadTheForwardingsTableIsRefused`), `ConfigTest::testRefusedUsersOfTheWrongTypeKeepTheBuiltInList`,
+`OldPluginRegressionTest::testDefect11PortableSqlLeastPrivilegeAndStableIds`, `CliToolTest`
+(`testGeneratedGrantsCreateAWorkingLeastPrivilegeRole`, `testGrantsOnlyMovesARoleOfTheOldGrantsToTheView`,
+`testDiagFailsForAWriteCapableRole`, `testDiagFindsWritePrivilegesGrantedThroughARole`); CI and the
+local integration databases connect with a role created from the shipped templates
+(`tests/fixtures/vmail/load.sh`, with the commented-out personal-data grant enabled).
 
 *Residual risk.* The password is in the plugin configuration file; protect it with `0640
-root:<PHP group>` and the web-server deny rule (README 2.3, 2.6).
+root:<PHP group>` and the web-server deny rule (README 2.3, 2.6). The credentials and how they are
+created: GB-30.
 
 ### GB-24 Eavesdropping on or tampering with traffic to a remote database
 
-*Controls.* `Dsn` accepts a non-local host (anything but a unix socket, `127.0.0.0/8`, `::1`,
-`localhost`) only with verified TLS – PostgreSQL `sslmode=verify-ca|verify-full`, MySQL `ca` or
-`capath` with `verify_server_cert=1` – unless `galbridge_db_allow_plaintext` is set (logged as
-`dsn_warning`, `diag` WARN). The PostgreSQL `service` parameter, which would move host and user out
-of sight of these checks, is refused.
+*Threat.* The role's password and the directory cross a network; a DSN that is checked in one
+reading and used in another, or a client library that takes its target from the environment,
+connects somewhere else or without the protection the check assumed.
+
+*Controls.* `Dsn` judges the DSN in the form the driver receives it: an explicit host or unix
+socket, a port of digits, a plain database name, and only parameters of a per-driver allow-list,
+each once and matching its pattern; the PostgreSQL `service` parameter and the client-library
+variables that redirect a connection (`PGHOSTADDR`, `PGSERVICE`, `PGSERVICEFILE`; `PGPORT` for a DSN
+without a port) are refused. A non-local host (anything but a unix socket, `127.0.0.0/8`, `::1`,
+`localhost`) is accepted only with TLS that verifies the **host name**: PostgreSQL
+`sslmode=verify-full`, MySQL `ca` or `capath` with `verify_server_cert=1`. `sslmode=verify-ca`
+(issuer only) needs `galbridge_db_allow_verify_ca`, anything weaker
+`galbridge_db_allow_plaintext`; both are logged as `dsn_warning` and shown by `diag` (WARN), which
+also warns when `pdo_mysql` is not built on `mysqlnd`.
 
 *Tests.* `DsnPolicyTest` (`testRemoteHostWithoutVerifiedTlsIsRefused`,
 `testRemoteHostDisguisedAsLocalSocketIsRefused`, `testRemoteHostWithVerifiedTlsIsAccepted`,
+`testVerifyCaIsNotVerifiedTls`, `testDsnIsJudgedInTheFormTheDriverReceives`,
+`testOrdinaryDsnsAreStillAccepted`, `testLibpqEnvironmentThatRedirectsTheConnectionIsRefused`,
 `testPlaintextRemoteNeedsExplicitOptInAndWarns`, `testPostgresServiceParameterIsRefused`,
 `testLoopbackDetection`).
 
@@ -523,18 +643,24 @@ the compose list); the scope predicate first (indexed `domain`); a lazy connecti
 query (never in `init()`; the sender-photo lookup of every opened message runs no directory query,
 and the Viewer is resolved at most once per `galbridge_scope_ttl`); a connect timeout
 injected into the DSN (`galbridge_db_connect_timeout`, 2 s); a statement timeout and read-only
-session per connection (`galbridge_db_timeout`, 3 s) as a backstop to the role limits; a failed
-connection memoised for the request and for 30 s in the session; a role connection limit sized with
-`grants --connection-limit` (PostgreSQL; `diag` shows it).
+session per connection (`galbridge_db_timeout`, 3 s) as a backstop to the limits of the account; a
+failed connection memoised for the request and for 30 s in the session; **limits of the account on
+both engines**, set by the grant templates and sized with `grants --connection-limit` (PostgreSQL
+`CONNECTION LIMIT` and `statement_timeout`; MariaDB/MySQL `MAX_USER_CONNECTIONS` and, on MariaDB,
+`MAX_STATEMENT_TIME`), which `diag` reports (WARN when the account is unlimited or when the server
+refused a session limit); bounded alias sets (GB-14).
 
 *Tests.* `CorePathsTest::testSenderPhotoOfEveryOpenedMessageNeverQueries`,
 `PluginHooksTest::testInitRegistersTwoHooksAndNeverTouchesTheDatabase`,
 `ContractTest::testEmptyTooShortAndTooLongInputNeverQueries`,
 `IsolationTest::testOutageIsMemoisedAndNeverCachedAsNoEntitlement`,
-`DsnPolicyTest::testConnectTimeoutIsInjectedWhenMissing`, `DsnPolicyTest::testInjectedConnectTimeoutIsClamped`.
+`DsnPolicyTest::testConnectTimeoutIsInjectedWhenMissing`, `DsnPolicyTest::testInjectedConnectTimeoutIsClamped`,
+`CliToolTest` (`testConnectionLimitIsAppliedForBothEngines`, `testDiagReportsTheConnectionLimitOfTheAccount`,
+`testGeneratedGrantsCreateAWorkingLeastPrivilegeRole`), `AuditRegressionTest::testAliasSetsAreBounded`.
 
-*Residual risk.* Request volume is limited only by the reverse proxy and the role's connection
-limit (SECURITY.md).
+*Residual risk.* The plugin does not slow down a user who sends many requests: request volume is
+limited by the reverse proxy and the connection limit of the account (SECURITY.md, checklist and
+register GB-26).
 
 ### GB-27 Scope or deny-list bypass through case, IDN or collation differences
 
@@ -562,14 +688,133 @@ before Roundcube's CSRF and authentication checks.
 
 *Controls.* A whole-book export is allowed only when the book's export option is on (domain book
 `true`, global book `false`) and only up to `galbridge_max_export`; a search-only book exports
-nothing without a search. A refused export downloads nothing (`204 No Content`). Exports contain
-the effective fields only. `init()` returns without an authenticated user, never touches the
+nothing without a search. Every export is complete or refused (GB-06), and a refused export
+downloads nothing (`204 No Content`). Exports contain the effective fields only. `init()` returns without an authenticated user, never touches the
 database, registers no actions and reads only core's resolved action name (it adds the
 `addressbook_export` hook for `addressbook/export` only); the plugin is limited to the `mail` and
 `addressbook` tasks.
 
 *Tests.* `CorePathsTest::testExportPaths`, `PluginHooksTest` (`testAnonymousRequestsRegisterNothing`,
 `testInitRegistersTwoHooksAndNeverTouchesTheDatabase`, `testAutocompleteIsWiredOnlyForComposeAndAutocomplete`).
+
+### GB-29 Configuration values that fail open
+
+*Threat.* PHP casts: the string `'false'` is true, an array where a column name is expected becomes
+"no column". Roundcube's environment overrides (`ROUNDCUBE_<OPTION>`) turn the text `false` into
+the boolean true before a plugin sees it. A slip of the administrator then switches a restriction
+off, or a feature on, without any sign.
+
+*Controls.* `Config` never casts. A switch is a boolean or the integer 1 / 0 (the `searchonly`
+options also `'auto'`); `galbridge_visibility_column` is a string; the hidden lists, deny-lists and
+`galbridge_db_refused_users` are lists. Anything else is a reported problem – and where the option
+protects something, **every book is disabled** (`Config::booksDisabled`, enforced by `Entitlements`
+and again by `QueryBuilder::forBook`). For its switches the plugin reads the environment variable
+itself and accepts only `1`, `0`, `true`, `false` (`auto`). `galbridge_fields` that is not a list
+shows name and e-mail only – fewer fields, never more – and is reported like the others. `diag`
+prints every problem, the overrides in effect (names only) and the effective value of **every**
+switch under the name of its option (one that is ambiguous is marked `INVALID`).
+
+*Tests.* `ConfigTest` (`testSwitchesAreNeverCast`, `testEveryBooleanDefaultIsCoveredByTheSwitchList`,
+`testSearchOnlyIsTrueFalseOrAuto`, `testAnAmbiguousSwitchDisablesEveryBook`,
+`testEnvironmentOverridesOfSwitchesAreReadStrictly`, `testEnvironmentFalseKeepsTheGlobalBookOff`,
+`testVisibilityColumnMustBeAStringNamingAColumn`,
+`testVisibilityColumnOfTheWrongTypeNeverSwitchesTheFilterOff`,
+`testRefusedUsersOfTheWrongTypeKeepTheBuiltInList`, `testNumbersAndStringsOfTheWrongTypeAreReported`,
+`testAFieldListOfTheWrongTypeIsReported`, `testAFieldListFromAnEnvironmentVariableThatIsNotJsonIsReported`),
+`CliToolTest` (`testDiagFailsForAnOptionOfTheWrongType`,
+`testDiagShowsEffectiveSwitchesAndEnvironmentOverrides`), E2E case 32.
+
+### GB-30 Administration tooling: privileged execution, the wrong role, credentials in database logs
+
+*Threat.* `bin/galbridge.sh` is run by an administrator, typically with `sudo`: it loads PHP from
+the plugin directory and from the Roundcube tree, so whoever can write those files runs code as the
+caller. Its `grants` output is executed by the database administrator: a mistyped role name changes
+the password and settings of another component's role; a password inside a statement stays in the
+logs of the database server (PostgreSQL `log_statement`; MariaDB writes account statements verbatim
+to its general, binary and – when they qualify – slow query logs).
+
+*Controls.* The script refuses to run as root; with `--allow-root` it still refuses unless
+everything it then loads belongs to root and is not writable by group or others – the plugin and,
+below the Roundcube directory, every directory and PHP file of `program/`, `plugins/` (Roundcube's
+start loads every enabled plugin; the tool reads the configuration of the password plugin),
+`vendor/` and the configuration directory, symbolic links followed, with the directories above
+them. The user of the process is taken from the posix extension or, where PHP has none, from
+`/proc`; a user that cannot be determined counts as root, so a missing extension never switches
+the refusal off. Arguments are strict: an option without its value (`--role acme`), an unknown
+option and a stray word are usage errors, so a typing mistake cannot leave the default role in the
+statements. `grants` refuses the names of iRedMail's, Roundcube's and the database server's
+own roles; its default output only **creates** the role and stops, changing nothing, when a role of
+that name exists (PostgreSQL: one transaction); changing the password of an existing role
+(`--reset-password`) and re-applying grants without touching the password (`--grants-only`) are
+separate, explicit forms, named in the second line of the output. The statements carry a
+**verifier** of the password (PostgreSQL SCRAM-SHA-256, MariaDB/MySQL `mysql_native_password`), the
+clear text exists in the DSN line only; the PostgreSQL output also switches statement logging off
+for its transaction – including the sampled logging of newer servers, the transaction sample
+before `BEGIN`, where it is decided – and for the role. The clear-text form for MySQL 8.4+
+(`--clear-text-password`) begins with a statement that stops it on MariaDB. The role name, the
+account host and the database are inserted in ONE pass over a statement, so a host name that
+contains `vmail.` is not renamed with the database; the comments of every output describe its own
+statements. Options are validated with anchored patterns; `diag` validates `--user` before
+printing anything of it and never prints a password or the value of an environment override.
+
+*Tests.* `CliToolTest` (`testTheScriptRefusesToRunAsRoot`,
+`testTheScriptKnowsItsUserWithoutThePosixExtension`, `testAllowRootChecksEverythingThatIsLoadedAsRoot`,
+`testDiagChecksTheConfigurationFile`, `testRolesOfOtherComponentsAreNeverTouched`,
+`testInvalidGrantArgumentsAreRefused`, `testOptionsWithoutEqualsSignOrWithAnUnknownNameAreRefused`,
+`testAnAccountHostThatContainsTheDatabaseNameIsNotRenamed`, `testTheCommentsOfEveryModeDescribeItsStatements`,
+`testDefaultsPrintTheShippedTemplateWithAFreshPassword`,
+`testGeneratedGrantsCreateAWorkingLeastPrivilegeRole` – applied to MariaDB and PostgreSQL: create,
+refused second run, reset, grants-only –, `testClearTextPasswordOutputRefusesToRunOnMariaDb`,
+`testDiagNeverEchoesAnInvalidUserArgument`, `testDiagRefusedDsnNeverPrintsThePassword`).
+
+*Residual risk.* The verifier of MariaDB/MySQL is the one of `mysql_native_password` (SECURITY.md
+register GB-30). A password that was set with the statements of 1.0.0 may be in existing database
+logs (SECURITY.md, Logs).
+
+### GB-31 Plugin files served by the web server; development files on a mail server
+
+*Threat.* The plugin directory lies below the web root of some setups (iRedMail's nginx aliases
+`static.php` to the Roundcube directory): its source, SQL templates and anything an administrator
+leaves there can be downloaded. A git clone as installation method also brings `tests/` – scripts
+that drop databases and reconfigure Dovecot – and, if they were ever committed, working documents
+of a security audit.
+
+*Controls.* The directory holds no secret of the installation when the documented layout is used
+(the configuration file is denied by iRedMail's templates and may live in `config/`); `.htaccess`
+denies everything on Apache; README 2.6 gives the nginx rule. `diag` reports a git clone and files
+that are not part of a release, warns when the PHP user can write the plugin code, and with
+`--url=` asks the web server itself whether it serves plugin files (FAIL when it does) – under the
+web path of the plugin, `plugins/galbridge/`, whatever its directory is called on disk, and after
+a control request: an address that does not answer like the Roundcube webmail gets a WARN, because
+"not served" at a wrong address says nothing. The
+documented installation is the archive of a verified, signed tag; release archives leave out
+`tests/` and tooling (`.gitattributes`), and audit documents are git-ignored. The test scripts
+refuse anything but a `*test*` database and test role names, refuse a machine that looks like a
+mail server and never stop a Dovecot they did not configure.
+
+*Tests.* `SourceGuardTest::testThePluginDirectoryDeniesWebAccess`, `CliToolTest`
+(`testDiagChecksWhetherTheWebServerServesThePluginDirectory`, `testDiagReportsAGitCloneAndForeignFiles`,
+`testDiagJudgesAReleaseDirectoryUnderAnotherName`, `testTheReleaseEntriesAreWhatGitExports`);
+the CI job `release` checks the content of the release archive.
+
+### GB-32 Supply chain of development and release
+
+*Threat.* A compromised or vulnerable development dependency, CI action or container image; a
+secret committed by mistake; a release that is not what the maintainer tagged.
+
+*Controls.* The plugin has no runtime dependency besides Roundcube itself. CI: actions pinned to
+commit SHAs, service images pinned by digest, a read-only token and no secrets; `composer audit` on
+every resolved dependency set, whose versions each run records; lower bounds of PHPUnit that exclude
+the releases with known advisories; a secret scan of the history and the tree (gitleaks, verified
+by its checksum, with a control that proves the scanner works); static checks of the production
+code in the test suite (`SourceGuardTest`: no process execution, dynamic code, deserialisation or
+file writes; SQL execution in one class). Releases are signed, annotated tags; CI refuses a tag
+whose signature GitHub does not verify or whose version differs from the code and the changelog
+(docs/RELEASING.md).
+
+*Tests.* `SourceGuardTest`; the CI jobs `security` and `release`.
+
+*Residual risk.* No committed lockfile (SECURITY.md register GB-32).
 
 ## What GAL Bridge does NOT protect against
 
@@ -578,9 +823,12 @@ database, registers no actions and reads only core's resolved action name (it ad
 * A compromised session store (it can change the cached Viewer or simply take over a session).
 * Disclosure through the directory itself to legitimate viewers: everything a book shows is, by
   design, visible to every user entitled to that book. Choose books, fields and lists accordingly.
-* The content of database server logs, Roundcube's errors log (connection messages) and web server
-  access logs (contact IDs encode addresses); see SECURITY.md for the mitigations.
+* The content of database server logs on MariaDB/MySQL (search terms in the general and slow query
+  logs), Roundcube's errors log (connection messages) and web server access logs (contact IDs
+  encode addresses, searches are GET requests); see SECURITY.md for the mitigations.
 * Request floods beyond the result caps and timeouts, without a reverse-proxy limit.
-* Changes in vmail that affect the viewer's own scope within `galbridge_scope_ttl`.
+* An IMAP server that the administrator lists as a directory server although it authenticates
+  against another user database.
+* A new own alias of a viewer, or a changed column grant, within `galbridge_scope_ttl`.
 * Engine-specific accent folding (MariaDB folds, PostgreSQL does not).
 * Users of the OpenLDAP edition of iRedMail (not supported).

@@ -11,6 +11,7 @@ declare(strict_types=1);
 namespace GalBridge\Tests\Integration;
 
 use GalBridge\AddressBook;
+use GalBridge\Cli\Tool;
 use GalBridge\Config;
 use GalBridge\Db\Connection;
 use GalBridge\Db\Dsn;
@@ -142,7 +143,7 @@ final class OldPluginRegressionTest extends TestCase
     public function testDefect01BackendDeclarationsAreCompatibleWithRoundcube17(string $dsn): void
     {
         foreach (['reset', 'set_search_set'] as $method) {
-            self::assertSame('void', (string) (new \ReflectionMethod(\rcube_addressbook::class, $method))->getReturnType(), 'the 1.7.7 contract');
+            self::assertSame('void', (string) (new \ReflectionMethod(\rcube_addressbook::class, $method))->getReturnType(), 'the 1.7 contract');
         }
         foreach ([AddressBook::class, DeniedBook::class] as $class) {
             self::assertTrue(is_subclass_of($class, \rcube_addressbook::class));
@@ -534,15 +535,31 @@ final class OldPluginRegressionTest extends TestCase
             self::assertSame($record['email:work'][0], IdCodec::decodeContact($record['ID'])['address'] ?? null);
         }
 
-        // no view, no DEFINER, no dblink, no embedded credentials: a dedicated column-level role
+        // no dblink, no embedded credentials, no view that WIDENS access (the old plugin's view handed
+        // every row and column of vmail.mailbox to Roundcube's own role, with root's rights): a
+        // dedicated column-level role
         foreach (['mysql', 'postgres'] as $flavour) {
             // the statements only (the comments explain what is NOT granted)
             $sql = (string) preg_replace('/^\s*--.*$/m', '', (string) file_get_contents(dirname(__DIR__, 2) . '/SQL/grants.' . $flavour . '.sql'));
-            foreach (['DEFINER', 'dblink', 'CREATE VIEW', 'global_addressbook', 'GRANT ALL', 'SELECT *', 'password)', ' password,'] as $forbidden) {
+            foreach (['DEFINER =', 'DEFINER=', 'dblink', 'global_addressbook', 'GRANT ALL', 'SELECT *', 'password)', ' password,', 'recovery_email', 'allow_nets'] as $forbidden) {
                 self::assertStringNotContainsStringIgnoringCase($forbidden, $sql, $flavour . ': ' . $forbidden);
             }
-            self::assertGreaterThanOrEqual(1, preg_match_all("/(?:IDENTIFIED BY|PASSWORD) '([^']*)'/", $sql, $m), $flavour);
-            self::assertSame(['CHANGE_ME_RANDOM_PASSWORD'], array_values(array_unique($m[1])), $flavour . ': only a placeholder password');
+            // exactly ONE view, and it narrows: seven columns of forwardings, three kinds of rows -
+            // never the private forwarding targets - and the role gets the view INSTEAD of the table
+            self::assertSame(1, preg_match_all('/\bVIEW\s+((?:vmail\.)?[a-z_]+)/', $sql, $views), $flavour);
+            self::assertSame($flavour === 'mysql' ? 'vmail.galbridge_forwardings' : 'galbridge_forwardings', $views[1][0]);
+            self::assertMatchesRegularExpression('/VIEW\s+\S+(?: WITH \(security_barrier = true\))? AS\s+SELECT address, forwarding, domain, is_alias, is_list, is_maillist, active\s+FROM (?:vmail\.)?forwardings\s+WHERE is_alias = 1 OR is_list = 1 OR is_maillist = 1;/', $sql, $flavour);
+            self::assertDoesNotMatchRegularExpression('/\bGRANT\b[^;]*\bON (?:vmail\.)?forwardings\b/', $sql, $flavour . ': no grant on the forwardings table');
+            self::assertMatchesRegularExpression('/GRANT SELECT \([a-z_, ]+\) ON (?:vmail\.)?galbridge_forwardings TO /', $sql, $flavour);
+            self::assertStringNotContainsString('is_forwarding', $sql, $flavour);
+            // no credential: a placeholder where the verifier (MySQL/MariaDB) or the password goes
+            self::assertGreaterThanOrEqual(1, preg_match_all("/(?:IDENTIFIED BY|IDENTIFIED WITH [a-z_0-9]+ AS|PASSWORD) '([^']*)'/", $sql, $m), $flavour);
+            self::assertSame([$flavour === 'mysql' ? 'CHANGE_ME_PASSWORD_VERIFIER' : 'CHANGE_ME_RANDOM_PASSWORD'], array_values(array_unique($m[1])), $flavour . ': only a placeholder');
+            if ($flavour === 'mysql') {
+                // MariaDB keeps account statements verbatim in its logs: the template has no statement
+                // that could take the password itself
+                self::assertDoesNotMatchRegularExpression("/^[^-\n][^\n]*IDENTIFIED BY '/m", $sql);
+            }
             self::assertMatchesRegularExpression('/GRANT SELECT \(username, name, domain, active, enabledeliver, expired\) ON (?:vmail\.)?mailbox/', $sql);
             // the iRedMail 1.7.3 columns are a separate statement, so a server without them can skip it;
             // the personal-data columns are not granted unless the administrator enables those fields
@@ -631,7 +648,9 @@ final class OldPluginRegressionTest extends TestCase
         self::assertSame('GPL-3.0-or-later', $composer['license']);
         self::assertSame('https://github.com/takenek/galbridge', $composer['homepage']);
         self::assertSame('TaKeN.PL Usługi Informatyczne Marek Królikowski', $composer['authors'][0]['name']);
-        self::assertSame('1.7.7', $composer['extra']['roundcube']['min-version']);
+        // the whole 1.7 branch is supported: from its first release up to (not including) 1.8
+        self::assertSame('1.7.0', $composer['extra']['roundcube']['min-version']);
+        self::assertSame('1.7.999', $composer['extra']['roundcube']['max-version']);
         self::assertArrayHasKey('phpunit/phpunit', $composer['require-dev']);
         $phpunit = (string) file_get_contents($root . '/phpunit.xml.dist');
         self::assertStringContainsString('<directory>tests/Integration</directory>', $phpunit);
@@ -689,9 +708,10 @@ final class OldPluginRegressionTest extends TestCase
     }
 
     /**
-     * tests/e2e/matrix.sh covers the supported PHP branches x both iRedMail SQL editions, and a
-     * combination that cannot run is a failure, never a silent skip (run here on a copy of the script
-     * with no Roundcube present: every combination is MISSING and the matrix fails).
+     * tests/e2e/matrix.sh covers the oldest and the newest known release of the supported Roundcube
+     * branch, the supported PHP branches and both iRedMail SQL editions, and a combination that cannot
+     * run is a failure, never a silent skip (run here on a copy of the script with no Roundcube
+     * present: every combination is MISSING and the matrix fails).
      */
     public function testE2eMatrixCountsMissingCombinationsAsFailures(): void
     {
@@ -700,9 +720,11 @@ final class OldPluginRegressionTest extends TestCase
         self::assertSame(1, preg_match('/^runs=\((.*?)^\)/ms', $text, $m));
         preg_match_all('/^\s*"([^"]+)"/m', $m[1], $entries);
         $expected = [];
-        foreach (['php8.1', 'php8.4', 'php8.5'] as $php) {
-            foreach (['mysql', 'pgsql'] as $db) {
-                $expected[] = "1.7.7 {$php} {$db}";
+        foreach (['1.7.0' => ['php8.1', 'php8.4'], Tool::LATEST_KNOWN_ROUNDCUBE => ['php8.1', 'php8.4', 'php8.5']] as $core => $phps) {
+            foreach ($phps as $php) {
+                foreach (['mysql', 'pgsql'] as $db) {
+                    $expected[] = "{$core} {$php} {$db}";
+                }
             }
         }
         self::assertEqualsCanonicalizing($expected, $entries[1]);
@@ -718,8 +740,9 @@ final class OldPluginRegressionTest extends TestCase
             fclose($pipes[2]);
             $code = proc_close($proc);
             self::assertNotSame(0, $code, $out);
-            self::assertSame(6, substr_count($out, 'MISSING ' . $dir . '/no-roundcube-here/1.7.7 (not present)'), $out);
-            self::assertStringContainsString('MATRIX: 0/6 combinations green', $out);
+            self::assertSame(4, substr_count($out, 'MISSING ' . $dir . '/no-roundcube-here/1.7.0 (not present)'), $out);
+            self::assertSame(6, substr_count($out, 'MISSING ' . $dir . '/no-roundcube-here/' . Tool::LATEST_KNOWN_ROUNDCUBE . ' (not present)'), $out);
+            self::assertStringContainsString('MATRIX: 0/10 combinations green', $out);
         } finally {
             self::rmTree($dir);
         }

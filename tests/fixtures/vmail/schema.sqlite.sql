@@ -95,6 +95,13 @@ CREATE INDEX IF NOT EXISTS idx_forwardings_is_maillist ON forwardings (is_mailli
 CREATE INDEX IF NOT EXISTS idx_forwardings_is_list ON forwardings (is_list);
 CREATE INDEX IF NOT EXISTS idx_forwardings_is_alias ON forwardings (is_alias);
 
+-- The view the plugin reads instead of the table (mirror of SQL/grants.*.sql): no private
+-- forwarding target (is_forwarding rows) is reachable through it.
+CREATE VIEW IF NOT EXISTS galbridge_forwardings AS
+    SELECT address, forwarding, domain, is_alias, is_list, is_maillist, active
+      FROM forwardings
+     WHERE is_alias = 1 OR is_list = 1 OR is_maillist = 1;
+
 CREATE TABLE IF NOT EXISTS domain (
     domain TEXT NOT NULL DEFAULT '',
     description TEXT,

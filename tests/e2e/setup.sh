@@ -44,6 +44,26 @@ esac
 case "$VMAIL_DSN" in *"'"*|*\\*) echo "unsupported character in the DSN" >&2; exit 1 ;; esac
 
 RUN="$PLUGIN/tests/e2e/run/$(basename "$RC")-$(basename "$PHP")-$DB"
+
+# Stop the web server of an earlier run of THIS run directory - and only that one: the process named
+# in its pid file, when it still is a PHP built-in server for this port. Nothing else is ever killed;
+# a port that somebody else uses makes the setup fail below instead.
+stop_own_server() {
+  local pidfile="$1" pid cmd
+  [ -f "$pidfile" ] || return 0
+  pid="$(tr -cd '0-9' < "$pidfile")"
+  [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ] || return 0
+  cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline")"
+  case "$cmd" in
+    *" -S 127.0.0.1:$PORT "*"$RC/public_html"*) kill "$pid" 2>/dev/null || true ;;
+  esac
+}
+for old in "$PLUGIN"/tests/e2e/run/*/php-server.pid; do stop_own_server "$old"; done
+for _ in $(seq 1 25); do (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null || break; sleep 0.2; done
+if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
+  echo "port $PORT on 127.0.0.1 is in use by another program: choose another port" >&2; exit 1
+fi
+
 rm -rf "$RUN"; mkdir -p "$RUN"/{temp,logs}
 chmod 0700 "$RUN"
 
@@ -97,10 +117,8 @@ cd "$RC"
 "$PHP" -r 'define("INSTALL_PATH", getcwd()."/"); require "program/include/clisetup.php"; rcube::get_instance()->get_dbh()->query("SELECT 1");' > /dev/null
 [ -s "$RUN/roundcube.db" ] || { echo "Roundcube database not initialised" >&2; exit 1; }
 
-# web server (an older server on the same port is stopped first). OPcache is off: the suites
-# change galbridge.inc.php between requests and the cli-server SAPI would serve a cached copy.
-pkill -f -- "-S 127.0.0.1:$PORT " 2>/dev/null || true
-for _ in $(seq 1 25); do (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null || break; sleep 0.2; done
+# web server. OPcache is off: the suites change galbridge.inc.php between requests and the
+# cli-server SAPI would serve a cached copy.
 nohup env ROUNDCUBE_CONFIG_DIR="$RUN/" "$PHP" -d variables_order=EGPCS -d display_errors=stderr -d opcache.enable=0 \
   -S "127.0.0.1:$PORT" -t "$RC/public_html" > "$RUN/php-server.log" 2>&1 < /dev/null &
 echo $! > "$RUN/php-server.pid"

@@ -25,9 +25,21 @@ use GalBridge\Config;
  *  - required: without them no book can work (column_missing, fail closed);
  *  - optional: a configured field or entity kind that is silently left out when the column is not
  *    there or not granted (field_unavailable / entity disabled).
+ *
+ * The iRedMail table "forwardings" is never read directly. It also holds the private forwarding
+ * targets of mailboxes (is_forwarding rows), which the plugin's role must not be able to read, so
+ * the grant templates create the view FORWARDINGS over the three row kinds GAL Bridge needs -
+ * per-user aliases (is_alias), alias-account members (is_list) and mailing lists (is_maillist) -
+ * and grant only that view. A role that can read the table itself is refused (role_too_broad).
  */
 final class Schema
 {
+    /** the restricted view over vmail.forwardings (SQL/grants.*.sql) */
+    public const FORWARDINGS = 'galbridge_forwardings';
+
+    /** the iRedMail table behind it: must NOT be readable by the plugin's role */
+    public const FORWARDINGS_TABLE = 'forwardings';
+
     /** field => mailbox column */
     private const FIELD_COLUMNS = [
         'firstname' => 'first_name',
@@ -46,15 +58,13 @@ final class Schema
         $req = [
             'mailbox' => ['username', 'name', 'domain', 'active', 'enabledeliver'],
             'domain' => ['domain', 'active', 'backupmx'],
-            // the viewer's per-user aliases (accesspolicy) are always loaded
-            'forwardings' => ['address', 'forwarding', 'is_alias', 'active'],
+            // the viewer's per-user aliases (accesspolicy) are always loaded, with the state of the
+            // domain each alias row belongs to
+            self::FORWARDINGS => ['address', 'forwarding', 'domain', 'is_alias', 'active'],
         ];
         if ($config->bool('galbridge_hide_expired')) {
             $req['mailbox'][] = 'expired';
             $req['domain'][] = 'expired';
-        }
-        if ($config->bool('galbridge_user_aliases')) {
-            $req['forwardings'][] = 'domain'; // display aliases join their domain
         }
         return $req;
     }
@@ -75,11 +85,11 @@ final class Schema
         $expired = $config->bool('galbridge_hide_expired') ? ['expired'] : [];
         if ($config->bool('galbridge_include_aliases')) {
             $opt['alias'] = ['address', 'name', 'accesspolicy', 'domain', 'active', ...$expired];
-            $opt['forwardings'] = ['is_list'];
+            $opt[self::FORWARDINGS] = ['is_list'];
         }
         if ($config->bool('galbridge_include_mailing_lists')) {
             $opt['maillists'] = ['address', 'name', 'accesspolicy', 'domain', 'active', ...$expired];
-            $opt['forwardings'] = array_values(array_unique([...($opt['forwardings'] ?? []), 'is_list', 'is_maillist']));
+            $opt[self::FORWARDINGS] = array_values(array_unique([...($opt[self::FORWARDINGS] ?? []), 'is_list', 'is_maillist']));
         }
         if (($config->bool('galbridge_include_aliases') || $config->bool('galbridge_include_mailing_lists'))
             && $config->choice('galbridge_list_policy', Config::LIST_POLICIES) === AccessPolicy::STRICT) {

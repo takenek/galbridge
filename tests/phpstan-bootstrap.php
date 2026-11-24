@@ -10,7 +10,7 @@ declare(strict_types=1);
  * scanDirectories in phpstan.neon.dist. Nothing here is executed in production.
  *
  * The Roundcube installation used for analysis is taken from the environment variable GALBRIDGE_RC
- * (default /opt/rcrun/1.7.7); see phpstan.neon.dist.
+ * (default /opt/rcrun/1.7.7, a tree of the supported 1.7 branch); see phpstan.neon.dist.
  *
  * @license GPL-3.0-or-later
  */

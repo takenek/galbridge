@@ -178,6 +178,7 @@ final class Factory
         $connection = ($this->connection)();
         $queries = QueryBuilder::forBook($config, $connection->driver(), $book, $viewer, $fields);
         $limits = Limits::fromConfig($config);
+        $resolver = $this->resolver;
         $repository = new Repository(
             $connection,
             $queries,
@@ -185,6 +186,8 @@ final class Factory
             $fields,
             $this->grouping($book),
             $limits->maxGroups,
+            // a cached entitlement is confirmed by the first statement that reads directory data
+            static fn (): bool => $resolver->confirm(),
         );
 
         return new AddressBook($book, $repository, $queries, $fields, $limits, $config->fingerprint(), $this->action, $this->label, $this->notify);

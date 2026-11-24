@@ -23,46 +23,80 @@
  * given next to them. Entries of domain lists may be Unicode (IDN); they are compared in their
  * lower-case ASCII form.
  *
+ * TYPES MATTER. A switch is the PHP boolean true or false (the integers 1 and 0 are accepted as
+ * well); the two "searchonly" options also take the string 'auto'. Anything else - above all a
+ * string such as 'false', 'no' or 'off', which PHP would read as true - is NOT interpreted: it is
+ * reported (log and diag: FAIL) and EVERY book is disabled until it is corrected. The same holds
+ * for an option that must be a string or a list and is given as something else where it protects
+ * something (galbridge_visibility_column, the hidden lists, the deny-lists).
+ *
+ * Environment variables: Roundcube lets ROUNDCUBE_<OPTION NAME IN UPPER CASE> override any option
+ * (typical in container deployments). For the switches of this plugin the variable must be exactly
+ * 1, 0, true or false (searchonly options: also auto); "false" really means false here, although
+ * Roundcube itself would turn that text into true. Any other spelling disables every book. diag
+ * lists the overrides that are in effect (names only) and the effective value of every switch.
+ *
  * Enable the plugin by adding 'galbridge' to $config['plugins'] in Roundcube's
  * config/config.inc.php (see the last section), then check the installation from the Roundcube
- * directory, as the PHP user (exit code 0 = OK, 2 = problems found):
+ * directory, as the PHP user (exit code 0 = OK, 2 = problems found). The tool refuses to run as
+ * root: it loads PHP code from the plugin and the Roundcube directory.
  *   sudo -u www-data plugins/galbridge/bin/galbridge.sh diag
  *   sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --user=jan.kowalski@example.com
+ *   sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --url=https://mail.example.com/mail/
  */
 
 // ---------------------------------------------------------------------------------------------
 // VMAIL DATABASE (required)
 // ---------------------------------------------------------------------------------------------
 // DSN of the iRedMail vmail database, read with a DEDICATED READ-ONLY role that has column-level
-// SELECT grants only - never mailbox.password, recovery_email, allow_nets or settings.
+// SELECT grants only - never mailbox.password, recovery_email, allow_nets or settings - and that
+// reads the forwardings through the view galbridge_forwardings (alias and list rows only), never
+// the table itself: the private forwarding targets of the mailboxes stay out of its reach.
 // '' = not configured: no book is offered (fail closed) and diag reports FAIL. There is no fallback
 // to Roundcube's own db_dsnw: PostgreSQL cannot query across databases, and iRedMail's "roundcube"
 // role (used by the password plugin) can UPDATE vmail.mailbox and read every password hash.
 //
 // Create the role from the reference grant set. Either print it, with a fresh random password and
-// the matching DSN line (stdout only, nothing is written to disk):
+// the matching DSN line (stdout only, nothing is written to disk; run it as an unprivileged user):
 //   plugins/galbridge/bin/galbridge.sh grants --driver=mysql [--host=localhost]
-//       [--account-host=localhost] [--db=vmail] [--role=galbridge]
+//       [--account-host=localhost] [--db=vmail] [--role=galbridge] [--connection-limit=25]
 //   plugins/galbridge/bin/galbridge.sh grants --driver=pgsql [--host=127.0.0.1]
 //       [--db=vmail] [--role=galbridge] [--connection-limit=25]
 // (--host = the database server written into the DSN; --account-host = MariaDB/MySQL host part of
 // the account, i.e. where Roundcube connects from; README section 2.2), or copy
 // SQL/grants.mysql.sql / SQL/grants.postgres.sql out of the plugin directory, edit the copy and run
-// it as the database administrator. Re-running a generated output is safe: it (re)sets the
-// password, so its DSN line always works - and the previous password stops working. The
+// it as the database administrator. The output has three forms:
+//   (default)         CREATES the role. When a role of that name already exists it stops and
+//                     changes nothing - a typo cannot take over the role of another component;
+//   --reset-password  gives the (new or existing) role a NEW password: the old one stops working;
+//   --grants-only     re-applies limits, view and grants to the existing role; its password and the
+//                     DSN stay as they are (use it after an upgrade of GAL Bridge, README section 5).
+// Names of roles that belong to iRedMail, Roundcube or the database server are refused. The
 // personal-data columns (telephone, mobile, birthday) are a commented-out grant: uncomment it only
-// for the fields you enable in galbridge_fields.
+// for the fields you enable in galbridge_fields. Keep the output private. The statements never
+// contain the password: they carry a VERIFIER of it (PostgreSQL: SCRAM-SHA-256; MariaDB/MySQL: the
+// mysql_native_password hash), so no log of the database server - statement log, slow query log,
+// binary log, their replicas and backups - can record it. The clear text is in the DSN line only.
+// (MySQL 8.4 and later, which no longer load mysql_native_password: add --clear-text-password;
+// MySQL rewrites passwords in its own logs. That output refuses to run on MariaDB, which does not.)
 //
 // Checked before anything connects (a violation disables every book; diag and the log say why):
-//  - driver mysql (iRedMail writes "mysqli", accepted as well) or pgsql; the PostgreSQL 'service'
-//    parameter (pg_service.conf) is refused, it would hide user and host from these checks;
+//  - driver mysql (iRedMail writes "mysqli", accepted as well) or pgsql;
+//  - the DSN names its target itself: a host or a unix socket, a port of digits only, a database
+//    name, and only the parameters shown in the examples below (plus charset and cipher for
+//    MariaDB/MySQL); a parameter that is unknown, repeated or malformed is refused, and so is the
+//    PostgreSQL 'service' parameter. Environment variables of the PostgreSQL client library that
+//    would move the connection elsewhere (PGHOSTADDR, PGSERVICE, PGSERVICEFILE, or PGPORT for a DSN
+//    without a port) are refused as well;
 //  - the role must not be one of galbridge_db_refused_users;
 //  - loopback (unix socket, 127.0.0.0/8, ::1, localhost) may be plaintext; ANY other host needs
-//    VERIFIED TLS - PostgreSQL sslmode=verify-ca or verify-full (sslmode=require encrypts but does
-//    not authenticate the server and is refused), MySQL/MariaDB ca= or capath= together with
-//    verify_server_cert=1 - unless galbridge_db_allow_plaintext is set.
-// After connecting, a role that can read mailbox.password, recovery_email or allow_nets is refused
-// whatever its name (log reason "role_too_broad"): a broad role is never "good enough".
+//    VERIFIED TLS - PostgreSQL sslmode=verify-full (sslmode=require encrypts but does not
+//    authenticate the server and is refused; verify-ca does not check the host name and needs
+//    galbridge_db_allow_verify_ca), MySQL/MariaDB ca= or capath= together with verify_server_cert=1
+//    - unless galbridge_db_allow_plaintext is set.
+// After connecting, a role that can read mailbox.password, recovery_email or allow_nets, or the
+// forwardings TABLE, is refused whatever its name (log reason "role_too_broad"): a broad role is
+// never "good enough".
 // URL-encode (rawurlencode) a password that contains characters other than A-Z a-z 0-9 - . _ ~
 //
 // MariaDB / MySQL (iRedMail MySQL edition):
@@ -110,10 +144,11 @@ $config['galbridge_db_connect_timeout'] = 2;
 // Statement timeout in seconds (1 .. 30), set for the plugin's database session right after
 // connecting, together with read-only transaction mode: MariaDB max_statement_time, MySQL
 // max_execution_time, PostgreSQL statement_timeout. It bounds what one slow or abusive search can
-// cost the database. It is a backstop: the PostgreSQL reference grants also limit the role itself
-// (statement_timeout 5s, CONNECTION LIMIT 25 or "grants --connection-limit"); for MariaDB the
-// template contains MAX_STATEMENT_TIME and MAX_USER_CONNECTIONS as a commented-out ALTER USER line
-// that takes effect only once you uncomment it (SQL/grants.mysql.sql).
+// cost the database. It is a backstop: the reference grants limit the role itself on BOTH engines -
+// 25 connections (or "grants --connection-limit=N"; size it to the PHP-FPM pm.max_children of
+// Roundcube) and a statement time of 5 seconds (PostgreSQL and MariaDB; MySQL 8 has no per-account
+// statement time, there the session setting above is the only one). diag shows the limit of the
+// account and warns when it is unlimited or when the server refused a session setting.
 $config['galbridge_db_timeout'] = 3;
 
 // true: accept a NON-loopback database host without verified TLS (plaintext, or TLS without
@@ -124,6 +159,13 @@ $config['galbridge_db_timeout'] = 3;
 // storage VLAN) - prefer TLS. While it is in effect, diag and the log warn.
 $config['galbridge_db_allow_plaintext'] = false;
 
+// true: accept PostgreSQL sslmode=verify-ca for a NON-loopback host. verify-ca checks that the
+// server certificate comes from the CA in sslrootcert but NOT that it was issued for the host you
+// connect to: anybody who holds a certificate of that CA can pose as the database server. That is
+// acceptable only with a private CA that signs nothing but this database server. Prefer
+// sslmode=verify-full. While it is in effect, diag and the log warn.
+$config['galbridge_db_allow_verify_ca'] = false;
+
 // Database roles never accepted in galbridge_db_dsn (compared case-insensitively), because
 // iRedMail gives them far more than GAL Bridge needs: vmail (Postfix, Dovecot, iRedAPD - reads
 // every password hash), vmailadmin (iRedAdmin, mlmmjadmin - read-write), roundcube (the password
@@ -131,7 +173,9 @@ $config['galbridge_db_allow_plaintext'] = false;
 // and the superusers root and postgres. The user of Roundcube's db_dsnw is refused in addition, as
 // is the user of password_db_dsn when that option is set in Roundcube's main configuration.
 // You may add names. Removing one only weakens this safety net; the column probe above still
-// refuses any role that can read password hashes.
+// refuses any role that can read password hashes. The option must be a list: any other value is
+// reported (diag: FAIL) and the built-in list below is used. "grants" never prints statements for
+// one of these names either.
 $config['galbridge_db_refused_users'] = ['vmail', 'vmailadmin', 'roundcube', 'sogo', 'iredadmin', 'iredapd', 'amavisd', 'fail2ban', 'root', 'postgres'];
 
 // ---------------------------------------------------------------------------------------------
@@ -139,30 +183,44 @@ $config['galbridge_db_refused_users'] = ['vmail', 'vmailadmin', 'roundcube', 'so
 // ---------------------------------------------------------------------------------------------
 // What a user sees is derived from the Roundcube login alone: it is looked up in vmail.mailbox
 // (active mailbox in an active, non-backup-MX domain) and the home domain is that row's domain
-// column, never the text after '@'. That is safe only when the login was authenticated by an IMAP
-// server that uses THIS vmail database. A Roundcube where the IMAP server can be chosen at login
-// (a host field, an imap_host array, or a template with %-placeholders such as %d/%n/%s, which
-// come from the client's Host header or the login) would let anybody log in through an IMAP
-// server of their own as ceo@tenant-a.example and receive tenant A's directory.
+// column - which has to be the domain of the login itself; a row where the two differ opens no
+// directory. That is safe only when the login was authenticated by an IMAP server that uses THIS
+// vmail database. A Roundcube where the IMAP server can be chosen at login (a host field, an
+// imap_host array, or a template with %-placeholders such as %d/%n/%s, which come from the
+// client's Host header or the login) would let anybody log in through an IMAP server of their own
+// as ceo@tenant-a.example and receive tenant A's directory.
 //
-// Allowed IMAP hosts: bare host names or IP addresses - NO scheme, port or placeholder - e.g.
-// ['127.0.0.1'] or ['mail.example.com', 'imap2.example.com']. Both the IMAP host of the session
-// and the host stored for the Roundcube user must be in the list.
-// [] = derive it from Roundcube's imap_host when that is ONE host without placeholders. iRedMail
-// writes 'tls://127.0.0.1:143', which gives '127.0.0.1': nothing to set. With an array or a
-// templated imap_host and no explicit list the plugin stays disabled (diag: FAIL), and a malformed
-// entry disables it as well (fail closed). List only IMAP servers or Dovecot proxies that
-// authenticate against this vmail database. diag checks that the list covers the host of imap_host
+// Allowed IMAP servers: host names or IP addresses, optionally with a port - NO scheme and no
+// placeholder - e.g. ['127.0.0.1'], ['mail.example.com:993', 'imap2.example.com:993'] or
+// ['[2001:db8::10]:993']. An entry without a port allows every port of that host; give the port
+// whenever another IMAP service (a test instance, a proxy to another user database) listens on
+// the same host. Both the IMAP server of the session (host and port) and the host stored for the
+// Roundcube user must be covered.
+// The one scheme that is accepted is a local socket in Roundcube's own notation,
+// ['unix:///run/dovecot/imap.sock'] (an absolute path): it has neither host name nor port and is
+// matched as a whole, the path exactly as written.
+// [] = derive it from Roundcube's imap_host when that is ONE host without placeholders, together
+// with its port - or one local socket. iRedMail writes 'tls://127.0.0.1:143', which gives
+// '127.0.0.1:143': nothing to set. With an array or a templated imap_host and no explicit list the
+// plugin stays disabled (diag: FAIL), and a malformed entry disables it as well (fail closed). The
+// same holds when Roundcube's
+// include_host_config is enabled: imap_host can then differ per requested host name (the Host
+// header selects the configuration file), so nothing is derived from it - list the servers here.
+// EVERY listed server must authenticate against this vmail database; the plugin cannot verify that
+// and diag reminds you when more than one is listed. diag checks that the list covers imap_host
 // and the hosts stored for the existing Roundcube users; a session outside it is logged as
-// host_mismatch with the session host, the stored host and the allowed hosts.
+// host_mismatch with the session server, the stored host and the allowed servers.
 $config['galbridge_imap_hosts'] = [];
 
 // Seconds (30 .. 3600) for which the resolved viewer - home domain, the viewer's own alias
 // addresses, the column/privilege probe and therefore the book entitlements - is cached in the
-// Roundcube session. Changes in vmail (an account disabled or moved, a new alias, a changed column
-// grant) take effect after at most this time. A change of THIS configuration takes effect
-// immediately (the cache is bound to a fingerprint of it). Lower = fresher, one lookup more per
-// period and session.
+// Roundcube session. A new alias or a changed column grant takes effect after at most this time.
+// REVOCATION does not wait for it: every request that reads the directory first confirms, with one
+// small statement, that the mailbox of the session is still active, unexpired and in its domain -
+// a mailbox that was disabled, expired, deleted or moved (or whose domain was) loses the directory
+// with its next request. A change of THIS configuration takes effect immediately as well (the
+// cache is bound to a keyed fingerprint of it). Lower = fresher, one lookup more per period and
+// session.
 $config['galbridge_scope_ttl'] = 300;
 
 // ---------------------------------------------------------------------------------------------
@@ -202,7 +260,9 @@ $config['galbridge_domain_viewer_domains_exclude'] = [];
 // are head counts. Expanding a group (compose to group, a group picked in autocomplete, group
 // export) yields all members or - above galbridge_max_group_members - nothing and a visible
 // warning (a refused group export downloads no file; a download cannot show a message), never a
-// silently truncated recipient list. iRedMail: the open-source iRedAdmin does not
+// silently truncated recipient list. A group id is honoured only for a group the book shows: a
+// book without groups (grouping 'none', search-only, or more groups than galbridge_max_groups)
+// selects nothing by such an id. iRedMail: the open-source iRedAdmin does not
 // fill mailbox.department; without values there are simply no department groups.
 $config['galbridge_domain_groups'] = 'auto';
 
@@ -224,6 +284,9 @@ $config['galbridge_domain_autocomplete'] = true;
 // answers 204 No Content and logs the reason; an export is a file download and cannot show a
 // message). Exporting selected contacts, a search result or a group stays possible within their own
 // limits (it shows nothing the user cannot already see on screen).
+// EVERY export is complete or refused, never cut: a search result with more matches than the
+// result cap (galbridge_max_results), a set of which an entry could not be read, or a directory
+// that fails during the export all answer 204 instead of a file that silently lacks entries.
 $config['galbridge_domain_export'] = true;
 
 // Organizations: several domains of ONE customer that share one domain book, e.g.
@@ -292,6 +355,11 @@ $config['galbridge_global_groups'] = 'none';
 $config['galbridge_global_searchonly'] = true;
 
 // Offer the global book in compose autocomplete (enforced on the server, as for the domain book).
+// Roundcube sorts the suggestions of all address books by name and pre-selects the first one; the
+// entries of other domains start with their "(domain)" marker (galbridge_mark_foreign_domains),
+// and '(' sorts before letters and digits - so they are listed BEFORE unmarked names. Set false
+// where that order is not wanted: the book then stays out of autocomplete and remains available
+// in the address book and in the contact list of the compose window.
 $config['galbridge_global_autocomplete'] = true;
 
 // Allow exporting the WHOLE global book as vCard. Default false: a bulk export of other domains'
@@ -324,13 +392,20 @@ $config['galbridge_searchonly_threshold'] = 2000;   // 1 .. 1000000
 // open-source iRedAdmin fills only mailbox.name - so set addressbook_sort_col = 'name' (last section).
 // PRIVACY: phone, mobile and birthday are personal data shown to every viewer of the book; enable
 // them only with a legal basis (e.g. GDPR art. 6) and an internal policy.
+// The value must be an array: anything else (a string of names, an environment variable that is
+// not JSON) shows name and e-mail only and is reported (log, diag: WARN).
 $config['galbridge_fields'] = ['name', 'firstname', 'surname', 'email', 'department'];
 
 // Per-user alias addresses (iRedMail forwardings rows with is_alias = 1, e.g. jan@example.com for
 // jan.kowalski@example.com): true = shown as an additional ("other") address of their owner and
 // matched by searches. Default false: they are neither shown nor searchable, so a search for an
-// alias cannot reveal who receives it (e.g. which person is behind ceo@ or abuse@). The viewer's
-// OWN aliases are always used internally to decide which restricted lists the viewer may see.
+// alias cannot reveal who receives it (e.g. which person is behind ceo@ or abuse@).
+// With true, showing and matching follow ONE rule: an alias counts only when its domain belongs to
+// the book and is active (not a backup MX, not expired with galbridge_hide_expired) and when it is
+// on neither hidden list below - a hidden alias is not shown and does not find its owner, whole or
+// by a fragment. At most 20 aliases are shown per person.
+// The viewer's OWN aliases (up to 200, of deliverable domains) are always used internally to decide
+// which restricted lists the viewer may see; with more than that the login alone counts.
 $config['galbridge_user_aliases'] = false;
 
 // iRedMail alias accounts (table "alias": an address that forwards to its members, "Mail alias"
@@ -356,17 +431,19 @@ $config['galbridge_list_policy'] = 'strict';
 
 // Hide mailboxes, alias accounts, lists and domains whose iRedMail expiry time (the "expired"
 // column; 9999-12-31 means never) has passed, compared with the current UTC time. false = ignore
-// expiry (the expired columns are then not needed).
+// expiry (the expired columns are then not needed). With true the expiry has to be READABLE: when
+// the role cannot read the expired column of alias accounts or of lists, that kind of entry is left
+// out of the books (diag: WARN) - it is never listed unfiltered.
 $config['galbridge_hide_expired'] = true;
 
-// Addresses that are never listed or matched in any book (persons, alias accounts and lists), e.g.
-// ['ceo@example.com', 'backup-robot@example.com']. Deny-list: a malformed list disables ALL books
-// (fail closed, diag FAIL).
+// Addresses that are never listed or matched in any book - persons, alias accounts, lists and
+// per-user aliases (galbridge_user_aliases) - e.g. ['ceo@example.com', 'backup-robot@example.com'].
+// Deny-list: a malformed list disables ALL books (fail closed, diag FAIL).
 $config['galbridge_hidden_addresses'] = [];
 
 // Local parts hidden in EVERY domain, e.g. ['postmaster', 'abuse', 'root', 'noreply'] (iRedMail
-// creates postmaster@ of the first domain as a real mailbox). Deny-list: malformed = all books
-// disabled.
+// creates postmaster@ of the first domain as a real mailbox); they hide per-user aliases with such
+// a local part as well. Deny-list: malformed = all books disabled.
 $config['galbridge_hidden_localparts'] = [];
 
 // Name of an optional, administrator-created column of vmail.mailbox that decides per person
@@ -379,15 +456,32 @@ $config['galbridge_hidden_localparts'] = [];
 //               GRANT SELECT (galbridge_visible) ON mailbox TO galbridge;
 // (an integer column, not a PostgreSQL BOOLEAN). A configured column that the role cannot read
 // lists no person at all (fail closed); an invalid name (lower-case letters, digits and '_', not
-// starting with a digit, at most 64 characters) disables all books. It applies to persons only;
-// hide alias accounts and lists with galbridge_hidden_addresses.
+// starting with a digit, at most 64 characters) disables all books. The value must be a STRING:
+// '' is the only way to say "no column" - an array, a number or a boolean (false included) is a
+// configuration error that disables all books, never "no filter". diag shows the column in use.
+// It applies to persons only; hide alias accounts and lists with galbridge_hidden_addresses.
 $config['galbridge_visibility_column'] = '';
 
 // In the global book, entries from outside the viewer's own domain (or organization) are shown as
-// "Name (domain)", so that a look-alike name in another tenant is not mistaken for a colleague.
+// "(domain) Name", so that a look-alike name in another tenant is not mistaken for a colleague.
+// The marker comes FIRST: recipient fields shorten a long name at its end, which must not hide it.
 // Such entries carry no first and last name, so every "List names as" mode of Roundcube
 // (addressbook_name_listing) shows the marked name. The marker is part of the display name: it also
 // appears in recipient fields, exported vCards and contacts copied to a personal address book.
+// Keep {name} FIRST in Roundcube's contactlist_name_template (its default is '{name}'): under a
+// template that shows other text of an entry before the name, or has no {name} at all, entries of
+// other domains carry no department and no telephone numbers - that text would stand in front of
+// the marker, or be shown without one (diag: WARN).
+//
+// Independently of this option every name from the directory is shown as plain text: besides
+// control characters and \ " < > the plugin neutralises the two notations that a later reader
+// would decode - '&' (an HTML character reference such as &#64; in Roundcube's recipient widget)
+// becomes the full-width ampersand, and "=?" / "?=" (the delimiters of an RFC 2047 encoded word,
+// decoded by the mail clients of the recipients) are split. Empty bracket pairs are removed and a
+// text never starts with a closing or ends with an opening bracket (Roundcube deletes such pairs
+// from a name composed with a template, which would join the split text again). A name that looks
+// like an address is cut at the '@'; an entry without a name is shown with the local part of its
+// address, treated the same way.
 $config['galbridge_mark_foreign_domains'] = true;
 
 // ---------------------------------------------------------------------------------------------
@@ -401,8 +495,9 @@ $config['galbridge_mark_foreign_domains'] = true;
 $config['galbridge_min_search_length'] = 2;         // characters (1 .. 10)
 $config['galbridge_max_search_length'] = 128;       // characters (16 .. 255); longer input matches nothing
 
-// Caps of search result lists. A longer result is cut with the notice "Only the first N directory
-// matches are shown. Refine your search."
+// Caps of search result lists. A longer result LIST is cut with the notice "Only the first N
+// directory matches are shown. Refine your search."; the EXPORT of such a result is refused (a
+// download cannot show that notice).
 $config['galbridge_max_results'] = 500;             // domain book (10 .. 5000)
 $config['galbridge_global_max_results'] = 100;      // global book (10 .. 5000)
 
@@ -419,14 +514,19 @@ $config['galbridge_max_group_members'] = 500;       // 1 .. 100000
 
 $config['galbridge_max_groups'] = 50;               // groups per book (1 .. 500); above it the book shows no groups
 $config['galbridge_max_export'] = 2000;             // entries of a whole-book vCard export (1 .. 100000); above it refused
-$config['galbridge_max_count'] = 10000;             // upper bound of counts (100 .. 1000000); list pages beyond it are empty
+// Upper bound of the TOTALS shown for lists (100 .. 1000000); list pages beyond it are empty. It
+// bounds counting only: what an export or a recipient set holds is decided by the limit of that
+// operation (galbridge_max_export, galbridge_max_group_members, galbridge_max_ids), whatever the
+// relation between the values.
+$config['galbridge_max_count'] = 10000;
 
 // There is deliberately NO per-session request rate limiter (docs/ARCHITECTURE.md, section 11): a
 // counter in the Roundcube session is not atomic - parallel autocomplete requests all pass - and
 // would turn read-only requests into session writers. Resource control is: the caps above, the
-// minimum search length, the connect and statement timeouts, the role's connection limit
-// (SQL/grants.*.sql) and - recommended - a rate limit on _action=autocomplete in the reverse proxy
-// (README).
+// minimum search length, the connect and statement timeouts, the connection limit of the database
+// account (set by SQL/grants.*.sql for both engines, shown by diag) and - REQUIRED on a server that
+// is reachable from the Internet - a rate limit on _action=autocomplete in the reverse proxy
+// (SECURITY.md, "Hardening checklist for administrators", with an nginx example).
 
 // ---------------------------------------------------------------------------------------------
 // LOGGING
@@ -443,8 +543,10 @@ $config['galbridge_max_count'] = 10000;             // upper bound of counts (10
 // filtered for personal data (a driver error may quote part of a statement with the inlined search
 // values) - enable it only while troubleshooting. Independently of this option
 // the DATABASE server's own logs (slow/general query log, PostgreSQL log_min_error_statement or
-// log_min_duration_statement) can contain search terms, because rcube_db inlines bound values
-// (SECURITY.md).
+// log_min_duration_statement) can contain search terms, because rcube_db inlines bound values.
+// The PostgreSQL reference grants switch statement logging off for the role; MariaDB/MySQL have no
+// such per-account setting - keep the general query log off or restrict who reads it. diag shows
+// what applies to your server (SECURITY.md, "Logs").
 $config['galbridge_debug'] = false;
 
 // ---------------------------------------------------------------------------------------------

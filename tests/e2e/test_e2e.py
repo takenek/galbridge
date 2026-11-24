@@ -2,7 +2,7 @@
 """
 GAL Bridge - end-to-end suite (TEST ONLY).
 
-Drives a real Roundcube 1.7.7 + GAL Bridge instance over HTTP (tests/e2e/rc.py) exactly like the
+Drives a real Roundcube 1.7.x + GAL Bridge instance over HTTP (tests/e2e/rc.py) exactly like the
 browser does, with the vmail fixture (tests/fixtures/vmail/seed.sql) in MariaDB/MySQL or PostgreSQL
 and the Dovecot test server (tests/e2e/dovecot.sh) as IMAP backend. Every assertion is made on
 Roundcube's own responses: env.address_sources / env.contactgroups of the address book page, the
@@ -13,7 +13,9 @@ commands of the JSON responses, the vCard downloads and the "To" field of the co
 
 The environment is (re)created by tests/e2e/setup.sh at the start (--no-setup reuses a running
 one). Requirements: Dovecot test server (tests/e2e/dovecot.sh install), the throw-away vmail
-databases (tests/fixtures/vmail/load.sh), python3-requests.
+databases (tests/fixtures/vmail/load.sh), python3-requests. The cases that need rows the seed does
+not have (31-35) change the fixture through the administrator access of load.sh (MYSQL_ADMIN /
+PSQL_ADMIN, tests/e2e/fixture_admin.py) and undo it; without that access they are skipped.
 
 Output: one "PASS|FAIL|SKIP <case>" line per case and "E2E: N passed, M failed, K skipped".
 Exit code 1 when any case failed. --only <regex> runs a subset (cases marked "always" still run).
@@ -22,7 +24,9 @@ Exit code 1 when any case failed. --only <regex> runs a subset (cases marked "al
 """
 import argparse
 import contextlib
+import email.header
 import email.utils
+import html
 import imaplib
 import os
 import re
@@ -36,6 +40,7 @@ sys.path.insert(0, HERE)
 
 import requests  # noqa: E402
 
+import fixture_admin  # noqa: E402
 from rc import Roundcube, parse_vcards  # noqa: E402
 
 PLUGIN = os.path.abspath(os.path.join(HERE, '..', '..'))
@@ -178,6 +183,7 @@ class Env:
         self.base = 'http://127.0.0.1:%d/' % args.port
         self.u = {}
         self.leaks = []
+        self.allowed = set()    # canaries a case shows on purpose (canaries_allowed)
         self.log_windows = {}   # log file -> byte ranges written by cases that provoke errors on purpose
 
 
@@ -193,8 +199,19 @@ def leak_observer(user, r):
                                           (r.request.body or b'').decode('utf-8', 'replace'))
     sent = requests.utils.unquote(sent.replace('+', ' '))
     for c in CANARIES:
-        if c in text and c not in sent:
+        if c in text and c not in sent and c not in E.allowed:
             E.leaks.append('%s: %r in %s' % (user, c, r.request.url))
+
+
+@contextlib.contextmanager
+def canaries_allowed(*values):
+    """Values the block shows on purpose (the per-user aliases, with galbridge_user_aliases on)."""
+    added = set(values) - E.allowed
+    E.allowed |= added
+    try:
+        yield
+    finally:
+        E.allowed -= added
 
 
 def session(user):
@@ -216,9 +233,9 @@ def wait_http(timeout=20):
 
 
 @contextlib.contextmanager
-def plugin_config(extra):
+def plugin_config(extra, name='galbridge.inc.php'):
     """Temporarily append PHP lines to ROUNDCUBE_CONFIG_DIR/galbridge.inc.php (read on every request)."""
-    path = os.path.join(E.run, 'galbridge.inc.php')
+    path = os.path.join(E.run, name)
     with open(path) as f:
         base = f.read()
     try:
@@ -228,6 +245,33 @@ def plugin_config(extra):
     finally:
         with open(path, 'w') as f:
             f.write(base)
+
+
+def core_config(extra):
+    """The same for Roundcube's own config.inc.php of the run."""
+    return plugin_config(extra, 'config.inc.php')
+
+
+def run_dsn():
+    with open(os.path.join(E.run, 'galbridge.inc.php')) as f:
+        m = re.search(r"galbridge_db_dsn'\] = '([^']+)'", f.read())
+    check(m, 'cannot read the DSN of the run configuration')
+    return m.group(1)
+
+
+@contextlib.contextmanager
+def fixture(apply, revert):
+    """Rows the seed does not have, for the duration of the block (tests/e2e/fixture_admin.py)."""
+    dsn = run_dsn()
+    try:
+        fixture_admin.execute(dsn, ['SELECT 1'])
+    except fixture_admin.Unavailable as e:
+        raise Skip(str(e))
+    try:
+        fixture_admin.execute(dsn, apply)
+        yield
+    finally:
+        fixture_admin.execute(dsn, revert)
 
 
 def log_path(name):
@@ -914,9 +958,9 @@ def c27():
         eq(search_ids(JAN, 'mith', scope=GLOBAL)[0], [], 'global search is prefix-only')
         eq(search_ids(JAN, 'example', scope=GLOBAL)[0], [], 'global search never matches a domain fragment')
         eq(search_ids(JAN, 'kowalski', scope=GLOBAL)[0], [], 'home domain excluded from the global book')
-        # Roundcube quotes a display name with parentheses: "Bob Smith (example.org)" <bob@example.org>
+        # Roundcube quotes a display name with parentheses: "(example.org) Bob Smith" <bob@example.org>
         got = [(r['fields'].get('name'), r['fields'].get('email'), recipients(r['name']), r['source']) for r in ac_gal(JAN, 'smith')]
-        eq(got, [('Bob Smith (example.org)', BOB, [BOB], GLOBAL)], 'autocomplete from the global book (foreign domain marked)')
+        eq(got, [('(example.org) Bob Smith', BOB, [BOB], GLOBAL)], 'autocomplete from the global book (foreign domain marked)')
         export_refused(JAN, 'export of the global book (galbridge_global_export off)', _source=GLOBAL)
         sources = Roundcube.env(session(BOB).addressbook_page(), 'address_sources') or {}
         check(GLOBAL not in sources, 'global book advertised to a viewer outside galbridge_global_viewer_domains')
@@ -1037,6 +1081,137 @@ def c30():
         eq(row_ids(list_book(JAN, gid=G_SALES_COM)), [], 'a department group ID while grouping by domain')
         eq(search_ids(JAN, 'smith')[0], [cid(BOB) + '-' + SRC], 'search across the organization')
     eq(sorted(row_ids(list_book(JAN))), sorted(EXPECTED[JAN]), 'directory after restoring the configuration')
+
+
+# =========================================================================== security audit of 1.0.0 (IDs: CHANGELOG.md)
+
+@case('31 audit U-01: a hidden per-user alias is neither shown nor matched; a visible one finds its owner')
+def c31():
+    aliases = "$config['galbridge_user_aliases'] = true;\n"
+    own = ['jan@example.net', 'jk@example.com', 'sprzedaz@example.com']
+    with canaries_allowed(*own), plugin_config(aliases):
+        # the precondition: without the hidden lists every one of these words finds jan
+        for q in ('jk@example.com', 'jk@ex', 'jk@example.co', 'sprzedaz@example.com', 'rzedaz@'):
+            eq(search_ids(ANNA, q)[0], [cid(JAN) + '-' + SRC], 'a visible per-user alias finds its owner (%r)' % q)
+        jan = [c for c in export_cards(ANNA, _source=SRC)[0] if JAN in c['emails']]
+        eq(sorted(jan[0]['emails']), sorted([JAN] + own), 'per-user aliases in the card')
+    hidden = aliases + "$config['galbridge_hidden_addresses'] = ['jk@example.com'];\n$config['galbridge_hidden_localparts'] = ['sprzedaz'];"
+    with canaries_allowed('jan@example.net'), plugin_config(hidden):
+        for q in ('jk@example.com', 'jk@ex', 'jk@example.co', 'sprzedaz@example.com', 'sprzedaz@', 'rzedaz@'):
+            eq(search_ids(ANNA, q)[0], [], 'quick search for a hidden per-user alias (%r)' % q)
+            eq(ac_gal(ANNA, q), [], 'autocomplete of a hidden per-user alias (%r)' % q)
+            code, resp = session(ANNA).ajax('addressbook', 'search', {'_headers': 'email', '_q': q, '_scope': SRC})
+            eq((code, [i for i in row_ids(resp) if i.endswith('-' + SRC)]), (200, []), 'e-mail search for a hidden per-user alias (%r)' % q)
+        cards, text = export_cards(ANNA, _source=SRC)
+        jan = [c for c in cards if JAN in c['emails']]
+        eq(sorted(jan[0]['emails']), sorted([JAN, 'jan@example.net']), 'the hidden aliases are not shown')
+        eq(search_ids(ANNA, 'jan@example.net')[0], [cid(JAN) + '-' + SRC], 'the alias that is not hidden still finds its owner')
+        check(cid(JAN) in row_ids(list_book(ANNA)), 'a hidden alias hides its owner')
+
+
+@case('32 audit U-02/U-03/U-11: an ambiguous switch or visibility column and an unbound IMAP endpoint fail closed')
+def c32():
+    for extra, what in (
+            ("$config['galbridge_global_book'] = 'false';", "a switch written as the string 'false'"),
+            ("$config['galbridge_debug'] = 'no';", "a switch written as the string 'no'"),
+            ("$config['galbridge_user_aliases'] = 2;", 'a switch written as the number 2'),
+            ("$config['galbridge_domain_searchonly'] = 'off';", 'a search-only option that is neither a switch nor auto'),
+            ("$config['galbridge_visibility_column'] = ['galbridge_visible'];", 'a visibility column that is an array'),
+            ("$config['galbridge_visibility_column'] = true;", 'a visibility column that is a boolean')):
+        with plugin_config(extra), expected_log('all books are disabled'):
+            denied(JAN, session(JAN), what)
+            denied(BOB, session(BOB), what + ' (other tenant)')
+    # the unambiguous spellings keep working
+    with plugin_config("$config['galbridge_global_book'] = 0;\n$config['galbridge_user_aliases'] = false;\n$config['galbridge_visibility_column'] = '';"):
+        eq(sorted(row_ids(list_book(JAN))), sorted(EXPECTED[JAN]), 'switches written as 0 / false')
+    # the IMAP endpoint of the session is host AND port
+    with plugin_config("$config['galbridge_imap_hosts'] = ['127.0.0.1:993'];"), expected_log('host_mismatch'):
+        denied(JAN, session(JAN), 'the session uses another port of an allowed IMAP host')
+    with plugin_config("$config['galbridge_imap_hosts'] = ['127.0.0.1:143'];"):
+        eq(sorted(row_ids(list_book(JAN))), sorted(EXPECTED[JAN]), 'host:port entry of the session')
+    # with include_host_config the effective imap_host depends on the requested host name: nothing is derived from it
+    with core_config("$config['include_host_config'] = true;"):
+        with expected_log('include_host_config'):
+            denied(JAN, session(JAN), 'include_host_config without an explicit galbridge_imap_hosts')
+        with plugin_config("$config['galbridge_imap_hosts'] = ['127.0.0.1:143'];"):
+            eq(sorted(row_ids(list_book(JAN))), sorted(EXPECTED[JAN]), 'include_host_config with an explicit galbridge_imap_hosts')
+    eq(sorted(row_ids(list_book(JAN))), sorted(EXPECTED[JAN]), 'directory after restoring the configuration')
+
+
+@case('33 audit U-05/I-15: an export is complete or refused - never cut at a list or count limit')
+def c33():
+    with plugin_config("$config['galbridge_max_results'] = 10;"):
+        found, resp = search_ids(JAN, 'example.com')
+        eq(len(found), 10, 'the search LIST is cut at galbridge_max_results')
+        check(any('first 10' in m for m, _ in Roundcube.resp_messages(resp)), 'no truncation notice: %r' % Roundcube.resp_messages(resp))
+        export_refused(JAN, 'export of a search result with more matches than galbridge_max_results', _search=resp['env']['search_request'])
+    with plugin_config("$config['galbridge_max_results'] = 13;"):
+        _, resp = search_ids(JAN, 'example.com')
+        eq(len(export_cards(JAN, _search=resp['env']['search_request'])[0]), 13, 'export of a search result within the limit')
+    # galbridge_max_count (bound of list totals, minimum 100) must not decide what an export holds
+    rows_ = ', '.join("('bulk%03d@example.com', 'Bulk User %03d', 'example.com', 'Bulk', 'example.com/b/u/l/bulk%03d')" % (i, i, i)
+                      for i in range(1, 121))
+    with fixture(['INSERT INTO mailbox (username, name, domain, department, maildir) VALUES ' + rows_],
+                 ["DELETE FROM mailbox WHERE username LIKE 'bulk___@example.com'"]):
+        with plugin_config("$config['galbridge_max_count'] = 100;\n$config['galbridge_max_export'] = 200;\n"
+                           "$config['galbridge_max_group_members'] = 500;"):
+            cards = export_cards(JAN, _source=SRC)[0]
+            eq(len(cards), 133, 'whole-book export of 133 entries with galbridge_max_count = 100')
+            eq(len({c['emails'][0] for c in cards}), 133, 'distinct entries of the export')
+            eq(len(export_cards(JAN, _source=SRC, _gid=gid('bulk'))[0]), 120, 'export of a group with more members than galbridge_max_count')
+            value, _ = group_expand(JAN, gid('bulk'))
+            eq(len(recipients(value)), 120, 'expansion of a group with more members than galbridge_max_count')
+        with plugin_config("$config['galbridge_max_count'] = 100;\n$config['galbridge_max_export'] = 132;"):
+            export_refused(JAN, 'whole-book export one entry above galbridge_max_export', _source=SRC)
+        with plugin_config("$config['galbridge_max_count'] = 100;\n$config['galbridge_max_export'] = 133;"):
+            eq(len(export_cards(JAN, _source=SRC)[0]), 133, 'whole-book export exactly at galbridge_max_export')
+        # a book that shows no groups (more than galbridge_max_groups) honours no group id
+        with plugin_config("$config['galbridge_max_groups'] = 1;\n$config['galbridge_max_group_members'] = 500;"):
+            eq(row_ids(list_book(JAN, gid=gid('bulk'))), [], 'a group id of a book without groups lists nothing')
+            value, _ = group_expand(JAN, gid('bulk'))
+            eq(value or '', '', 'a group id of a book without groups expands to nothing')
+            eq(export_cards(JAN, _source=SRC, _gid=gid('bulk'))[0], [], 'export by a group id of a book without groups (no group: no card)')
+    eq(len(export_cards(JAN, _source=SRC)[0]), 13, 'export after removing the rows')
+
+
+@case('34 audit I-10: a mailbox disabled during its session loses the directory with its next request')
+def c34():
+    s = Roundcube(E.base, ANNA).login()
+    code, resp = s.list_contacts(SRC)
+    eq((code, sorted(row_ids(resp))), (200, sorted(EXPECTED[ANNA])), 'the directory of the open session')
+    with fixture(["UPDATE mailbox SET active = 0 WHERE username = '%s'" % ANNA],
+                 ["UPDATE mailbox SET active = 1 WHERE username = '%s'" % ANNA]):
+        # the very next request: the session cache is warm (galbridge_scope_ttl = 300 s) and IMAP still works
+        code, resp = s.list_contacts(SRC)
+        eq(code, 200, 'list status for a disabled mailbox')
+        no_app_error(resp, 'list for a disabled mailbox')
+        eq(row_ids(resp), [], 'the next request of a disabled mailbox reads nothing')
+        check(any('unavailable' in m.lower() for m, _ in Roundcube.resp_messages(resp)), 'no notice: %r' % Roundcube.resp_messages(resp))
+        denied(ANNA, s, 'disabled mailbox, following requests')
+        check(cid(ANNA) not in row_ids(list_book(JAN)), 'a disabled mailbox is still listed for others')
+    eq(sorted(row_ids(Roundcube(E.base, ANNA).login().list_contacts(SRC)[1])), sorted(EXPECTED[ANNA]), 'directory after the mailbox was enabled again')
+
+
+@case('35 audit U-04: a display name cannot turn into an address once a browser or mail client decodes it')
+def c35():
+    with fixture(fixture_admin.SPOOF_APPLY, fixture_admin.SPOOF_REVERT):
+        results = ac_gal(JAN, 'spoof.')
+        eq(sorted(r['fields'].get('email') for r in results), sorted(fixture_admin.SPOOF_ROWS), 'the entries are suggested by their address')
+        for r in results:
+            for text in (r['name'], r['fields'].get('name') or ''):
+                check('&' not in text and '=?' not in text, 'a notation that is decoded later in %r' % text)
+                eq(html.unescape(text), text, 'the name after decoding HTML character references')
+                eq(str(email.header.make_header(email.header.decode_header(text))), text, 'the name after decoding RFC 2047 words')
+            eq([a for _, a in email.utils.getaddresses([html.unescape(r['name'])])], [r['fields']['email']],
+               'addresses in the recipient string %r' % r['name'])
+        cards = [c for c in export_cards(JAN, _source=SRC)[0] if c['emails'][0] in fixture_admin.SPOOF_ROWS]
+        eq(len(cards), 3, 'exported cards of the entries')
+        for c in cards:
+            check('&' not in c['fn'] and '=?' not in c['fn'] and '@' not in c['fn'], 'FN of the card: %r' % c['fn'])
+        resp, to = session(JAN).mailto({'_cid': cid('spoof.entity@example.com'), '_source': SRC})
+        eq(recipients(to), ['spoof.entity@example.com'], 'compose to the entry: the recipient is the real address')
+        check('&' not in (to or '') and 'bank.example <' not in html.unescape(to or ''), 'To field: %r' % to)
+    eq(ac_gal(JAN, 'spoof.'), [], 'entries after removing the rows')
 
 
 # =========================================================================== final checks

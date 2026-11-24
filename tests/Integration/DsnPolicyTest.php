@@ -10,6 +10,7 @@ use GalBridge\Db\Connection;
 use GalBridge\Db\Dsn;
 use GalBridge\DeniedBook;
 use GalBridge\Directory\BookDefinition;
+use GalBridge\Directory\Schema;
 use GalBridge\Exception\GalBridgeException;
 use GalBridge\Log;
 use GalBridge\Tests\Support\Env;
@@ -41,7 +42,7 @@ final class DsnPolicyTest extends TestCase
     protected function setUp(): void
     {
         if (!GALBRIDGE_RC_LOADED) {
-            self::markTestSkipped('needs Roundcube 1.7.7 (GALBRIDGE_RC)');
+            self::markTestSkipped('needs Roundcube 1.7 (GALBRIDGE_RC)');
         }
         $_SESSION = [];
         $GLOBALS['galbridge_test_log'] = [];
@@ -267,7 +268,7 @@ final class DsnPolicyTest extends TestCase
         $u = 'galbridge:' . self::PASSWORD;
         return [
             'pgsql verify-full' => ["pgsql://{$u}@db.example.net/vmail?sslmode=verify-full"],
-            'pgsql verify-ca' => ["pgsql://{$u}@db.example.net/vmail?sslmode=verify-ca&sslrootcert=/etc/ssl/ca.pem"],
+            'pgsql verify-full with a CA file' => ["pgsql://{$u}@db.example.net/vmail?sslmode=verify-full&sslrootcert=/etc/ssl/ca.pem"],
             'pgsql VERIFY-FULL' => ["pgsql://{$u}@db.example.net/vmail?sslmode=VERIFY-FULL"],
             'mysql ca + verify' => ["mysql://{$u}@db.example.net/vmail?ca=/etc/ssl/certs/ca.pem&verify_server_cert=1"],
             'mysql capath + verify=true' => ["mysql://{$u}@db.example.net/vmail?capath=/etc/ssl/certs&verify_server_cert=true"],
@@ -280,6 +281,218 @@ final class DsnPolicyTest extends TestCase
         $accepted = new Dsn($dsn, self::config());
         self::assertSame([], $accepted->warnings());
         self::assertStringContainsString('db.example.net', $accepted->describe());
+    }
+
+    /**
+     * sslmode=verify-ca checks that the certificate comes from the trusted CA, but not that it was
+     * issued for the host the plugin connects to: with a shared or public CA any holder of one of
+     * its certificates on the network path could pose as the database server. It is not "verified
+     * TLS"; an administrator whose CA issues certificates for this server only can opt in.
+     */
+    public function testVerifyCaIsNotVerifiedTls(): void
+    {
+        $dsn = 'pgsql://galbridge:' . self::PASSWORD . '@db.example.net/vmail?sslmode=verify-ca&sslrootcert=/etc/ssl/ca.pem';
+        self::assertFalse(Dsn::verifiedTls('pgsql', \rcube_db::parse_dsn($dsn)));
+        self::assertTrue(Dsn::verifiedTls('pgsql', \rcube_db::parse_dsn(str_replace('verify-ca', 'verify-full', $dsn))));
+        try {
+            new Dsn($dsn, self::config());
+            self::fail('sslmode=verify-ca was accepted for a remote host');
+        } catch (GalBridgeException $e) {
+            self::assertSame('config_invalid', $e->getReason());
+            self::assertStringContainsString('verify-ca does not verify the host name', $e->getMessage());
+            self::assertStringContainsString('verify-full', $e->getMessage());
+            self::assertStringNotContainsString(self::PASSWORD, $e->getMessage());
+        }
+        foreach (['verify-ca', 'VERIFY-CA', 'Verify-Ca'] as $mode) {
+            self::assertRefused(str_replace('verify-ca', $mode, $dsn), self::config());
+        }
+
+        // the explicit opt-in: accepted, and it never goes unnoticed (log through the plugin, diag)
+        $accepted = new Dsn($dsn, self::config(['galbridge_db_allow_verify_ca' => true]));
+        self::assertCount(1, $accepted->warnings());
+        self::assertStringContainsString('verify-ca does not verify the host name', $accepted->warnings()[0]);
+        self::assertStringContainsString('galbridge_db_allow_verify_ca', $accepted->warnings()[0]);
+        self::assertTrue($accepted->remote());
+
+        // the opt-in is exactly that: it accepts no weaker mode and no plaintext
+        foreach (['require', 'prefer', 'allow', 'disable'] as $mode) {
+            self::assertRefused(str_replace('verify-ca', $mode, $dsn), self::config(['galbridge_db_allow_verify_ca' => true]));
+        }
+        self::assertRefused('pgsql://galbridge:' . self::PASSWORD . '@db.example.net/vmail', self::config(['galbridge_db_allow_verify_ca' => true]));
+        self::assertRefused('mysql://galbridge:' . self::PASSWORD . '@db.example.net/vmail?ca=/etc/ssl/ca.pem', self::config(['galbridge_db_allow_verify_ca' => true]));
+        // a string is not an opt-in
+        self::assertRefused($dsn, self::config(['galbridge_db_allow_verify_ca' => 'true']));
+        // verify-full needs no opt-in and gives no warning; a local server needs neither
+        self::assertSame([], (new Dsn(str_replace('verify-ca', 'verify-full', $dsn), self::config()))->warnings());
+        self::assertSame([], (new Dsn('pgsql://galbridge:' . self::PASSWORD . '@127.0.0.1/vmail?sslmode=verify-ca', self::config()))->warnings());
+        self::assertFalse((new Dsn('pgsql://galbridge:' . self::PASSWORD . '@127.0.0.1/vmail', self::config()))->remote());
+    }
+
+    // ------------------------------------------------------------------ the DSN as the driver sees it (audit I-01)
+
+    /**
+     * Roundcube joins host, port, database and the parameters into the driver's connection string
+     * WITHOUT quoting ("host=...;port=...;dbname=..."; PDO turns ';' into blanks for libpq), and lets
+     * a parameter fill any setting the DSN did not give. Everything that could make the driver read
+     * another target or another TLS mode than the one this policy judged is refused.
+     *
+     * @return array<string, array{string, string}> DSN => part of the reason
+     */
+    public static function malformedDsns(): array
+    {
+        $u = 'galbridge:' . self::PASSWORD;
+        return [
+            // port
+            'port with a second setting' => ["pgsql://{$u}@127.0.0.1:5432%20host=db.evil.example/vmail", 'port'],
+            'port that is not a number' => ["mysql://{$u}@127.0.0.1:mysql/vmail", 'port'],
+            'port 0' => ["pgsql://{$u}@127.0.0.1:0/vmail", 'port'],
+            'port above 65535' => ["mysql://{$u}@127.0.0.1:70000/vmail", 'port'],
+            // host
+            'host with a blank (two libpq settings)' => ["pgsql://{$u}@127.0.0.1%20sslmode=disable/vmail", 'host'],
+            'host with a semicolon' => ["mysql://{$u}@127.0.0.1%3Bhost=db.evil.example/vmail", 'host'],
+            'host with a quote' => ["pgsql://{$u}@127.0.0.1'x/vmail", 'host'],
+            // database
+            'database with a second setting' => ["pgsql://{$u}@127.0.0.1/vmail%20host=db.evil.example", 'database'],
+            'database with a quote' => ["mysql://{$u}@127.0.0.1/vmail'", 'database'],
+            'no database' => ["pgsql://{$u}@127.0.0.1", 'database'],
+            // parameters: unknown names (a parameter fills any setting the DSN did not give)
+            'parameter hostspec' => ["pgsql://{$u}@unix(/var/run/postgresql)/vmail?hostspec=db.evil.example", 'hostspec'],
+            'parameter port' => ["pgsql://{$u}@127.0.0.1/vmail?port=6432", 'port'],
+            'parameter socket' => ["mysql://{$u}@127.0.0.1/vmail?socket=/tmp/evil.sock", 'socket'],
+            'parameter protocol' => ["mysql://{$u}@127.0.0.1/vmail?protocol=unix", 'protocol'],
+            'parameter username' => ["mysql://{$u}@127.0.0.1/vmail?username=root", 'username'],
+            'libpq hostaddr' => ["pgsql://{$u}@127.0.0.1/vmail?hostaddr=198.51.100.7", 'hostaddr'],
+            'libpq options' => ["pgsql://{$u}@127.0.0.1/vmail?options=-c%20default_transaction_read_only%3Doff", 'options'],
+            'libpq sslcompression' => ["pgsql://{$u}@127.0.0.1/vmail?sslcompression=1", 'sslcompression'],
+            'a MySQL parameter for PostgreSQL' => ["pgsql://{$u}@127.0.0.1/vmail?verify_server_cert=1", 'verify_server_cert'],
+            'a PostgreSQL parameter for MySQL' => ["mysql://{$u}@127.0.0.1/vmail?sslmode=verify-full", 'sslmode'],
+            'unknown parameter' => ["mysql://{$u}@127.0.0.1/vmail?new_link=true", 'new_link'],
+            // parameters: form
+            'parameter without a value' => ["pgsql://{$u}@127.0.0.1/vmail?sslmode", 'name=value'],
+            'empty parameter' => ["pgsql://{$u}@127.0.0.1/vmail?sslmode=verify-full&", 'name=value'],
+            'value with a raw =' => ["pgsql://{$u}@127.0.0.1/vmail?sslrootcert=/etc/ssl/a=b.pem", 'name=value'],
+            'parameter name in upper case' => ["pgsql://{$u}@127.0.0.1/vmail?SSLMODE=verify-full", 'name=value'],
+            'the same parameter twice (the first one wins in the core)' => ["pgsql://{$u}@db.example.net/vmail?sslmode=disable&sslmode=verify-full", 'twice'],
+            'a second setting behind a raw =' => ["pgsql://{$u}@db.example.net/vmail?sslmode=verify-full%20sslmode=disable", 'name=value'],
+            // parameters: values (a complete second setting, its = percent-encoded so that the core
+            // parser would hand it to the driver in one piece)
+            'sslmode with a second setting' => ["pgsql://{$u}@db.example.net/vmail?sslmode=verify-full%20sslmode%3Ddisable", 'sslmode'],
+            'unknown sslmode' => ["pgsql://{$u}@127.0.0.1/vmail?sslmode=maybe", 'sslmode'],
+            'certificate path with a blank' => ["pgsql://{$u}@db.example.net/vmail?sslmode=verify-full&sslrootcert=/etc/ssl/ca.pem%20host%3Ddb.evil.example", 'sslrootcert'],
+            'relative certificate path' => ["mysql://{$u}@db.example.net/vmail?ca=ca.pem&verify_server_cert=1", '"ca"'],
+            'certificate path with a semicolon' => ["mysql://{$u}@db.example.net/vmail?ca=/etc/ssl/ca.pem%3Bhost%3Devil&verify_server_cert=1", '"ca"'],
+            'application name with a blank' => ["pgsql://{$u}@127.0.0.1/vmail?application_name=gal%20host%3Ddb.evil.example", 'application_name'],
+            'charset with a semicolon' => ["mysql://{$u}@127.0.0.1/vmail?charset=utf8mb4%3Bhost%3Ddb.evil.example", 'charset'],
+            'verify_server_cert that is no switch' => ["mysql://{$u}@db.example.net/vmail?ca=/etc/ssl/ca.pem&verify_server_cert=maybe", 'verify_server_cert'],
+            // user
+            'user with a blank' => ['pgsql://gal%20bridge:' . self::PASSWORD . '@127.0.0.1/vmail', 'user name'],
+            // no target at all: the client library would choose one itself
+            'no host and no socket (PostgreSQL)' => ["pgsql://{$u}@/vmail", 'host or a unix socket'],
+            'no host and no socket (MySQL)' => ["mysql://{$u}@/vmail", 'host or a unix socket'],
+            'empty unix socket' => ["pgsql://{$u}@unix()/vmail", 'host or a unix socket'],
+            'relative unix socket' => ["mysql://{$u}@unix(mysqld.sock)/vmail", 'socket'],
+        ];
+    }
+
+    #[DataProvider('malformedDsns')]
+    public function testDsnIsJudgedInTheFormTheDriverReceives(string $dsn, string $reason): void
+    {
+        foreach ([self::config(), self::config(['galbridge_db_allow_plaintext' => true, 'galbridge_db_allow_verify_ca' => true])] as $config) {
+            try {
+                new Dsn($dsn, $config);
+                self::fail('accepted: ' . str_replace(self::PASSWORD, '***', $dsn));
+            } catch (GalBridgeException $e) {
+                self::assertSame('config_invalid', $e->getReason());
+                self::assertStringContainsString($reason, $e->getMessage());
+                self::assertStringNotContainsString(self::PASSWORD, $e->getMessage());
+            }
+        }
+    }
+
+    public function testOrdinaryDsnsAreStillAccepted(): void
+    {
+        $u = 'galbridge:' . self::PASSWORD;
+        foreach ([
+            "mysql://{$u}@127.0.0.1/vmail",
+            "mysql://{$u}@localhost/vmail",
+            "mysqli://{$u}@127.0.0.1:3306/vmail",
+            "mysql://{$u}@unix(/run/mysqld/mysqld.sock)/vmail",
+            "mysql://{$u}@[::1]:3306/vmail",
+            "mysql://{$u}@127.0.0.1/vmail?charset=utf8mb4&timeout=5",
+            "mysql://{$u}@db.example.net/vmail?ca=/etc/ssl/certs/vmail-db-ca.pem&verify_server_cert=1&cert=/etc/roundcube/galbridge-client.pem&key=/etc/roundcube/galbridge-client.key",
+            "mysql://{$u}@db.example.net/vmail?capath=/etc/ssl/certs&verify_server_cert=1&cipher=ECDHE-RSA-AES256-GCM-SHA384",
+            "pgsql://{$u}@127.0.0.1/vmail",
+            "pgsql://{$u}@127.0.0.1:5432/galbridge_vmail_test",
+            "pgsql://{$u}@unix(/var/run/postgresql)/vmail",
+            "pgsql://{$u}@127.0.0.1/vmail?application_name=galbridge",
+            "pgsql://{$u}@db.example.com/vmail?sslmode=verify-full&sslrootcert=/etc/ssl/certs/vmail-db-ca.pem&sslcert=/etc/roundcube/galbridge-client.crt&sslkey=/etc/roundcube/galbridge-client.key",
+            // a password may contain anything (it never reaches the connection string): '?', '=', '&', ';', '@'
+            'pgsql://galbridge:' . rawurlencode('p@ss?word=1&x;y z') . '@127.0.0.1/vmail',
+            'mysql://galbridge:a?b=c&d@127.0.0.1/vmail',
+            // the core parser cuts a database name at ';' itself: the driver receives "vmail"
+            "mysql://{$u}@127.0.0.1/vmail%3Bhost=db.evil.example",
+        ] as $dsn) {
+            $accepted = new Dsn($dsn, self::config());
+            self::assertSame('galbridge', $accepted->user(), $dsn);
+            self::assertSame([], $accepted->warnings(), $dsn);
+            self::assertMatchesRegularExpression('/^[A-Za-z0-9_]+$/', $accepted->database(), $dsn);
+
+            // The DSN that is handed to the driver names the SAME target and credentials as the one
+            // that was judged, plus the connect timeout as a parameter - also when the password
+            // holds a '?' (the timeout must not be appended to the database name with '&').
+            $judged = \rcube_db::parse_dsn($dsn);
+            $effective = \rcube_db::parse_dsn($accepted->effective());
+            self::assertIsArray($judged, $dsn);
+            self::assertIsArray($effective, $dsn);
+            foreach (['phptype', 'username', 'password', 'protocol', 'hostspec', 'port', 'socket', 'database'] as $part) {
+                self::assertSame($judged[$part] ?? null, $effective[$part] ?? null, "{$dsn}: {$part}");
+            }
+            self::assertSame((string) ($judged['timeout'] ?? Config::DEFAULTS['galbridge_db_connect_timeout']), (string) ($effective['timeout'] ?? ''), $dsn . ': timeout');
+            unset($judged['timeout'], $effective['timeout']);
+            self::assertSame($judged, $effective, $dsn . ': nothing else changed');
+        }
+    }
+
+    /**
+     * libpq reads settings that the DSN does not give from the environment of the PHP process. A
+     * variable that redirects the connection whatever the DSN says is refused; the port only when
+     * the DSN names none.
+     */
+    public function testLibpqEnvironmentThatRedirectsTheConnectionIsRefused(): void
+    {
+        $dsn = 'pgsql://galbridge:' . self::PASSWORD . '@127.0.0.1/vmail';
+        foreach (['PGHOSTADDR' => '198.51.100.7', 'PGSERVICE' => 'other', 'PGSERVICEFILE' => '/tmp/pg_service.conf', 'PGPORT' => '6432'] as $var => $value) {
+            putenv($var . '=' . $value);
+            try {
+                new Dsn($dsn, self::config());
+                self::fail($var . ' in the environment was accepted');
+            } catch (GalBridgeException $e) {
+                self::assertSame('config_invalid', $e->getReason());
+                self::assertStringContainsString($var, $e->getMessage());
+                self::assertStringNotContainsString($value, $e->getMessage(), 'the value is not repeated');
+            } finally {
+                putenv($var);
+            }
+        }
+        // PGPORT cannot change a port that the DSN names; MySQL does not use libpq
+        putenv('PGPORT=6432');
+        try {
+            self::assertSame([], (new Dsn('pgsql://galbridge:' . self::PASSWORD . '@127.0.0.1:5432/vmail', self::config()))->warnings());
+            self::assertSame([], (new Dsn('mysql://galbridge:' . self::PASSWORD . '@127.0.0.1/vmail', self::config()))->warnings());
+        } finally {
+            putenv('PGPORT');
+        }
+        // settings that libpq adds to the connection are reported (log and diag)
+        putenv('PGOPTIONS=-c statement_timeout=0');
+        try {
+            $warnings = (new Dsn($dsn, self::config()))->warnings();
+            self::assertCount(1, $warnings);
+            self::assertStringContainsString('PGOPTIONS', $warnings[0]);
+            self::assertStringNotContainsString('statement_timeout', $warnings[0]);
+        } finally {
+            putenv('PGOPTIONS');
+        }
+        self::assertSame([], (new Dsn($dsn, self::config()))->warnings());
     }
 
     public function testPlaintextRemoteNeedsExplicitOptInAndWarns(): void
@@ -607,37 +820,124 @@ final class DsnPolicyTest extends TestCase
     }
 
     /**
-     * forwardings.domain is required only for galbridge_user_aliases (the display aliases join their
-     * domain): with the option a role without it is column_missing - never a db_error on the first
-     * listing - and without the option the same role works.
+     * The domain column of the forwardings view is always required (the viewer's own aliases count
+     * only while the domain their row belongs to is deliverable): a role without it is
+     * column_missing - never a db_error on the first statement that names the column.
      */
     #[DataProvider('serverEngines')]
-    public function testForwardingsDomainIsRequiredOnlyForUserAliases(string $dsn): void
+    public function testForwardingsDomainIsAlwaysRequired(string $dsn): void
     {
         if ($dsn === '') {
             self::markTestSkipped('needs GALBRIDGE_TEST_MYSQL_DSN / GALBRIDGE_TEST_PGSQL_DSN');
         }
         $columns = self::requiredColumns();
-        $columns['forwardings'] = array_values(array_diff($columns['forwardings'], ['domain']));
+        $columns[Schema::FORWARDINGS] = array_values(array_diff($columns[Schema::FORWARDINGS], ['domain']));
         $roleDsn = $this->createRole($dsn, 'nofd', $columns);
 
-        $factory = Env::factory(Env::config($roleDsn, ['galbridge_user_aliases' => true]), 'jan.kowalski@example.com');
+        foreach ([['galbridge_user_aliases' => true], []] as $options) {
+            $GLOBALS['galbridge_test_log'] = [];
+            Log::resetOnce();
+            $factory = Env::factory(Env::config($roleDsn, $options), 'jan.kowalski@example.com');
+            self::assertSame([], $factory->books());
+            self::assertSame('column_missing', $factory->resolver()->status());
+            $book = $factory->create(BookDefinition::DOMAIN);
+            self::assertInstanceOf(DeniedBook::class, $book);
+            self::assertSame(0, $book->list_records()->count);
+            $log = implode("\n", $GLOBALS['galbridge_test_log']);
+            self::assertStringContainsString('column_missing: required vmail columns not readable: galbridge_forwardings.domain', $log);
+            self::assertStringNotContainsString('db_error', $log);
+        }
+    }
+
+    // ------------------------------------------------------------------ the forwardings table (audit U-06)
+
+    /**
+     * vmail.forwardings also holds the private forwarding targets of every mailbox. The role built
+     * from the grant templates cannot read that table at all - it reads a view without those rows.
+     */
+    #[DataProvider('serverEngines')]
+    public function testTheTemplateRoleCannotReadPrivateForwardingTargets(string $dsn): void
+    {
+        if ($dsn === '') {
+            self::markTestSkipped('needs GALBRIDGE_TEST_MYSQL_DSN / GALBRIDGE_TEST_PGSQL_DSN');
+        }
+        $conn = new Connection(new Dsn($dsn, Env::config($dsn)), 3);
+        // the table itself: refused by the server, for every column
+        foreach (['SELECT forwarding FROM `forwardings` WHERE 1 = 0', 'SELECT address FROM `forwardings` WHERE 1 = 0', 'SELECT COUNT(*) FROM `forwardings`'] as $sql) {
+            self::assertSame('denied', $conn->probe($sql), $sql);
+        }
+        self::assertSame([], $conn->visibleColumns()[Schema::FORWARDINGS_TABLE], 'no column of the table is visible to the role');
+        self::assertEqualsCanonicalizing(['address', 'forwarding', 'domain', 'is_alias', 'is_list', 'is_maillist', 'active'], $conn->visibleColumns()[Schema::FORWARDINGS]);
+
+        // the view: the rows the plugin needs, and no row that only forwards a mailbox - neither the
+        // external targets (canaries of the fixture) nor the mailbox-to-itself rows
+        $rows = $conn->select('SELECT f.address, f.forwarding, f.is_alias, f.is_list, f.is_maillist FROM `' . Schema::FORWARDINGS . '` f');
+        self::assertNotSame([], $rows);
+        $forwardings = array_column($rows, 'forwarding');
+        foreach (['jan.home@outlook.test', 'private.destination@gmail.test'] as $canary) {
+            self::assertNotContains($canary, $forwardings, 'a private forwarding target is readable through the view');
+        }
+        foreach ($rows as $row) {
+            self::assertSame(1, max((int) $row['is_alias'], (int) $row['is_list'], (int) $row['is_maillist']), 'a row of another kind: ' . $row['address']);
+        }
+        self::assertContains('jk@example.com', array_column($rows, 'address'), 'per-user aliases are in the view');
+        self::assertContains('newsletter@example.com', array_column($rows, 'address'), 'mailing lists are in the view');
+
+        // read-only in every respect: the view cannot be used to change the table
+        foreach (['UPDATE `' . Schema::FORWARDINGS . '` SET active = active WHERE 1 = 0', 'DELETE FROM `' . Schema::FORWARDINGS . '` WHERE 1 = 0'] as $sql) {
+            self::assertSame('denied', $conn->probeWrite($sql), $sql);
+        }
+        $conn->close();
+    }
+
+    /**
+     * A role that CAN read the forwardings table - the grants of GAL Bridge 1.0.0, or a broader role
+     * - is refused like one that can read password hashes: every book is denied.
+     *
+     * @return array<string, array{string, string}>
+     */
+    public static function serverEnginesWithForwardingsTable(): array
+    {
+        $out = [];
+        foreach (Env::engines() as $engine => [$dsn]) {
+            if ($engine === 'sqlite') {
+                continue;
+            }
+            $out[$engine . ': the 1.0.0 column grant on the table'] = [$dsn, 'columns'];
+            $out[$engine . ': the table next to the view'] = [$dsn, 'both'];
+            $out[$engine . ': one column of the table'] = [$dsn, 'one'];
+        }
+        return $out === [] ? ['no server engine configured' => ['', '']] : $out;
+    }
+
+    #[DataProvider('serverEnginesWithForwardingsTable')]
+    public function testRoleThatCanReadTheForwardingsTableIsRefused(string $dsn, string $variant): void
+    {
+        if ($dsn === '') {
+            self::markTestSkipped('needs GALBRIDGE_TEST_MYSQL_DSN / GALBRIDGE_TEST_PGSQL_DSN');
+        }
+        $grants = self::requiredColumns();
+        $view = $grants[Schema::FORWARDINGS];
+        if ($variant === 'columns') {
+            unset($grants[Schema::FORWARDINGS]);
+            $grants[Schema::FORWARDINGS_TABLE] = $view;
+        } elseif ($variant === 'both') {
+            $grants[Schema::FORWARDINGS_TABLE] = $view;
+        } else {
+            $grants[Schema::FORWARDINGS_TABLE] = ['forwarding'];
+        }
+        $roleDsn = $this->createRole($dsn, 'fwtab', $grants);
+
+        $factory = Env::factory(Env::config($roleDsn), 'jan.kowalski@example.com');
         self::assertSame([], $factory->books());
-        self::assertSame('column_missing', $factory->resolver()->status());
+        self::assertSame('role_too_broad', $factory->resolver()->status());
         $book = $factory->create(BookDefinition::DOMAIN);
         self::assertInstanceOf(DeniedBook::class, $book);
-        self::assertSame(0, $book->list_records()->count);
+        self::assertSame(0, $book->search('*', 'jan')->count);
         $log = implode("\n", $GLOBALS['galbridge_test_log']);
-        self::assertStringContainsString('column_missing: required vmail columns not readable: forwardings.domain', $log);
+        self::assertStringContainsString('role_too_broad: the configured database role can read the table "forwardings"', $log);
+        self::assertStringContainsString('galbridge_forwardings', $log, 'the log names the view to grant instead');
         self::assertStringNotContainsString('db_error', $log);
-
-        $GLOBALS['galbridge_test_log'] = [];
-        Log::resetOnce();
-        $book = Env::factory(Env::config($roleDsn), 'jan.kowalski@example.com')->create(BookDefinition::DOMAIN);
-        self::assertInstanceOf(AddressBook::class, $book);
-        $book->set_pagesize(200);
-        self::assertSame(13, $book->list_records()->count);
-        self::assertStringNotContainsString('db_error', implode("\n", $GLOBALS['galbridge_test_log']));
     }
 
     /**
@@ -647,11 +947,17 @@ final class DsnPolicyTest extends TestCase
     public function testOnlyTheReadTablesAreProbed(string $dsn): void
     {
         self::assertNotContains('alias_domain', Connection::TABLES);
+        self::assertNotContains(Schema::FORWARDINGS_TABLE, Connection::TABLES, 'forwardings is read through its view only');
+        self::assertSame([Schema::FORWARDINGS_TABLE], Connection::FORBIDDEN_TABLES);
         $conn = new Connection(new Dsn($dsn, Env::config($dsn)), 3);
         $columns = $conn->visibleColumns();
-        self::assertSame(Connection::TABLES, array_keys($columns));
-        foreach (['mailbox', 'domain', 'forwardings'] as $table) {
+        // the relations the plugin reads, plus the table whose visibility means "role too broad"
+        self::assertSame([...Connection::TABLES, ...Connection::FORBIDDEN_TABLES], array_keys($columns));
+        foreach (['mailbox', 'domain', Schema::FORWARDINGS] as $table) {
             self::assertNotSame([], $columns[$table], $table);
+        }
+        if ($conn->driver() !== 'sqlite') {
+            self::assertSame([], $columns[Schema::FORWARDINGS_TABLE], 'the role of the grant templates sees nothing of the table');
         }
         $conn->close();
     }
@@ -751,7 +1057,8 @@ final class DsnPolicyTest extends TestCase
         return [
             'mailbox' => ['username', 'name', 'domain', 'active', 'enabledeliver', 'expired'],
             'domain' => ['domain', 'active', 'backupmx', 'expired'],
-            'forwardings' => ['address', 'forwarding', 'domain', 'is_alias', 'is_list', 'is_maillist', 'active'],
+            // the view of the grant templates - never the forwardings table itself
+            Schema::FORWARDINGS => ['address', 'forwarding', 'domain', 'is_alias', 'is_list', 'is_maillist', 'active'],
             'alias' => ['address', 'name', 'accesspolicy', 'domain', 'active', 'expired'],
             'maillists' => ['address', 'name', 'accesspolicy', 'domain', 'active', 'expired'],
             'moderators' => ['address', 'moderator'],

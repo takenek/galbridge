@@ -20,3 +20,9 @@ __pycache__/
 *.swp
 .env
 /phpstan.neon
+# Security audit working documents and delivered artefacts: they describe findings in detail and
+# stay OUT of the repository (and so out of a "git clone" installation); what was fixed is
+# recorded in CHANGELOG.md and SECURITY.md. Keep them elsewhere.
+/FINAL_SECURITY_REPORT.md
+/STAGE_*.md
+/DOSTARCZONE/
