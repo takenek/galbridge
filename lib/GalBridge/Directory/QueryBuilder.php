@@ -16,6 +16,8 @@ declare(strict_types=1);
 
 namespace GalBridge\Directory;
 
+use GalBridge\Config;
+use GalBridge\Exception\GalBridgeException;
 use GalBridge\Log;
 use GalBridge\Normalizer;
 
@@ -60,9 +62,57 @@ final class QueryBuilder
     ) {
     }
 
+    /**
+     * The one way to build the query builder of a book from the configuration. Malformed deny-lists
+     * or visibility column are refused (they must disable the books, never mean "no restriction").
+     *
+     * @throws GalBridgeException 'config_invalid'
+     */
+    public static function forBook(Config $config, string $driver, BookDefinition $book, Viewer $viewer, FieldMap $fields): self
+    {
+        $hidden = $config->hiddenAddresses();
+        $localparts = $config->hiddenLocalparts();
+        $visibility = $config->visibilityColumn();
+        if ($hidden === null || $localparts === null || $visibility === null) {
+            throw new GalBridgeException('config_invalid', 'malformed deny-list or visibility column');
+        }
+        return new self(
+            driver: $driver,
+            book: $book,
+            viewer: $viewer,
+            fields: $fields,
+            hideExpired: $config->bool('galbridge_hide_expired'),
+            now: gmdate('Y-m-d H:i:s'),
+            hiddenAddresses: $hidden,
+            hiddenLocalparts: $localparts,
+            visibilityColumn: $visibility,
+            includeAliases: $config->bool('galbridge_include_aliases'),
+            includeLists: $config->bool('galbridge_include_mailing_lists'),
+            listPolicy: $config->choice('galbridge_list_policy', Config::LIST_POLICIES),
+            minLength: $config->int('galbridge_min_search_length', 1, 10),
+            maxLength: $config->int('galbridge_max_search_length', 16, 255),
+        );
+    }
+
     public function book(): BookDefinition
     {
         return $this->book;
+    }
+
+    /**
+     * @return list<string>
+     */
+    public function hiddenAddresses(): array
+    {
+        return $this->hiddenAddresses;
+    }
+
+    /**
+     * @return list<string>
+     */
+    public function hiddenLocalparts(): array
+    {
+        return $this->hiddenLocalparts;
     }
 
     /**
@@ -73,11 +123,10 @@ final class QueryBuilder
     public function kinds(): array
     {
         $kinds = [self::KIND_PERSON];
-        $forwardings = $this->viewer->hasColumn('forwardings', 'is_list') && $this->viewer->hasColumn('forwardings', 'is_maillist');
-        if ($this->includeAliases && $forwardings && $this->hasAll('alias', ['address', 'name', 'accesspolicy', 'domain', 'active'])) {
+        if ($this->includeAliases && $this->hasAll('forwardings', ['is_list']) && $this->hasAll('alias', ['address', 'name', 'accesspolicy', 'domain', 'active'])) {
             $kinds[] = self::KIND_ALIAS;
         }
-        if ($this->includeLists && $forwardings && $this->hasAll('maillists', ['address', 'name', 'accesspolicy', 'domain', 'active'])) {
+        if ($this->includeLists && $this->hasAll('forwardings', ['is_maillist']) && $this->hasAll('maillists', ['address', 'name', 'accesspolicy', 'domain', 'active'])) {
             $kinds[] = self::KIND_LIST;
         }
         return $kinds;
@@ -416,6 +465,11 @@ final class QueryBuilder
     private function organizationMatch(string $word, int $mode, string $kind): Sql
     {
         $domains = [];
+        // the global book never lists a whole organization from a prefix of its name (as for domain
+        // fragments of addresses): only the complete label matches there
+        if ($this->book->prefixOnly) {
+            $mode = \rcube_addressbook::SEARCH_STRICT;
+        }
         foreach ($this->book->orgLabels as $domain => $label) {
             $l = mb_strtolower($label);
             $hit = match ($mode) {
@@ -494,6 +548,18 @@ final class QueryBuilder
             array_push($params, ...$where->params);
         }
         return ['SELECT COUNT(*) AS n FROM (' . implode(' UNION ALL ', $selects) . ' LIMIT ' . max(1, $bound) . ') x', $params];
+    }
+
+    /**
+     * COUNT of one entity kind of the book (no filter, no group), bounded - for diag --user.
+     *
+     * @return array{0: string, 1: list<scalar|null>}
+     */
+    public function kindCountQuery(string $kind, int $bound): array
+    {
+        $where = $this->root($kind);
+        return ['SELECT COUNT(*) AS n FROM (SELECT ' . $this->addressColumn($kind) . ' AS address FROM ' . $this->from($kind)
+            . ' WHERE ' . $where->sql . ' LIMIT ' . max(1, $bound) . ') x', $where->params];
     }
 
     /**

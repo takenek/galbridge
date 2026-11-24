@@ -14,19 +14,23 @@ set -u
 BASE="${1:-/opt/rcrun}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LOG="$HERE/run/matrix-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$LOG"
+# the supported PHP branches tested locally x both iRedMail SQL editions (CI covers 8.1 - 8.5 in PHPUnit)
 runs=(
   # rc     php     vmail db
+  "1.7.7 php8.1 mysql"
+  "1.7.7 php8.1 pgsql"
   "1.7.7 php8.4 mysql"
   "1.7.7 php8.4 pgsql"
-  "1.7.7 php8.3 mysql"
+  "1.7.7 php8.5 mysql"
   "1.7.7 php8.5 pgsql"
 )
 total=0; bad=0
 for r in "${runs[@]}"; do
   read -r ver php db <<< "$r"
   case "$ver" in /*) rc="$ver"; tag="release-$(basename "$ver" | sed 's/roundcubemail-//')" ;; *) rc="$BASE/$ver"; tag="$ver" ;; esac
-  [ -d "$rc" ] || { echo "skip $rc (not present)"; continue; }
-  command -v "$php" >/dev/null || { echo "skip $php (not installed)"; continue; }
+  # a missing combination is a failure, never a silent skip
+  [ -d "$rc" ] || { echo "MISSING $rc (not present)" | tee -a "$LOG/summary.txt"; total=$((total+1)); bad=$((bad+1)); continue; }
+  command -v "$php" >/dev/null || { echo "MISSING $php (not installed)" | tee -a "$LOG/summary.txt"; total=$((total+1)); bad=$((bad+1)); continue; }
   name="$tag-$php-$db"
   python3 "$HERE/test_e2e.py" --rc "$rc" --php "$php" --db "$db" --port 8181 > "$LOG/$name.log" 2>&1
   res=$(tail -1 "$LOG/$name.log")

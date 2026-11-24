@@ -5,9 +5,14 @@ declare(strict_types=1);
 namespace GalBridge\Tests\Integration;
 
 use GalBridge\AddressBook;
+use GalBridge\Db\Connection;
+use GalBridge\Db\Dsn;
 use GalBridge\DeniedBook;
 use GalBridge\Directory\BookDefinition;
+use GalBridge\Directory\FieldMap;
 use GalBridge\Directory\IdCodec;
+use GalBridge\Directory\QueryBuilder;
+use GalBridge\Exception\GalBridgeException;
 use GalBridge\Log;
 use GalBridge\Tests\Support\Env;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -497,6 +502,92 @@ final class EntitlementsTest extends TestCase
         // without the option the column is ignored
         $book = Env::factory(Env::config($dsn), self::JAN)->create(BookDefinition::DOMAIN);
         self::assertNotNull($book->get_record('u_annaDnowakAexampleDcom'));
+    }
+
+    // ------------------------------------------------------------------ QueryBuilder::forBook()
+
+    /**
+     * @return array<string, array{string, mixed}>
+     */
+    public static function malformedRestrictions(): array
+    {
+        return [
+            'hidden addresses: a string' => ['galbridge_hidden_addresses', 'postmaster@example.com'],
+            'hidden addresses: wildcard' => ['galbridge_hidden_addresses', ['*']],
+            'hidden addresses: integer entry' => ['galbridge_hidden_addresses', [42]],
+            'hidden local parts: a string' => ['galbridge_hidden_localparts', 'postmaster'],
+            'hidden local parts: whitespace' => ['galbridge_hidden_localparts', ['post master']],
+            'visibility column: invalid name' => ['galbridge_visibility_column', 'gal-visible'],
+            'visibility column: SQL' => ['galbridge_visibility_column', 'x = 1 OR 1'],
+        ];
+    }
+
+    /**
+     * QueryBuilder::forBook() - the single constructor used by the book factory and diag --user -
+     * refuses a malformed deny-list or visibility column (config_invalid) instead of turning it into
+     * "no restriction"; Entitlements::books() already returns no book in that case, this is the
+     * second line of defence.
+     */
+    #[DataProvider('malformedRestrictions')]
+    public function testQueryBuilderForBookRefusesMalformedRestrictions(string $option, mixed $value): void
+    {
+        $dsn = Env::sqliteDsn();
+        $good = Env::config($dsn);
+        $factory = Env::factory($good, self::JAN);
+        $viewer = $factory->resolver()->resolve();
+        self::assertNotNull($viewer);
+        $book = $factory->books()[BookDefinition::DOMAIN];
+
+        $config = Env::config($dsn, [$option => $value]);
+        self::assertSame([], Env::factory($config, self::JAN)->books(), 'the first line of defence');
+        try {
+            QueryBuilder::forBook($config, 'sqlite', $book, $viewer, FieldMap::fromConfig($config, $viewer));
+            self::fail('a malformed ' . $option . ' was accepted');
+        } catch (GalBridgeException $e) {
+            self::assertSame('config_invalid', $e->getReason());
+        }
+
+        // the same book with a valid configuration: normalised lists, no visibility filter
+        $valid = Env::config($dsn, ['galbridge_hidden_addresses' => ['Postmaster@Example.COM'], 'galbridge_hidden_localparts' => [' Admin ']]);
+        $queries = QueryBuilder::forBook($valid, 'sqlite', $book, $viewer, FieldMap::fromConfig($valid, $viewer));
+        self::assertSame(['postmaster@example.com'], $queries->hiddenAddresses());
+        self::assertSame(['admin'], $queries->hiddenLocalparts());
+        self::assertSame($book, $queries->book());
+    }
+
+    /**
+     * kindCountQuery(): the bounded per-kind COUNT of a book (diag --user) uses the same root
+     * predicates (scope, active, hidden lists, list policy) as the book itself.
+     */
+    #[DataProvider('engines')]
+    public function testKindCountQueryCountsOneKindOfTheBook(string $dsn): void
+    {
+        $counts = static function (array $options, int $bound = 1000) use ($dsn): array {
+            $config = Env::config($dsn, $options);
+            $factory = Env::factory($config, self::JAN);
+            $viewer = $factory->resolver()->resolve();
+            self::assertNotNull($viewer);
+            $conn = new Connection(new Dsn($dsn, $config), 3);
+            $queries = QueryBuilder::forBook($config, $conn->driver(), $factory->books()[BookDefinition::DOMAIN], $viewer, FieldMap::fromConfig($config, $viewer));
+            $out = [];
+            foreach ($queries->kinds() as $kind) {
+                [$sql, $params] = $queries->kindCountQuery($kind, $bound);
+                $out[$kind] = (int) ($conn->select($sql, $params)[0]['n'] ?? -1);
+            }
+            [$sql, $params] = $queries->kindCountQuery('x', $bound);
+            self::assertSame('0', $conn->select($sql, $params)[0]['n'] ?? null, 'an unknown kind matches nothing');
+            return $out;
+        };
+
+        self::assertSame([QueryBuilder::KIND_PERSON => 7, QueryBuilder::KIND_ALIAS => 5, QueryBuilder::KIND_LIST => 1], $counts([]));
+        self::assertSame([QueryBuilder::KIND_PERSON => 3, QueryBuilder::KIND_ALIAS => 3, QueryBuilder::KIND_LIST => 1], $counts([], 3), 'bounded');
+        self::assertSame([QueryBuilder::KIND_PERSON => 1, QueryBuilder::KIND_ALIAS => 1, QueryBuilder::KIND_LIST => 1], $counts([], 0), 'never unbounded');
+        self::assertSame(
+            [QueryBuilder::KIND_PERSON => 6, QueryBuilder::KIND_ALIAS => 4, QueryBuilder::KIND_LIST => 1],
+            $counts(['galbridge_hidden_addresses' => ['postmaster@example.com'], 'galbridge_hidden_localparts' => ['team']]),
+        );
+        self::assertSame([QueryBuilder::KIND_PERSON => 7], $counts(['galbridge_include_aliases' => false, 'galbridge_include_mailing_lists' => false]));
+        self::assertSame([QueryBuilder::KIND_PERSON => 8, QueryBuilder::KIND_ALIAS => 6, QueryBuilder::KIND_LIST => 1], $counts(['galbridge_hide_expired' => false]));
     }
 
     // ------------------------------------------------------------------ helpers

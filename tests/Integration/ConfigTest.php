@@ -10,6 +10,9 @@ use GalBridge\Db\Connection;
 use GalBridge\Db\Dsn;
 use GalBridge\DeniedBook;
 use GalBridge\Directory\BookDefinition;
+use GalBridge\Directory\FieldMap;
+use GalBridge\Directory\Schema;
+use GalBridge\Directory\Viewer;
 use GalBridge\Directory\ViewerResolver;
 use GalBridge\Factory;
 use GalBridge\Log;
@@ -384,6 +387,22 @@ final class ConfigTest extends TestCase
         }
     }
 
+    /**
+     * host_mismatch tells the administrator what to put into galbridge_imap_hosts: the session host,
+     * the stored host and the allowed hosts (server names, never the login), once per request.
+     */
+    #[DataProvider('engines')]
+    public function testHostMismatchLogNamesTheHosts(string $dsn): void
+    {
+        $config = self::merged(['galbridge_db_dsn' => $dsn, 'imap_host' => 'tls://127.0.0.1:143', 'galbridge_imap_hosts' => ['127.0.0.1', 'mail.example.com']], []);
+        foreach ([1, 2] as $request) {
+            self::assertSame([], self::factory($config, self::JAN, 'tls://127.0.0.1:143', 'ssl://IMAP.Evil.example:993')->books());
+        }
+        $lines = array_values(preg_grep('/host_mismatch/', $GLOBALS['galbridge_test_log']) ?: []);
+        self::assertSame(['WARN viewer: host_mismatch: session IMAP host is not an allowed directory host host=imap.evil.example mail_host=127.0.0.1 allowed=127.0.0.1 mail.example.com'], $lines, 'once per request');
+        self::assertStringNotContainsString('kowalski', implode("\n", $GLOBALS['galbridge_test_log']), 'never the login');
+    }
+
     #[DataProvider('engines')]
     public function testExplicitHostListAcceptsEveryListedHost(string $dsn): void
     {
@@ -491,6 +510,128 @@ final class ConfigTest extends TestCase
         self::assertInstanceOf(DeniedBook::class, $factory->create(BookDefinition::DOMAIN));
         $factory = self::factoryWithColumns(Env::config($dsn, ['galbridge_hide_expired' => false]), self::JAN, ['mailbox' => ['expired'], 'domain' => ['expired']]);
         self::assertInstanceOf(AddressBook::class, $factory->create(BookDefinition::DOMAIN));
+    }
+
+    // ------------------------------------------------------------------ required and optional columns (Schema)
+
+    /**
+     * @return array<string, array{array<string, mixed>, array<string, list<string>>, array<string, list<string>>}>
+     */
+    public static function schemas(): array
+    {
+        $required = [
+            'mailbox' => ['username', 'name', 'domain', 'active', 'enabledeliver', 'expired'],
+            'domain' => ['domain', 'active', 'backupmx', 'expired'],
+            'forwardings' => ['address', 'forwarding', 'is_alias', 'active'],
+        ];
+        $optional = [
+            'mailbox' => ['first_name', 'last_name', 'department'],
+            'alias' => ['address', 'name', 'accesspolicy', 'domain', 'active', 'expired'],
+            'forwardings' => ['is_list', 'is_maillist'],
+            'maillists' => ['address', 'name', 'accesspolicy', 'domain', 'active', 'expired'],
+            'moderators' => ['address', 'moderator'],
+            'maillist_owners' => ['address', 'owner'],
+        ];
+        $noExpired = $required;
+        $noExpired['mailbox'] = ['username', 'name', 'domain', 'active', 'enabledeliver'];
+        $noExpired['domain'] = ['domain', 'active', 'backupmx'];
+        $userAliases = $required;
+        $userAliases['forwardings'][] = 'domain';
+        return [
+            'defaults' => [[], $required, $optional],
+            'expired accounts shown' => [['galbridge_hide_expired' => false], $noExpired, ['alias' => ['address', 'name', 'accesspolicy', 'domain', 'active'], 'maillists' => ['address', 'name', 'accesspolicy', 'domain', 'active']] + $optional],
+            'per-user aliases shown' => [['galbridge_user_aliases' => true], $userAliases, $optional],
+            'every field' => [['galbridge_fields' => Config::FIELDS], $required, ['mailbox' => ['first_name', 'last_name', 'department', 'telephone', 'mobile', 'birthday']] + $optional],
+            'name and e-mail only' => [['galbridge_fields' => ['name', 'email', 'organization']], $required, ['mailbox' => []] + $optional],
+            'persons only' => [['galbridge_include_aliases' => false, 'galbridge_include_mailing_lists' => false], $required, ['mailbox' => $optional['mailbox']]],
+            'aliases only' => [['galbridge_include_mailing_lists' => false], $required, ['mailbox' => $optional['mailbox'], 'alias' => $optional['alias'], 'forwardings' => ['is_list'], 'moderators' => $optional['moderators']]],
+            'list policy all' => [['galbridge_list_policy' => 'all'], $required, array_diff_key($optional, ['moderators' => 1, 'maillist_owners' => 1])],
+        ];
+    }
+
+    /**
+     * One list of required and optional columns for the effective configuration, used alike by the
+     * Viewer resolution, the book factory and diag.
+     *
+     * @param array<string, mixed>        $options
+     * @param array<string, list<string>> $required
+     * @param array<string, list<string>> $optional
+     */
+    #[DataProvider('schemas')]
+    public function testSchemaFollowsTheConfiguration(array $options, array $required, array $optional): void
+    {
+        $config = Env::config(Env::sqliteDsn(), $options);
+        self::assertSame($required, Schema::required($config));
+        self::assertEqualsCanonicalizing(array_keys($optional), array_keys(Schema::optional($config)));
+        foreach ($optional as $table => $cols) {
+            self::assertEqualsCanonicalizing($cols, Schema::optional($config)[$table] ?? null, $table);
+        }
+
+        // every column the person query can read is required or optional (diag reports it)
+        $all = [];
+        foreach ([Schema::required($config), Schema::optional($config)] as $set) {
+            foreach ($set as $table => $cols) {
+                foreach ($cols as $c) {
+                    $all[$table][] = $c;
+                }
+            }
+        }
+        $viewer = new Viewer(self::JAN, 'example.com', [self::JAN], $all);
+        $fields = new FieldMap($config->fields(), $viewer, $config->bool('galbridge_user_aliases'), $config->organizations() !== []);
+        self::assertSame([], array_diff($fields->personColumns(), $all['mailbox']));
+        self::assertSame([], array_values(array_diff($fields->missing($config->fields()), ['organization'])), 'every configured column field is covered (organization needs no column)');
+
+        // missingRequired() names table.column
+        self::assertSame([], Schema::missingRequired($config, $all));
+        $visible = $all;
+        $visible['mailbox'] = array_values(array_diff($visible['mailbox'], ['enabledeliver']));
+        unset($visible['forwardings']);
+        $expected = ['mailbox.enabledeliver'];
+        foreach ($required['forwardings'] as $c) {
+            $expected[] = 'forwardings.' . $c;
+        }
+        self::assertSame($expected, Schema::missingRequired($config, $visible));
+    }
+
+    /**
+     * The runtime agrees with Schema (and so with diag): expired columns are needed only with
+     * galbridge_hide_expired, forwardings.domain only with galbridge_user_aliases - a missing one is
+     * reported as column_missing before any statement could fail on it (db_error).
+     */
+    #[DataProvider('engines')]
+    public function testRuntimeRequiresExactlyTheSchemaColumns(string $dsn): void
+    {
+        $expired = ['mailbox' => ['expired'], 'domain' => ['expired'], 'alias' => ['expired'], 'maillists' => ['expired']];
+        $factory = self::factoryWithColumns(Env::config($dsn, ['galbridge_hide_expired' => false]), self::JAN, $expired);
+        $book = $factory->create(BookDefinition::DOMAIN);
+        self::assertInstanceOf(AddressBook::class, $book, 'expired columns are not needed when expired accounts are shown');
+        $book->set_pagesize(200);
+        self::assertContains('expired.user@example.com', self::emails($book->list_records()));
+
+        $factory = self::factoryWithColumns(Env::config($dsn, ['galbridge_user_aliases' => true]), self::JAN, ['forwardings' => ['domain']]);
+        self::assertInstanceOf(DeniedBook::class, $factory->create(BookDefinition::DOMAIN));
+        $log = implode("\n", $GLOBALS['galbridge_test_log']);
+        self::assertStringContainsString('column_missing: required vmail columns not readable: forwardings.domain (see bin/galbridge.sh diag)', $log);
+        self::assertStringNotContainsString('db_error', $log);
+
+        $GLOBALS['galbridge_test_log'] = [];
+        Log::resetOnce();
+        $factory = self::factoryWithColumns(Env::config($dsn), self::JAN, ['forwardings' => ['domain']]);
+        $book = $factory->create(BookDefinition::DOMAIN);
+        self::assertInstanceOf(AddressBook::class, $book, 'forwardings.domain is not needed without per-user aliases');
+        $book->set_pagesize(200);
+        self::assertSame(13, $book->list_records()->count);
+        self::assertStringNotContainsString('column_missing', implode("\n", $GLOBALS['galbridge_test_log']));
+
+        // the optional list columns only switch entity kinds off
+        $GLOBALS['galbridge_test_log'] = [];
+        Log::resetOnce();
+        $factory = self::factoryWithColumns(Env::config($dsn), self::JAN, ['forwardings' => ['is_list', 'is_maillist']]);
+        $book = $factory->create(BookDefinition::DOMAIN);
+        self::assertInstanceOf(AddressBook::class, $book);
+        $book->set_pagesize(200);
+        self::assertSame(7, $book->list_records()->count, 'persons only');
+        self::assertStringNotContainsString('column_missing', implode("\n", $GLOBALS['galbridge_test_log']));
     }
 
     // ------------------------------------------------------------------ core options a user controls

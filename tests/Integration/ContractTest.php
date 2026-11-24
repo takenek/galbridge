@@ -11,15 +11,21 @@ declare(strict_types=1);
 namespace GalBridge\Tests\Integration;
 
 use GalBridge\AddressBook;
+use GalBridge\Config;
 use GalBridge\Db\Connection;
 use GalBridge\Db\Dsn;
 use GalBridge\DeniedBook;
 use GalBridge\Directory\BookDefinition;
+use GalBridge\Directory\FieldMap;
 use GalBridge\Directory\IdCodec;
+use GalBridge\Directory\Limits;
+use GalBridge\Directory\RecordMapper;
+use GalBridge\Directory\Viewer;
 use GalBridge\Directory\ViewerResolver;
 use GalBridge\Factory;
 use GalBridge\Log;
 use GalBridge\Tests\Support\Env;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\DataProviderExternal;
 use PHPUnit\Framework\TestCase;
 
@@ -1177,5 +1183,378 @@ final class ContractTest extends TestCase
                 self::assertArrayNotHasKey($key, $record);
             }
         }
+    }
+
+    // ------------------------------------------------------------------ DeniedBook notice
+
+    /**
+     * DeniedBook's onUse callback (the "directory unavailable" notice during an outage) runs once, on
+     * the first read - never for the sender-photo lookup of every opened message, never for metadata
+     * calls - and a DeniedBook without it stays silent.
+     */
+    public function testDeniedBookOnUseRunsOnceAndNeverForThePhotoLookup(): void
+    {
+        $used = 0;
+        $book = new DeniedBook('Domain directory', static function () use (&$used): void {
+            $used++;
+        });
+        $book->set_pagesize(50);
+        self::assertSame(0, $book->search(['email'], self::JAN, 1, true, true, 'photo')->count);
+        self::assertSame(0, $book->search(['email'], self::JAN, 1, true, true, ['email', 'photo'])->count);
+        self::assertSame(0, $book->count()->count);
+        self::assertNull($book->get_record(self::id(self::JAN), true));
+        self::assertSame([], $book->list_groups('sprz', 4));
+        self::assertNull($book->get_group(self::sprzedaz()));
+        self::assertSame([], $book->get_record_groups(self::id(self::JAN)));
+        self::assertSame('Domain directory', $book->get_name());
+        self::assertSame(0, $used, 'no notice for the photo lookup or metadata');
+
+        self::assertSame(0, $book->search('*', 'kowalski', 0, true, true, 'email')->count);
+        self::assertSame(1, $used);
+        self::assertSame(0, $book->list_records()->count);
+        self::assertSame(0, $book->search('*', 'nowak')->count);
+        self::assertSame(1, $used, 'once per book');
+
+        $other = new DeniedBook('Global directory', static function () use (&$used): void {
+            $used++;
+        });
+        self::assertSame(0, $other->list_records()->count);
+        self::assertSame(2, $used, 'the first read of another book');
+
+        $silent = new DeniedBook('Global directory');
+        self::assertSame(0, $silent->list_records()->count);
+        self::assertSame(0, $silent->search('*', 'jan')->count);
+        self::assertSame(2, $used);
+    }
+
+    // ------------------------------------------------------------------ display names (RecordMapper)
+
+    /**
+     * @return array<string, array{array<string, string>, string, ?string, ?string}>
+     */
+    public static function impersonatingRows(): array
+    {
+        $jan = ['username' => self::JAN, 'domain' => 'example.com'];
+        return [
+            'ASCII at in the name' => [$jan + ['name' => 'ceo@bank.example', 'first_name' => 'Jan', 'last_name' => 'Kowalski'], 'ceo', 'Jan', 'Kowalski'],
+            'FULLWIDTH COMMERCIAL AT in the name' => [$jan + ['name' => "CEO\u{FF20}bank.example", 'first_name' => 'Jan', 'last_name' => 'Kowalski'], 'CEO', 'Jan', 'Kowalski'],
+            'SMALL COMMERCIAL AT in the name' => [$jan + ['name' => "CEO\u{FE6B}bank.example", 'first_name' => 'Jan', 'last_name' => 'Kowalski'], 'CEO', 'Jan', 'Kowalski'],
+            'quoted address as the name' => [$jan + ['name' => '"ceo@bank.example" <ceo@bank.example>', 'first_name' => '', 'last_name' => ''], 'ceo', null, null],
+            'name that is only an address part' => [$jan + ['name' => '@bank.example', 'first_name' => 'Jan', 'last_name' => 'Kowalski'], 'Jan Kowalski', 'Jan', 'Kowalski'],
+            'ASCII at in the first name' => [$jan + ['name' => '', 'first_name' => 'ceo@bank.example', 'last_name' => 'Kowalski'], 'ceo Kowalski', 'ceo', 'Kowalski'],
+            'FULLWIDTH COMMERCIAL AT in the surname' => [$jan + ['name' => 'Jan Kowalski', 'first_name' => 'Jan', 'last_name' => "Kowalski\u{FF20}evil.example"], 'Jan Kowalski', 'Jan', 'Kowalski'],
+            'SMALL COMMERCIAL AT in the first name' => [$jan + ['name' => 'Jan Kowalski', 'first_name' => "\u{FE6B}evil.example", 'last_name' => 'Kowalski'], 'Jan Kowalski', null, 'Kowalski'],
+            'every name is an address part' => [$jan + ['name' => '@bank.example', 'first_name' => "\u{FF20}x", 'last_name' => "\u{FE6B}y"], 'jan.kowalski', null, null],
+            'blank padding in the name' => [$jan + ['name' => 'Jan' . str_repeat("\u{2800}", 100) . 'Kowalski' . str_repeat("\u{3164}", 100), 'first_name' => "Jan\u{FFA0}\u{FFA0}", 'last_name' => "\u{115F}Kowalski\u{1160}"], 'Jan Kowalski', 'Jan', 'Kowalski'],
+            'format characters in the name' => [$jan + ['name' => "Jan\u{00AD}\u{E0041}\u{E0042} Kowalski\u{E007F}", 'first_name' => 'Jan', 'last_name' => 'Kowalski'], 'Jan Kowalski', 'Jan', 'Kowalski'],
+        ];
+    }
+
+    /**
+     * A display, first or last name that contains an at-sign (U+0040, U+FF20, U+FE6B) is cut there:
+     * core builds recipients from first/last name too (addressbook_name_listing 1-3,
+     * contactlist_name_template), so none of the three may pose as another address.
+     *
+     * @param array<string, string> $row
+     */
+    #[DataProvider('impersonatingRows')]
+    public function testNamesNeverPoseAsAnAddress(array $row, string $name, ?string $firstname, ?string $surname): void
+    {
+        $record = self::mapper(BookDefinition::DOMAIN, ['example.com'])->person($row);
+        self::assertIsArray($record);
+        self::assertSame($name, $record['name']);
+        self::assertSame($firstname, $record['firstname'] ?? null);
+        self::assertSame($surname, $record['surname'] ?? null);
+        foreach (['name', 'firstname', 'surname'] as $key) {
+            self::assertDoesNotMatchRegularExpression('/[@\x{FF20}\x{FE6B}<>"\\\\]|\p{Cf}|[\x{2800}\x{3164}\x{115F}\x{1160}\x{FFA0}]|\s\s/u', (string) ($record[$key] ?? ''), $key);
+        }
+        self::assertSame([self::JAN], $record['email:work'], 'the address itself is untouched');
+    }
+
+    public function testAliasAndListNamesNeverPoseAsAnAddress(): void
+    {
+        $mapper = self::mapper(BookDefinition::GLOBAL, ['example.com', 'example.org']);
+        $alias = $mapper->mailList(IdCodec::ALIAS, ['address' => 'team@example.com', 'name' => "Board\u{FF20}bank.example", 'domain' => 'example.com']);
+        self::assertSame('Board', $alias['name'] ?? null);
+        $list = $mapper->mailList(IdCodec::MAILLIST, ['address' => 'orgteam@example.org', 'name' => 'ceo@bank.example' . str_repeat("\u{2800}", 80), 'domain' => 'example.org']);
+        self::assertSame('ceo (example.org)', $list['name'] ?? null);
+        $unnamed = $mapper->mailList(IdCodec::MAILLIST, ['address' => 'orgteam@example.org', 'name' => "\u{FE6B}", 'domain' => 'example.org']);
+        self::assertSame('orgteam (example.org)', $unnamed['name'] ?? null);
+        foreach ([$alias, $list, $unnamed] as $record) {
+            self::assertArrayNotHasKey('firstname', $record);
+            self::assertArrayNotHasKey('surname', $record);
+        }
+    }
+
+    /**
+     * A foreign entry of the global book carries NO first/last name: whatever addressbook_name_listing
+     * mode the user chose, core falls back to 'name', which holds the "(domain)" marker. Entries of
+     * the viewer's own domains keep them.
+     */
+    public function testForeignGlobalEntriesCarryNoFirstOrLastName(): void
+    {
+        $mapper = self::mapper(BookDefinition::GLOBAL, ['example.com', 'example.org']);
+        $bob = ['username' => 'bob@example.org', 'domain' => 'example.org', 'first_name' => 'Bob', 'last_name' => 'Smith'];
+
+        $record = $mapper->person($bob + ['name' => 'Bob Smith']);
+        self::assertSame('Bob Smith (example.org)', $record['name'] ?? null);
+        self::assertArrayNotHasKey('firstname', (array) $record);
+        self::assertArrayNotHasKey('surname', (array) $record);
+
+        // composed from first + last name, then marked
+        self::assertSame('Bob Smith (example.org)', $mapper->person($bob + ['name' => ''])['name'] ?? null);
+        // padding cannot push the marker out of view
+        foreach (["\u{2800}", "\u{3164}", "\u{FFA0}", "\u{00A0}", "\u{3000}", "\u{00AD}", "\u{E0020}"] as $pad) {
+            self::assertSame('Bob (example.org)', $mapper->person($bob + ['name' => 'Bob' . str_repeat($pad, 200)])['name'] ?? null, sprintf('U+%04X', mb_ord($pad)));
+        }
+        // an at-sign in a foreign first name still cannot reach the composed name
+        self::assertSame('evil Smith (example.org)', $mapper->person(['first_name' => "evil\u{FF20}bank.example"] + $bob + ['name' => ''])['name'] ?? null);
+
+        // the viewer's own domain: not foreign, first/last name kept, no marker
+        $jan = $mapper->person(['username' => self::JAN, 'domain' => 'example.com', 'name' => 'Jan Kowalski', 'first_name' => 'Jan', 'last_name' => 'Kowalski']);
+        self::assertSame(['Jan Kowalski', 'Jan', 'Kowalski'], [$jan['name'] ?? null, $jan['firstname'] ?? null, $jan['surname'] ?? null]);
+
+        // marking switched off: an ordinary entry
+        $unmarked = self::mapper(BookDefinition::GLOBAL, ['example.com', 'example.org'], false)->person($bob + ['name' => 'Bob Smith']);
+        self::assertSame(['Bob Smith', 'Bob', 'Smith'], [$unmarked['name'] ?? null, $unmarked['firstname'] ?? null, $unmarked['surname'] ?? null]);
+    }
+
+    /**
+     * The same through the production wiring on every engine: bob@example.org from jan's global book.
+     */
+    #[DataProviderExternal(Env::class, 'engines')]
+    public function testGlobalBookRecordsOfForeignDomainsAreMarkedOnly(string $dsn): void
+    {
+        $options = ['galbridge_global_book' => true, 'galbridge_global_viewer_domains' => ['*'], 'galbridge_global_data_domains' => ['example.com', 'example.org'], 'galbridge_global_include_home' => true];
+        $book = self::book($dsn, $options, self::JAN, '', $n, BookDefinition::GLOBAL);
+        $book->set_pagesize(50);
+        $bob = self::records($book->search('*', 'bob'));
+        self::assertCount(1, $bob);
+        self::assertSame('Bob Smith (example.org)', $bob[0]['name']);
+        self::assertArrayNotHasKey('firstname', $bob[0]);
+        self::assertArrayNotHasKey('surname', $bob[0]);
+        self::assertSame($bob[0], $book->get_record($bob[0]['ID'], true), 'get_record gives the same shape');
+        $jan = self::records($book->search('*', 'kowalski'));
+        self::assertSame('Jan Kowalski', $jan[0]['name'] ?? null);
+        self::assertSame('Jan', $jan[0]['firstname'] ?? null);
+        self::assertSame('Kowalski', $jan[0]['surname'] ?? null);
+        self::assertSame('Org Team (example.org)', self::records($book->search('*', 'org team'))[0]['name'] ?? null);
+    }
+
+    // ------------------------------------------------------------------ row re-check log codes
+
+    /**
+     * The PHP re-check of rows logs two different conditions under two codes: a malformed row
+     * (row_invalid, WARN) can no longer hide the scope tripwire (row_out_of_scope, ERROR) of the
+     * same request; each code is still logged once per request.
+     */
+    public function testInvalidAndOutOfScopeRowsAreLoggedSeparately(): void
+    {
+        $mapper = self::mapper(BookDefinition::DOMAIN, ['example.com'], true, ['postmaster@example.com'], ['hidden']);
+        $invalid = [
+            ['username' => 'jan.kowalski@example.org', 'domain' => 'example.com'],   // address outside its row domain
+            ['username' => 'not an address', 'domain' => 'example.com'],
+            ['username' => self::JAN, 'domain' => null],
+        ];
+        $outOfScope = [
+            ['username' => self::BOB, 'domain' => 'example.org'],                    // another tenant
+            ['username' => 'postmaster@example.com', 'domain' => 'example.com'],    // a hidden address
+            ['username' => 'hidden@example.com', 'domain' => 'example.com'],        // a hidden local part
+        ];
+        foreach ([[$invalid, $outOfScope], [$outOfScope, $invalid]] as [$first, $second]) {
+            Log::resetOnce();
+            $GLOBALS['galbridge_test_log'] = [];
+            foreach ([...$first, ...$second] as $row) {
+                self::assertNull($mapper->person($row + ['name' => 'X']), (string) json_encode($row));
+                self::assertNull($mapper->mailList(IdCodec::ALIAS, ['address' => $row['username'], 'domain' => $row['domain'], 'name' => 'X']));
+            }
+            $log = $GLOBALS['galbridge_test_log'];
+            self::assertCount(2, $log, implode("\n", $log));
+            self::assertCount(1, preg_grep('/^WARN scope: row_invalid: /', $log) ?: [], implode("\n", $log));
+            self::assertCount(1, preg_grep('/^ERROR scope: row_out_of_scope: .* book=galbridge_domain/', $log) ?: [], implode("\n", $log));
+            self::assertSame([], preg_grep('/row_dropped/', $log) ?: []);
+        }
+
+        // a valid row logs nothing
+        Log::resetOnce();
+        $GLOBALS['galbridge_test_log'] = [];
+        self::assertIsArray($mapper->person(['username' => self::JAN, 'domain' => 'example.com', 'name' => 'Jan Kowalski']));
+        self::assertSame([], $GLOBALS['galbridge_test_log']);
+    }
+
+    // ------------------------------------------------------------------ page size limits
+
+    /**
+     * @return array<string, array{array<string, mixed>, array<string, mixed>, int}>
+     */
+    public static function pageCaps(): array
+    {
+        return [
+            'core defaults (max_pagesize 200, addressbook_pagesize 50)' => [[], [], 200],
+            'addressbook_pagesize above max_pagesize' => [['max_pagesize' => 50, 'addressbook_pagesize' => 100], [], 100],
+            'numeric string' => [['max_pagesize' => '50', 'addressbook_pagesize' => '120'], [], 120],
+            'a page size the user saved before max_pagesize was lowered' => [['max_pagesize' => 50], ['addressbook_pagesize' => 150], 150],
+            'max_pagesize above the hard cap' => [['max_pagesize' => 5000], [], Limits::HARD_PAGE_CAP],
+            'addressbook_pagesize above the hard cap' => [['addressbook_pagesize' => 99999], [], Limits::HARD_PAGE_CAP],
+            'invalid max_pagesize falls back to 200' => [['max_pagesize' => 'abc', 'addressbook_pagesize' => 20], [], 200],
+            'zero max_pagesize falls back to 200' => [['max_pagesize' => 0], [], 200],
+            'tiny values are raised to 10' => [['max_pagesize' => 3, 'addressbook_pagesize' => 2], [], 10],
+        ];
+    }
+
+    /**
+     * Limits::corePageCap is the largest page size Roundcube's own lists use: max(max_pagesize,
+     * addressbook_pagesize), bounded by HARD_PAGE_CAP (core clamps addressbook_pagesize only when a
+     * user saves the preference).
+     *
+     * @param array<string, mixed> $admin
+     * @param array<string, mixed> $prefs
+     */
+    #[DataProvider('pageCaps')]
+    public function testCorePageCapIsTheLargestCoreListSize(array $admin, array $prefs, int $expected): void
+    {
+        $rc = new \rcube_config();
+        foreach (array_merge($admin, $prefs) as $k => $v) {
+            $rc->set($k, $v);
+        }
+        self::assertSame($expected, Limits::fromConfig(new Config($rc, $prefs, $admin))->corePageCap);
+    }
+
+    /**
+     * A normal page as large as addressbook_pagesize is a page, never a whole-book request: paging
+     * information stays consistent with the page size core computes it from.
+     */
+    #[DataProviderExternal(Env::class, 'engines')]
+    public function testPageSizeAboveMaxPagesizeIsAnOrdinaryPage(string $dsn): void
+    {
+        $options = ['max_pagesize' => 10, 'addressbook_pagesize' => 12, 'galbridge_domain_export' => false];
+        $book = self::book($dsn, $options, self::JAN, 'list', $notices);
+        $book->set_pagesize(12);
+        self::assertSame(12, $book->page_size);
+        $rs = $book->list_records();
+        self::assertSame(13, $rs->count);
+        self::assertSame(0, $rs->first);
+        self::assertCount(12, self::records($rs));
+        self::assertSame([], $notices, 'no export refusal for an ordinary page');
+        self::assertNull($book->get_error());
+
+        $book->set_page(2);
+        $rs = $book->list_records();
+        self::assertSame(12, $rs->first);
+        self::assertCount(1, self::records($rs));
+
+        // the export (99999) is still a whole-book request
+        $export = self::book($dsn, $options, self::JAN, 'export', $notices);
+        $export->set_pagesize(99999);
+        self::assertSame([], self::records($export->list_records(null, 0, true)));
+        self::assertSame(['exportdisabled'], array_column($notices, 0));
+    }
+
+    // ------------------------------------------------------------------ search-only 'auto' cache
+
+    /**
+     * The 'auto' decision is cached per book: listing one book never evicts the other's entry, a
+     * cached decision is used without counting again, and expired entries or entries of another
+     * configuration are dropped when the map is written.
+     */
+    #[DataProviderExternal(Env::class, 'engines')]
+    public function testSearchOnlyAutoCacheHoldsEveryBook(string $dsn): void
+    {
+        $options = [
+            'galbridge_domain_searchonly' => 'auto', 'galbridge_global_searchonly' => 'auto', 'galbridge_searchonly_threshold' => 100,
+            'galbridge_global_book' => true, 'galbridge_global_viewer_domains' => ['*'], 'galbridge_global_data_domains' => ['example.org'],
+        ];
+        $config = Env::config($dsn, $options);
+        $fp = $config->fingerprint();
+        $factory = Env::factory($config, self::JAN); // a new session
+        $listed = [];
+        foreach ([BookDefinition::DOMAIN, BookDefinition::GLOBAL] as $id) {
+            $book = $factory->create($id);
+            $book->set_pagesize(50);
+            $rs = $book->list_records();
+            self::assertFalse((bool) $rs->searchonly, $id . ': below the threshold');
+            $listed[$id] = $rs->count;
+        }
+        self::assertSame([BookDefinition::DOMAIN => 13, BookDefinition::GLOBAL => 3], $listed);
+        $map = $_SESSION['galbridge_searchonly'] ?? null;
+        self::assertIsArray($map);
+        self::assertSame([BookDefinition::DOMAIN . ':' . $fp, BookDefinition::GLOBAL . ':' . $fp], array_keys($map), 'both books are cached');
+        foreach ($map as $entry) {
+            self::assertFalse($entry['v']);
+            self::assertIsInt($entry['at']);
+        }
+
+        // a later request in the same session reads both decisions (proved by changing them)
+        foreach (array_keys($map) as $key) {
+            $_SESSION['galbridge_searchonly'][$key]['v'] = true;
+        }
+        $before = $_SESSION['galbridge_searchonly'];
+        $later = self::sessionFactory($config);
+        foreach ([BookDefinition::DOMAIN, BookDefinition::GLOBAL] as $id) {
+            $book = $later->create($id);
+            $book->set_pagesize(50);
+            self::assertTrue((bool) $book->list_records()->searchonly, $id . ': the cached decision is used');
+        }
+        self::assertSame($before, $_SESSION['galbridge_searchonly'], 'nothing recomputed, the session is not rewritten');
+
+        // expired entries and entries of another configuration are pruned on the next write
+        unset($_SESSION['galbridge_searchonly'][BookDefinition::DOMAIN . ':' . $fp]);
+        $_SESSION['galbridge_searchonly']['galbridge_domain:0123456789abcdef0123456789abcdef'] = ['v' => true, 'at' => time()];
+        $_SESSION['galbridge_searchonly']['galbridge_old:' . $fp] = ['v' => true, 'at' => time() - 100000];
+        $_SESSION['galbridge_searchonly']['garbage:' . $fp] = 'x';
+        $book = self::sessionFactory($config)->create(BookDefinition::DOMAIN);
+        $book->set_pagesize(50);
+        self::assertSame(13, $book->list_records()->count);
+        $map = $_SESSION['galbridge_searchonly'];
+        self::assertEqualsCanonicalizing([BookDefinition::GLOBAL . ':' . $fp, BookDefinition::DOMAIN . ':' . $fp], array_keys($map));
+        self::assertTrue($map[BookDefinition::GLOBAL . ':' . $fp]['v'], 'a still valid entry is kept');
+        self::assertFalse($map[BookDefinition::DOMAIN . ':' . $fp]['v']);
+    }
+
+    // ------------------------------------------------------------------ helpers (display names, sessions)
+
+    /**
+     * A RecordMapper for a book of jan (home domain example.com) with the default fields.
+     *
+     * @param list<string> $domains
+     * @param list<string> $hiddenAddresses
+     * @param list<string> $hiddenLocalparts
+     */
+    private static function mapper(string $id, array $domains, bool $markForeign = true, array $hiddenAddresses = [], array $hiddenLocalparts = []): RecordMapper
+    {
+        $global = $id === BookDefinition::GLOBAL;
+        $book = new BookDefinition(
+            id: $id,
+            tag: $global ? 'g' : 'd',
+            name: 'Directory',
+            allDomains: false,
+            domains: $domains,
+            excludeDomains: [],
+            homeDomains: ['example.com'],
+            grouping: 'none',
+            searchonly: false,
+            autocomplete: true,
+            export: true,
+            prefixOnly: $global,
+            everyWordMinLength: $global,
+            maxResults: 100,
+            markForeign: $global && $markForeign,
+            orgLabels: [],
+        );
+        $viewer = new Viewer(self::JAN, 'example.com', [self::JAN], ['mailbox' => ['username', 'name', 'domain', 'first_name', 'last_name', 'department']]);
+        return new RecordMapper($book, new FieldMap(['name', 'firstname', 'surname', 'email', 'department'], $viewer, false, false), $hiddenAddresses, $hiddenLocalparts);
+    }
+
+    /**
+     * A factory on the CURRENT session (a later request of the same user; Env::factory starts a new one).
+     */
+    private static function sessionFactory(Config $config, string $login = self::JAN): Factory
+    {
+        $connection = null;
+        $connect = static function () use ($config, &$connection): Connection {
+            return $connection ??= new Connection(new Dsn($config->string('galbridge_db_dsn'), $config), 3);
+        };
+        $resolver = new ViewerResolver($config, $connect, 1, $login, Env::IMAP_HOST, Env::IMAP_HOST);
+        return new Factory($config, $resolver, $connect, static fn (string $l): string => $l);
     }
 }

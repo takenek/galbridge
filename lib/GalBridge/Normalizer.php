@@ -181,12 +181,26 @@ final class Normalizer
             return '';
         }
         $s = self::nfc($s);
-        $s = (string) preg_replace('/[\x00-\x1F\x7F]|[\x{0080}-\x{009F}]|' . self::INVISIBLE . '|[\\\\"<>]/u', ' ', $s);
+        // controls, format characters (\p{Cf}: bidi, zero-width, soft hyphen, tag characters ...),
+        // invisible characters, and the characters that break or spoof a recipient header
+        $s = (string) preg_replace('/[\x00-\x1F\x7F]|[\x{0080}-\x{009F}]|\p{Cf}|' . self::INVISIBLE . '|[\\\\"<>]/u', ' ', $s);
+        // separators and characters that render blank without being whitespace (Braille blank,
+        // Hangul fillers): collapsed like spaces, so padding cannot push text out of view
+        $s = (string) preg_replace('/[\p{Z}\x{2800}\x{3164}\x{115F}\x{1160}\x{FFA0}]/u', ' ', $s);
         $s = trim((string) preg_replace('/\s+/u', ' ', $s));
         if (mb_strlen($s) > $max) {
             $s = rtrim(mb_substr($s, 0, $max));
         }
         return $s;
+    }
+
+    /**
+     * Does a display text contain an at-sign, including its look-alikes (U+FF20 FULLWIDTH and U+FE6B
+     * SMALL COMMERCIAL AT)? Such a name could pose as an e-mail address in a recipient field.
+     */
+    public static function containsAt(string $value): bool
+    {
+        return str_contains($value, '@') || preg_match('/[\x{FF20}\x{FE6B}]/u', $value) === 1;
     }
 
     /**

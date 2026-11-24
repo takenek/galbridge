@@ -27,21 +27,28 @@ is for development only.
      vendor/bin/phpunit
      ```
 
-     The role the tests connect with is built from `SQL/grants.*.sql`, so a passing run also proves
-     that the shipped grants are sufficient;
+     The role the tests connect with is built from `SQL/grants.*.sql` (with the commented-out
+     personal-data grant enabled), so a passing run also proves that the shipped grants are
+     sufficient. The run includes `tests/Integration/CliToolTest.php`, which applies the output of
+     `bin/galbridge.sh grants` to both servers and runs `diag` against good, too broad and too narrow
+     roles (with the administrator access of `load.sh`: `MYSQL_ADMIN` / `PSQL_ADMIN` or their
+     defaults);
    * PHPStan against a Roundcube **1.7.7** tree (`/opt/rcrun/1.7.7`, see `phpstan.neon.dist`):
      `php -d memory_limit=2G vendor/bin/phpstan analyse -c phpstan.neon.dist`;
    * coding style: `vendor/bin/php-cs-fixer fix --dry-run --diff --config=.php-cs-fixer.dist.php`;
    * `composer validate --strict`;
-   * the end-to-end suite against a real Roundcube 1.7.7 for **both** iRedMail SQL editions, e.g.
-     `python3 tests/e2e/test_e2e.py --rc /opt/rcrun/1.7.7 --php php8.4 --db mysql --port 8181` and
-     the same with `--db pgsql` (requirements and the Dovecot test server: `docs/TESTING.md` and the
-     header of `tests/e2e/test_e2e.py`);
+   * the end-to-end suite against a real Roundcube 1.7.7 for **both** iRedMail SQL editions and the
+     supported PHP branches: `tests/e2e/matrix.sh` runs PHP 8.1, 8.4 and 8.5 × MariaDB and
+     PostgreSQL and fails when a combination is missing (requirements and the Dovecot test server:
+     `docs/TESTING.md` and the header of `tests/e2e/test_e2e.py`; a single run:
+     `python3 tests/e2e/test_e2e.py --rc /opt/rcrun/1.7.7 --php php8.4 --db mysql --port 8181`);
    * the browser tests of Roundcube's own UI with the plugin (headless Chromium):
      `python3 tests/ui/test_ui.py --rc /opt/rcrun/1.7.7 --php php8.4 --db mysql` (and `--db pgsql`);
-   * `bin/galbridge.sh diag` on a test installation: no FAIL;
-   * `bin/galbridge.sh grants --driver=mysql` and `--driver=pgsql`: the output applies cleanly to a
-     fresh iRedMail `vmail` database.
+   * `bin/galbridge.sh diag --user=<login>` on a test installation of **each** edition (MariaDB and
+     PostgreSQL 16 or later): no FAIL, and every section runs to its end;
+   * `bin/galbridge.sh grants --driver=mysql` and `--driver=pgsql` (also with `--role`, `--db`,
+     `--host`, `--account-host` and `--connection-limit`): the output applies cleanly to a fresh
+     iRedMail `vmail` database, applies again when re-run, and the printed DSN connects each time.
 3. **Platform check.** Look for a newer Roundcube 1.7.x release (<https://roundcube.net/news/>), a
    new iRedMail release and its `update/<version>/vmail.{mysql,pgsql}` scripts (vmail schema
    changes), and the PHP supported-versions table. A new supported Roundcube release needs the full

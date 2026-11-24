@@ -59,6 +59,22 @@ final class AddressBook extends \rcube_addressbook
     /** @var null|\Closure(string, array<string, string>): void */
     private ?\Closure $notify;
 
+    /** the "directory unavailable" notice is shown at most once per request (all books together) */
+    private static bool $unavailableShown = false;
+
+    /**
+     * Claim the once-per-request "directory unavailable" notice; true for the first caller only
+     * (shared by AddressBook and the DeniedBooks listed during an outage).
+     */
+    public static function claimUnavailableNotice(): bool
+    {
+        if (self::$unavailableShown) {
+            return false;
+        }
+        self::$unavailableShown = true;
+        return true;
+    }
+
     /**
      * @param callable(string): string                         $label
      * @param null|\Closure(string, array<string, string>): void $notify user-visible warning (label, vars)
@@ -211,8 +227,8 @@ final class AddressBook extends \rcube_addressbook
     #[\Override]
     public function list_groups($search = null, $mode = 0)
     {
-        if (!$this->groups) {
-            return [];
+        if (!$this->groups || ($this->action === 'autocomplete' && !$this->book->autocomplete)) {
+            return []; // the per-book autocomplete switch covers groups as well
         }
         try {
             $groups = $this->repository->groups();
@@ -316,18 +332,21 @@ final class AddressBook extends \rcube_addressbook
         if ($this->groupKey === false || ($this->filter !== null && !$this->queries->canMatch($this->filter))) {
             return new \rcube_result_set(0, $first);
         }
-        if ($this->filter === null && $this->groupKey === null && $this->isSearchOnly()) {
-            $empty = new \rcube_result_set(0, 0);
-            $empty->searchonly = true;
-            return $empty;
-        }
-
         // a full-set request: core asks for 999/9999/99999 rows; compose-to-group and group expansion
         // are recipient sets whatever page size they use (core passes max_group_members for mailto)
         $fullSet = $this->list_page === 1 && (
             $this->requestedSize > $this->limits->corePageCap
             || ($this->groupKey !== null && $this->filter === null && in_array($this->action, ['mailto', 'group-expand'], true))
         );
+        if ($this->filter === null && $this->groupKey === null && $this->isSearchOnly()) {
+            if ($fullSet) {
+                // the whole of a search-only book (export): refused explicitly, never an empty file
+                return $this->refuse('exportdisabled', [], 'export_disabled');
+            }
+            $empty = new \rcube_result_set(0, 0);
+            $empty->searchonly = true;
+            return $empty;
+        }
 
         if ($this->filter !== null && $this->filter->type === SearchSpec::IDS) {
             // search() already refused more than galbridge_max_ids IDs
@@ -425,7 +444,12 @@ final class AddressBook extends \rcube_addressbook
             }
             $threshold = $this->limits->searchonlyThreshold;
             $this->searchonlyResolved = $this->repository->count(null, null, $threshold + 1) > $threshold;
-            $_SESSION['galbridge_searchonly'] = [$cacheKey => ['v' => $this->searchonlyResolved, 'at' => time()]];
+            // one entry per book; expired entries (and those of another configuration) are dropped
+            $map = is_array($_SESSION['galbridge_searchonly'] ?? null) ? $_SESSION['galbridge_searchonly'] : [];
+            $map = array_filter($map, fn ($e, $k): bool => is_array($e) && is_int($e['at'] ?? null)
+                && time() - $e['at'] < $this->limits->scopeTtl && str_ends_with((string) $k, ':' . $this->fingerprint), ARRAY_FILTER_USE_BOTH);
+            $map[$cacheKey] = ['v' => $this->searchonlyResolved, 'at' => time()];
+            $_SESSION['galbridge_searchonly'] = $map;
         }
         return $this->searchonlyResolved;
     }
@@ -548,6 +572,10 @@ final class AddressBook extends \rcube_addressbook
             Log::exception('book', $e, ['book' => $this->book->id]);
         }
         $this->set_error(self::ERROR_SEARCH, 'galbridge.unavailable');
+        // core's read actions never call get_error(): tell the user once per request
+        if (self::claimUnavailableNotice()) {
+            $this->notice('unavailable', []);
+        }
         return new \rcube_result_set(0, 0);
     }
 }

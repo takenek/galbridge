@@ -324,9 +324,20 @@ def search_ids(user, q, **kw):
 
 def export_cards(user, **params):
     r = session(user).export(**params)
+    if r.status_code == 204:
+        # a GAL Bridge book refused the export: no download at all (never an empty contacts.vcf)
+        eq(r.text, '', 'body of a refused export %r' % params)
+        return [], ''
     eq(r.status_code, 200, 'HTTP status of export %r' % params)
     check(r.headers.get('content-type', '').startswith('text/vcard'), 'export content type %r' % r.headers.get('content-type'))
     return parse_vcards(r.text), r.text
+
+
+def export_refused(user, what, **params):
+    r = session(user).export(**params)
+    eq(r.status_code, 204, 'refused export answers 204 No Content (%s)' % what)
+    eq(r.text, '', 'refused export has no body (%s)' % what)
+    check('attachment' not in r.headers.get('content-disposition', ''), 'refused export offers a download (%s)' % what)
 
 
 def group_expand(user, gid_, source=SRC):
@@ -876,16 +887,13 @@ def c26():
         check(any('At most 2' in m for m, _ in Roundcube.resp_messages(resp)), 'no too-many-IDs warning: %r' % resp)
         resp, to = s.mailto({'_cid': ','.join([cid(ANNA), cid(ZOFIA)]), '_source': SRC})
         eq(recipients(to), sorted([ANNA, ZOFIA]), 'compose-to-selected within galbridge_max_ids')
-        cards, _ = export_cards(JAN, _source=SRC)
-        eq(cards, [], 'whole-book export above galbridge_max_export (no alphabetical prefix)')
-        cards, _ = export_cards(JAN, _source=SRC, _gid=G_SALES_COM)
-        eq(len(cards), 0, 'group export above galbridge_max_group_members')
+        export_refused(JAN, 'whole-book export above galbridge_max_export (no alphabetical prefix)', _source=SRC)
+        export_refused(JAN, 'group export above galbridge_max_group_members', _source=SRC, _gid=G_SALES_COM)
         found, resp = search_ids(JAN, 'example.com')
         eq(len(found), 10, 'search list capped at galbridge_max_results')
         check(any('first 10' in m for m, _ in Roundcube.resp_messages(resp)), 'no truncation notice: %r' % Roundcube.resp_messages(resp))
     with plugin_config("$config['galbridge_domain_export'] = false;"):
-        cards, _ = export_cards(JAN, _source=SRC)
-        eq(cards, [], 'whole-book export with galbridge_domain_export = false')
+        export_refused(JAN, 'whole-book export with galbridge_domain_export = false', _source=SRC)
     eq(len(export_cards(JAN, _source=SRC)[0]), 13, 'export after restoring the configuration')
 
 
@@ -909,8 +917,7 @@ def c27():
         # Roundcube quotes a display name with parentheses: "Bob Smith (example.org)" <bob@example.org>
         got = [(r['fields'].get('name'), r['fields'].get('email'), recipients(r['name']), r['source']) for r in ac_gal(JAN, 'smith')]
         eq(got, [('Bob Smith (example.org)', BOB, [BOB], GLOBAL)], 'autocomplete from the global book (foreign domain marked)')
-        cards, _ = export_cards(JAN, _source=GLOBAL)
-        eq(cards, [], 'export of the global book (galbridge_global_export off)')
+        export_refused(JAN, 'export of the global book (galbridge_global_export off)', _source=GLOBAL)
         sources = Roundcube.env(session(BOB).addressbook_page(), 'address_sources') or {}
         check(GLOBAL not in sources, 'global book advertised to a viewer outside galbridge_global_viewer_domains')
         eq(search_ids(BOB, 'kowalski', scope=GLOBAL)[0], [], 'non-entitled viewer searches the global book')

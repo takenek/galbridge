@@ -35,7 +35,7 @@ final class Connection
     public const OUTAGE_SECONDS = 30;
 
     /** the vmail tables GAL Bridge may read (column probe) */
-    public const TABLES = ['mailbox', 'domain', 'alias_domain', 'alias', 'forwardings', 'maillists', 'moderators', 'maillist_owners'];
+    public const TABLES = ['mailbox', 'domain', 'alias', 'forwardings', 'maillists', 'moderators', 'maillist_owners'];
 
     /** columns whose visibility means the role is too broad (fail closed) */
     public const SECRET_COLUMNS = ['password', 'recovery_email', 'allow_nets'];
@@ -45,6 +45,8 @@ final class Connection
     private bool $failed = false;
 
     private string $flavour = '';
+
+    private string $lastError = '';
 
     /** @var null|\Closure(string): \rcube_db */
     private ?\Closure $factory;
@@ -144,6 +146,15 @@ final class Connection
         return $out;
     }
 
+    /**
+     * The sanitised reason of the last failed connect ('' if none), for bin/galbridge.sh diag: in the
+     * CLI Roundcube writes the driver message only to stderr, not to its errors log.
+     */
+    public function lastError(): string
+    {
+        return $this->lastError;
+    }
+
     public function close(): void
     {
         if ($this->db !== null) {
@@ -168,6 +179,10 @@ final class Connection
         $db->set_option('ignore_errors', true);
         $db->db_connect('w');
         if (!$db->is_connected()) {
+            // the driver text (role, host, reason - never the password); Log::sanitize() also masks a
+            // DSN password should a driver ever echo one
+            $err = $db->is_error();
+            $this->lastError = Log::sanitize(is_string($err) ? $err : '');
             $this->failed = true;
             $_SESSION['galbridge_down_until'] = time() + self::OUTAGE_SECONDS;
             Log::error('db', 'db_down', ['retry_in' => self::OUTAGE_SECONDS]);

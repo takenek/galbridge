@@ -45,21 +45,26 @@ view. The plugin keeps no tables of its own; it needs a dedicated read-only data
 - Every Roundcube 1.7.7 address-book path: source list, list with paging and totals, show, print,
   QR code, vCard export (all, selected, search result), compose to selected contacts and to a group,
   copy to a personal book, quick, advanced and saved searches, mail autocomplete with groups, the
-  compose contact list and its search, group expansion. For compose and autocomplete requests the
-  enabled books are added to `autocomplete_addressbooks` and Roundcube's `autocomplete_min_length`
-  is raised to `galbridge_min_search_length`.
+  compose contact list and its search, group expansion. For compose, Redirect-dialog (`bounce`) and
+  autocomplete requests the enabled books are added to `autocomplete_addressbooks` and Roundcube's
+  `autocomplete_min_length` is raised to `galbridge_min_search_length`. A refused vCard export
+  answers `204 No Content` (`addressbook_export` hook) instead of downloading an empty file.
 - Search: quick and advanced (AND), partial, prefix and strict modes, at most 5 words, every word
   matching some field, a minimum length of 2 with shorter words narrowing as word prefixes, LIKE
   wildcards in the input taken literally, `nosearch` birthday.
 - Limits with user-visible messages: `galbridge_max_results`, `galbridge_global_max_results`,
   `galbridge_max_ids`, `galbridge_max_group_members`, `galbridge_max_export`; bounded totals
   (`galbridge_max_count`); `galbridge_searchonly_threshold` for `'auto'` search-only books.
-- `bin/galbridge.sh diag [--user=EMAIL]`: Roundcube and PHP versions, configuration file and
-  problems, IMAP host binding, core interplay, old-plugin leftovers, DSN policy, connection,
-  privilege tripwires, column probe, data sanity and indexes, and per user the entitled books with
-  entry counts; never prints secrets or directory contents. `bin/galbridge.sh grants
-  --driver=mysql|pgsql [--host=] [--db=] [--role=]`: the grant set with a fresh random password and
-  the matching DSN line, on stdout only.
+- `bin/galbridge.sh diag [--user=EMAIL]`: Roundcube and PHP versions, configuration file (mode,
+  group write, owner, directory) and problems, IMAP host binding and its coverage of `imap_host` and
+  of the hosts of Roundcube's users, core interplay, old-plugin leftovers, DSN policy, connection
+  (with the driver's reason on failure), the password-column tripwire, write privileges from the
+  database catalogs, column probe for the effective configuration, data sanity and indexes, and per
+  user the entitled books with the effective grouping, the search-only resolution, entry counts and
+  size warnings; every section runs on its own; never prints secrets or directory contents.
+  `bin/galbridge.sh grants --driver=mysql|pgsql [--host=] [--account-host=] [--db=] [--role=]
+  [--connection-limit=]`: the grant set with a fresh random password and the matching DSN line, on
+  stdout only; re-running an output is safe (it resets the password).
 - Reference grant sets `SQL/grants.mysql.sql` and `SQL/grants.postgres.sql`; `config.inc.php.dist`
   documenting every option; English and Polish translations.
 - Documentation: README, SECURITY.md, `docs/ARCHITECTURE.md`, `docs/THREAT_MODEL.md`,
@@ -101,12 +106,15 @@ Controls for the threats GB-01 to GB-28 of the design review (details and tests 
   catch-all rows and external members never selected.
 - GB-16/GB-17: `galbridge_*` user preferences are ignored (administrator values from a fresh
   configuration); user-controlled core options are clamped or whitelisted.
-- GB-18/GB-19: source names escaped; display text sanitised (control, bidi and zero-width
-  characters, CR/LF, `\ " < >` removed, length caps, names containing `@` cut); addresses canonical
-  lower-case ASCII checked with `rcube_utils::check_email()`.
-- GB-21/GB-22: `ignore_errors` on the plugin's connection, SQLSTATE-only error logging, a redacting
-  logger with reason codes logged once per request and hashed IDs; search terms, addresses and names
-  are never logged at normal levels.
+- GB-18/GB-19: source names escaped; display text sanitised (control and format characters, CR/LF,
+  `\ " < >` removed, blank-looking characters collapsed, length caps; display, first and last names
+  containing an at-sign or its look-alikes cut there; foreign global-book entries without first and
+  last name, so the `(domain)` marker shows in every listing mode); addresses canonical lower-case
+  ASCII checked with `rcube_utils::check_email()`.
+- GB-21/GB-22: `ignore_errors` on the plugin's connection, SQLSTATE-only error logging, the generic
+  "directory unavailable" message, a redacting logger with request-triggered reason codes logged
+  once per request and hashed IDs; search terms, addresses and names are never logged by the
+  plugin.
 - GB-23/GB-24: a mandatory dedicated DSN; iRedMail's roles, `root`, `postgres`, the Roundcube
   database user and the password plugin's user are refused; verified TLS required for a remote
   database (PostgreSQL `verify-ca`/`verify-full`, MySQL `ca` + `verify_server_cert`), the PostgreSQL
@@ -119,6 +127,85 @@ Controls for the threats GB-01 to GB-28 of the design review (details and tests 
 - GB-27: one normaliser (NFC, lower case, IDNA to ASCII) for configuration lists, the login, IDs and
   the row re-check; invalid allow-list entries are dropped, invalid deny-lists disable what they
   protect.
+
+### Fixed after the independent code review
+An independent review of the implementation reported 41 confirmed findings before the release. The
+fixes, all part of 1.0.0:
+- **Display spoofing (security).** The anti-impersonation rule also covers first and last names
+  (Roundcube builds recipient names from them for "List names as" and `contactlist_name_template`)
+  and recognises the at-sign look-alikes U+FF20 and U+FE6B. Display text also loses format
+  characters (`\p{Cf}`: soft hyphen, tag characters, ...), and Unicode separators and blank-looking
+  characters (U+2800, U+3164, U+115F, U+1160, U+FFA0) collapse into one space. Global-book entries
+  of other domains carry no first and last name, so the `(domain)` marker shows in every listing
+  mode.
+- **Global book (security).** The `organization` field matches only the complete organization
+  label: a two-letter search no longer lists a whole organization.
+- **Fail-closed construction.** `QueryBuilder::forBook()` is the one way to build a book's query
+  builder (plugin and `diag`) and refuses a malformed deny-list or visibility column instead of
+  reading it as "no restriction". `Directory\Schema` is the one list of required and optional vmail
+  columns for the user resolution, the book factory and `diag`; required columns depend on the
+  configuration (`expired` with `galbridge_hide_expired`, `forwardings.domain` with
+  `galbridge_user_aliases` – a missing `forwardings.domain` used to break every listing with a bare
+  `db_error`).
+- **Outages.** "The directory is temporarily unavailable." is now really shown (once per request for
+  all books together)
+  when a query fails – core's read actions never read `get_error()`. During a database outage the
+  books a session already had stay listed from the expired session cache and answer with that
+  message instead of disappearing silently; a session without resolved books (a new login) still
+  gets none until the database is back.
+- **Export.** A refused export (whole book not allowed or above `galbridge_max_export`, the whole of
+  a search-only book, a group above the expansion cap, more than `galbridge_max_ids` selected
+  contacts) answers `204 No Content`
+  through the `addressbook_export` hook instead of downloading an empty `contacts.vcf` with a
+  message that could never be shown.
+- **Paging.** Full-set detection uses max(`max_pagesize`, `addressbook_pagesize`), bounded to 1000:
+  an ordinary list page with a larger `addressbook_pagesize` was treated as a whole-book export or a
+  group expansion.
+- **Autocomplete.** The Redirect dialog (`mail/bounce`) is wired like compose
+  (`autocomplete_min_length`, `autocomplete_addressbooks`); `galbridge_*_autocomplete = false` also
+  hides the book's groups from autocomplete; the `'auto'` search-only decision is cached per book
+  (two `'auto'` books evicted each other's entry).
+- **Logging.** The malformed-row WARN and the scope tripwire ERROR have separate codes
+  (`row_invalid`, `row_out_of_scope`; both shared `row_dropped`, so the first one hid the other);
+  `host_mismatch` names the session host, the stored host and the allowed hosts, once per request.
+- **`diag`.** Every section runs on its own. The PostgreSQL ctype is read from
+  `pg_database.datctype` (`current_setting('lc_ctype')` stopped `diag` on PostgreSQL 16 and later
+  before the column checks). Write privileges are read from the catalogs (the `UPDATE` probe ran
+  inside the plugin's own read-only session and could never report a write-capable role). Optional
+  columns are checked for the configured fields only, with an INFO for granted but unused ones. A
+  WARN while `'*'` global data domains are in effect (it printed OK). `imap_host` and the
+  `mail_host` values of Roundcube's users are checked against the directory hosts. `--user` shows
+  the effective grouping with its group count, the `'auto'` search-only resolution and WARNs above
+  `galbridge_max_count` / `galbridge_max_export`. The configuration file check also covers group
+  write, the owner and the parent directory. A failed connection prints the driver's reason (in the
+  CLI Roundcube writes it to stderr only, not to its errors log). The PostgreSQL role's connection
+  limit is shown.
+- **`grants`.** `--host` is the database server written into the DSN and the new `--account-host`
+  the MariaDB/MySQL host part of the account (patterns such as `10.0.0.%`; a non-local one adds
+  `REQUIRE SSL`) – the account host used to end up in the DSN. New `--connection-limit`
+  (PostgreSQL, default 25; a malformed value is a usage error). Names are renamed in SQL statements
+  only, including the commented-out optional ones, so the attribution header and the prose comments
+  stay intact; host patterns and unbracketed IPv6 literals are refused for the DSN host.
+- **Grant templates.** The statements (re)set the password (on PostgreSQL also the connection
+  limit), so re-running a generated output is safe and its DSN always works. `telephone`, `mobile`
+  and `birthday` are a commented-out grant (personal data outside the default fields); `first_name`
+  and `last_name` stay granted.
+- **Code quality.** Dead code removed (`BookDefinition::isGlobal()`, the unused `alias_domain`
+  column probe); the `GalBridgeException` docblock corrected (reason codes are not localization
+  labels).
+- **Tests.** New `tests/Integration/CliToolTest.php` for `bin/galbridge.sh` (the `grants` output
+  applied to MariaDB and PostgreSQL, `diag` against good, too broad and too narrow roles and broken
+  configurations); `tests/e2e/matrix.sh` runs PHP 8.1, 8.4 and 8.5 × MariaDB and PostgreSQL and
+  counts a missing combination as a failure; `tests/e2e/setup.sh` replaces the plugin link atomically
+  (`ln -sfn`); `tests/fixtures/vmail/README.txt` documents the TEST-ONLY fixtures; `load.sh` enables
+  the commented-out personal-data grant for the test role.
+- **Documentation.** Aligned with the code: the log file is `<log_dir>/galbridge.log`; three session
+  keys (`galbridge`, `galbridge_down_until`, `galbridge_searchonly`); `galbridge_debug` adds driver
+  error texts, exception messages and schema hints only; the once-per-request rule applies to
+  request-triggered codes; the `pg_hba.conf` lines for a remote Roundcube host must precede
+  iRedMail's catch-all `host all all 0.0.0.0/0 md5`; four contradictions in `config.inc.php.dist`
+  (`'auto'` groups, groups of search-only books, allow-list problems as WARN in `diag`, the
+  commented-out MariaDB limits).
 
 ### Fixed (compared with `sql_global_addressbooks` 2.5.0)
 - Fatal error on Roundcube 1.7: `reset()` and `set_search_set()` were declared without `: void`.

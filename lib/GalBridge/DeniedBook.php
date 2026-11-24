@@ -34,9 +34,24 @@ final class DeniedBook extends \rcube_addressbook
     public $undelete = false;
     public $searchonly = false;
 
-    public function __construct(private readonly string $name)
+    private bool $used = false;
+
+    /**
+     * @param null|\Closure(): void $onUse called once on the first read (e.g. the "directory
+     *                                     unavailable" notice during a database outage)
+     */
+    public function __construct(private readonly string $name, private readonly ?\Closure $onUse = null)
     {
         $this->coltypes = ['name' => ['limit' => 1], 'email' => ['subtypes' => ['work']]];
+    }
+
+    private function used(): \rcube_result_set
+    {
+        if (!$this->used && $this->onUse !== null) {
+            $this->used = true;
+            ($this->onUse)();
+        }
+        return new \rcube_result_set(0, 0);
     }
 
     #[\Override]
@@ -67,13 +82,17 @@ final class DeniedBook extends \rcube_addressbook
     #[\Override]
     public function list_records($cols = null, $subset = 0, $nocount = false)
     {
-        return new \rcube_result_set(0, 0);
+        return $this->used();
     }
 
     #[\Override]
     public function search($fields, $value, $mode = 0, $select = true, $nocount = false, $required = [])
     {
-        return new \rcube_result_set(0, 0);
+        // the sender-photo lookup runs on every opened message: never a notice for it
+        if ($required === 'photo' || (is_array($required) && in_array('photo', $required, true))) {
+            return new \rcube_result_set(0, 0);
+        }
+        return $this->used();
     }
 
     #[\Override]

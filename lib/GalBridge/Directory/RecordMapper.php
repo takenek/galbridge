@@ -60,8 +60,12 @@ final class RecordMapper
         }
         [$local, $domain] = explode('@', $address, 2);
 
-        $first = $this->fields->has('firstname') ? Normalizer::displayText($row['first_name'] ?? '') : '';
-        $last = $this->fields->has('surname') ? Normalizer::displayText($row['last_name'] ?? '') : '';
+        // first/last names reach recipient headers too (core builds the name from them for the user
+        // preferences addressbook_name_listing 1-3 and for contactlist_name_template): the same
+        // anti-impersonation rule as for the display name
+        $first = $this->fields->has('firstname') ? $this->safeName(Normalizer::displayText($row['first_name'] ?? '')) : '';
+        $last = $this->fields->has('surname') ? $this->safeName(Normalizer::displayText($row['last_name'] ?? '')) : '';
+        $isForeign = $this->isForeign($domain);
         $name = $this->safeName(Normalizer::displayText($row['name'] ?? ''));
         if ($name === '') {
             $name = $this->safeName(trim($first . ' ' . $last));
@@ -76,10 +80,12 @@ final class RecordMapper
             'email:work' => [$address],
             '_type' => 'person',
         ];
-        if ($first !== '') {
+        // a foreign entry of the global book carries no first/last name, so every listing mode falls
+        // back to 'name', which holds the "(domain)" marker
+        if ($first !== '' && !$isForeign) {
             $record['firstname'] = $first;
         }
-        if ($last !== '') {
+        if ($last !== '' && !$isForeign) {
             $record['surname'] = $last;
         }
         if ($this->fields->userAliases()) {
@@ -152,12 +158,12 @@ final class RecordMapper
         $address = Normalizer::address($username);
         $domain = Normalizer::domain($rowDomain);
         if ($address === null || $domain === null || !str_ends_with($address, '@' . $domain)) {
-            Log::once('warning', 'scope', 'row_dropped', 'invalid address or domain in a directory row');
+            Log::once('warning', 'scope', 'row_invalid', 'invalid address or a domain that does not match it in a directory row');
             return null;
         }
         if (!$this->book->inScope($domain) || $this->isHidden($address) || !$this->validEmail($address)) {
             // the SQL predicates should have excluded it: a collation / composition problem
-            Log::once('error', 'scope', 'row_dropped', 'row outside the book scope dropped', ['book' => $this->book->id]);
+            Log::once('error', 'scope', 'row_out_of_scope', 'row outside the book scope dropped (please report)', ['book' => $this->book->id]);
             return null;
         }
         return $address;
@@ -179,19 +185,22 @@ final class RecordMapper
 
     private function safeName(string $name): string
     {
-        if (str_contains($name, '@')) {
+        if (Normalizer::containsAt($name)) {
             // a display name that looks like an address could impersonate another recipient
-            $name = trim(substr($name, 0, (int) strpos($name, '@')));
+            $cut = preg_split('/[@\x{FF20}\x{FE6B}]/u', $name, 2);
+            $name = trim(is_array($cut) ? (string) $cut[0] : '');
         }
         return $name;
     }
 
+    private function isForeign(string $domain): bool
+    {
+        return $this->book->markForeign && !in_array($domain, $this->book->homeDomains, true);
+    }
+
     private function foreign(string $name, string $domain): string
     {
-        if ($this->book->markForeign && !in_array($domain, $this->book->homeDomains, true)) {
-            return $name . ' (' . $domain . ')';
-        }
-        return $name;
+        return $this->isForeign($domain) ? $name . ' (' . $domain . ')' : $name;
     }
 
     /**

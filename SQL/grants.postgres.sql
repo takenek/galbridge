@@ -11,8 +11,10 @@
 --      openssl rand -base64 33 | tr -d '/+=' | cut -c1-40
 -- 2. Run as the postgres superuser, connected to the vmail database:
 --      su - postgres -c "psql -d vmail -f /path/to/grants.postgres.sql"
---    (iRedMail's pg_hba.conf already allows md5/scram password logins over the local socket and
---    127.0.0.1; a remote Roundcube host needs a "hostssl vmail galbridge <ip>/32 scram-sha-256" line.)
+--    (iRedMail's pg_hba.conf ends with "host all all 0.0.0.0/0 md5": password logins are accepted from
+--    every IPv4 address that listen_addresses lets in. For a remote Roundcube host insert
+--    "hostssl vmail galbridge <ip>/32 scram-sha-256" and "hostnossl vmail galbridge 0.0.0.0/0 reject"
+--    BEFORE that line - pg_hba.conf uses the first matching line.)
 -- 3. Put the DSN into plugins/galbridge/config.inc.php, e.g.
 --      $config['galbridge_db_dsn'] = 'pgsql://galbridge:PASSWORD@127.0.0.1/vmail';
 --    and check it:  sudo -u www-data plugins/galbridge/bin/galbridge.sh diag
@@ -25,11 +27,13 @@
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'galbridge') THEN
-        CREATE ROLE galbridge WITH LOGIN PASSWORD 'CHANGE_ME_RANDOM_PASSWORD'
-            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT CONNECTION LIMIT 25;
+        CREATE ROLE galbridge WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT;
     END IF;
 END
 $$;
+-- (re)set the password and the connection limit, so re-running a freshly generated file always
+-- matches its DSN (size the limit to the PHP-FPM pm.max_children of Roundcube)
+ALTER ROLE galbridge WITH LOGIN PASSWORD 'CHANGE_ME_RANDOM_PASSWORD' CONNECTION LIMIT 25;
 ALTER ROLE galbridge SET default_transaction_read_only = on;
 ALTER ROLE galbridge SET statement_timeout = '5s';
 ALTER ROLE galbridge SET idle_in_transaction_session_timeout = '10s';
@@ -51,7 +55,9 @@ GRANT SELECT (address, owner) ON maillist_owners TO galbridge;
 -- Optional fields (galbridge_fields). Grant only what you enable; the organization field needs no
 -- column (it comes from galbridge_organizations).
 GRANT SELECT (department) ON mailbox TO galbridge;
--- Columns added by iRedMail 1.7.3 (update/1.7.3/vmail.*): first name, surname, phones, birthday.
--- On a server upgraded without that update these GRANTs fail ("Unknown column"): apply the update or
--- leave them out - GAL Bridge then works with fewer fields (bin/galbridge.sh diag lists them).
-GRANT SELECT (first_name, last_name, telephone, mobile, birthday) ON mailbox TO galbridge;
+-- Columns added by iRedMail 1.7.3 (update/1.7.3/vmail.*). On a server upgraded without that update
+-- these GRANTs fail (column does not exist): apply the update or leave them out - GAL Bridge then works
+-- with fewer fields (bin/galbridge.sh diag lists them). First name and surname are default fields:
+GRANT SELECT (first_name, last_name) ON mailbox TO galbridge;
+-- Personal data, only if you enable the fields phone / mobile / birthday in galbridge_fields:
+-- GRANT SELECT (telephone, mobile, birthday) ON mailbox TO galbridge;

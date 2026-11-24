@@ -130,16 +130,19 @@ Then **treat the `vmail` password as disclosed and rotate it**:
   (README 3.6). Per-user alias addresses are no longer shown unless `galbridge_user_aliases = true`.
 * **More fields**: first name, last name and department are shown when they are filled in vmail
   (open-source iRedAdmin fills only the display name); phone, mobile, organization and birthday are
-  opt-in.
+  opt-in (phone, mobile and birthday also need the commented-out grant of README 2.2).
 * **Department groups** in the domain book (or domain groups for organizations with several
   domains); group expansion is complete or refused above the cap, never cut.
 * **Search starts at two characters** (`galbridge_min_search_length`); compose autocomplete follows.
 * **The global book** is search-only, uses prefix search, shows at most 100 matches, has no groups
   and cannot be exported as a whole by default; entries outside the user's own domain are shown as
-  `Name (domain)`.
+  `Name (domain)` (also in the recipient fields), without a separate first and last name.
 * **Organizations**: users of any domain of an organization see the colleagues of all its domains in
   their domain book.
-* **Exports** of the whole domain book are limited to `galbridge_max_export` (2000) entries.
+* **Exports** of the whole domain book are limited to `galbridge_max_export` (2000) entries. A
+  refused export downloads nothing; as a file download it cannot show a message (README 4).
+* **Directory outages** show "The directory is temporarily unavailable." instead of an empty book
+  (README 3.9).
 
 ## 6. Recipe: a "support book" with the global book
 

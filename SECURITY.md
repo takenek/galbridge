@@ -31,14 +31,21 @@ MariaDB/MySQL and PostgreSQL editions of iRedMail 1.8.x.
   from the vmail row of the login (`mailbox.domain`), never from the domain part of the login string
   and never from request input. The session must come from a configured directory IMAP host, so a
   login through an IMAP server of the user's own choosing gets nothing.
-* **One query builder.** Every statement is produced by `QueryBuilder`, whose root predicate is
+* **One query builder.** Every statement that reads directory entries (lists, searches, counts,
+  groups, record lookups) is produced by `QueryBuilder`, whose root predicate is
   `scope AND visibility AND hidden AND filter`, rendered from a fully parenthesised predicate tree
-  with bound values. An empty `IN ()` means FALSE and an empty `NOT IN ()` means TRUE; a clause is
-  never omitted. Every returned row is re-checked in PHP (domain in the book's scope, not hidden,
-  valid address); a violation is dropped and logged.
+  with bound values. It is built through one constructor (`QueryBuilder::forBook`), which refuses a
+  malformed deny-list or visibility column instead of reading it as "no restriction". An empty
+  `IN ()` means FALSE and an empty `NOT IN ()` means TRUE; a clause is never omitted. Every returned
+  row is re-checked in PHP (domain in the book's scope, not hidden, valid address); a violation is
+  dropped and logged (`row_out_of_scope`). The fixed statements of the user resolution (the
+  viewer's own row and aliases) and the statistics of `diag` are separate and never list other
+  users' entries.
 * **Inert books for anything else.** A GAL Bridge source ID that the user may not use (not entitled,
   empty scope, plugin disabled, database unavailable, stale preference, crafted `_source`) gets a
-  `DeniedBook`: not ready, no groups, every read empty, never connects to the database.
+  `DeniedBook`: not ready, no groups, every read empty, never connects to the database. During a
+  database outage the books a session already had stay listed as such inert books that only show
+  "The directory is temporarily unavailable.".
 * **Least privilege, enforced.** A dedicated role with column-level `SELECT` grants on a read-only
   session. The plugin refuses iRedMail's own roles, the Roundcube database user and the password
   plugin's user by name, and any role that can see `mailbox.password`, `recovery_email` or
@@ -49,10 +56,12 @@ MariaDB/MySQL and PostgreSQL editions of iRedMail 1.8.x.
 * **Never silently wrong.** A recipient set (group expansion, compose to selected contacts) is
   complete or refused with a visible message.
 * **Read-only, no endpoints.** No actions, no templates, no JavaScript. `init()` returns at once
-  without an authenticated user; otherwise it only registers the two hooks and, for compose and
-  autocomplete requests, adds the enabled GAL Bridge source IDs (those with autocomplete on) to
-  `autocomplete_addressbooks` and raises `autocomplete_min_length`. It never touches the database;
-  a source the user is not entitled to resolves to an inert `DeniedBook`.
+  without an authenticated user; otherwise it only registers the `addressbooks_list` and
+  `addressbook_get` hooks (plus `addressbook_export` for the vCard export, which answers
+  `204 No Content` instead of an empty file when a book refused the export) and, for compose,
+  Redirect-dialog (`bounce`) and autocomplete requests, adds the enabled GAL Bridge source IDs (those
+  with autocomplete on) to `autocomplete_addressbooks` and raises `autocomplete_min_length`. It never
+  touches the database; a source the user is not entitled to resolves to an inert `DeniedBook`.
 
 ## Important security assumptions
 
@@ -68,9 +77,11 @@ MariaDB/MySQL and PostgreSQL editions of iRedMail 1.8.x.
   Roundcube login equals `mailbox.username`.
 * The vmail database is trusted for integrity; the plugin never writes to it.
 * Roundcube's session storage is trusted. The resolved user (home domain, address set, column probe)
-  is cached in `$_SESSION['galbridge']` for `galbridge_scope_ttl` seconds; whoever can write the
-  session store can change it, and could equally take over the session. Search criteria that
-  Roundcube keeps in the session are re-validated on every use and can never carry SQL.
+  is cached in `$_SESSION['galbridge']` for `galbridge_scope_ttl` seconds; the only other keys are
+  `galbridge_down_until` (the 30-second outage memo) and `galbridge_searchonly` (the `'auto'`
+  search-only decision per book). Whoever can write the session store can change them, and could
+  equally take over the session. Search criteria that Roundcube keeps in the session are re-validated
+  on every use and can never carry SQL.
 
 See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the full threat model and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
@@ -81,17 +92,25 @@ See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the full threat model and
 * **Dedicated role**: create it with `plugins/galbridge/bin/galbridge.sh grants` (README 2.2), never
   reuse `vmail`, `vmailadmin`, `roundcube` or another iRedMail role, and never edit the grant
   templates inside the plugin directory. `diag` must show the password column as not readable and
-  write access as denied. Drop the optional grants for fields you do not expose.
-* **Role limits** sized to the PHP-FPM pool: PostgreSQL `CONNECTION LIMIT`, `statement_timeout`,
+  no write privileges (read from the database catalogs). The personal-data grant (`telephone`,
+  `mobile`, `birthday`) is commented out: uncomment it only for fields you expose; `diag` lists
+  granted columns that no configured field uses (INFO), so you can revoke them.
+* **Role limits** sized to the PHP-FPM pool: PostgreSQL `CONNECTION LIMIT`
+  (`grants --connection-limit=`, default 25; `diag` shows it), `statement_timeout`,
   `idle_in_transaction_session_timeout` and `default_transaction_read_only` (set by the template);
-  MariaDB `ALTER USER ... WITH MAX_STATEMENT_TIME 5 MAX_USER_CONNECTIONS 25` (a comment in the
-  template: enable it). On PostgreSQL before 15 review `CREATE` on schema `public` (`diag` warns).
+  MariaDB `ALTER USER ... WITH MAX_STATEMENT_TIME 5 MAX_USER_CONNECTIONS 25` (commented out in the
+  template and in the `grants` output: uncomment it). On PostgreSQL before 15 review `CREATE` on
+  schema `public` (`diag` warns).
 * **TLS for a remote database**: PostgreSQL `sslmode=verify-full` (or `verify-ca`) with
-  `sslrootcert`, MySQL `ca=` with `verify_server_cert=1`, server side `hostssl` / `REQUIRE SSL`.
-  Keep `galbridge_db_allow_plaintext = false` unless the link is a trusted private network.
+  `sslrootcert`, MySQL `ca=` with `verify_server_cert=1`. Server side: MariaDB `REQUIRE SSL` (added
+  by `grants` for a non-local `--account-host`); PostgreSQL a `hostssl` line and a matching
+  `hostnossl ... reject` line inserted **before** iRedMail's catch-all `host all all 0.0.0.0/0 md5`
+  (README 2.2). Keep `galbridge_db_allow_plaintext = false` unless the link is a trusted private
+  network.
 * **Configuration file** `plugins/galbridge/config.inc.php` (or `config/galbridge.inc.php`) owned by
-  `root:<PHP-FPM group>`, mode `0640` (`diag` fails when others can access it). Keep no other file
-  with the DSN inside `plugins/galbridge/`.
+  `root:<PHP-FPM group>`, mode `0640` (`diag` fails when others can access it and warns when its
+  group can write it, for another owner or a writable directory). Keep no other file with the DSN
+  inside `plugins/galbridge/`.
 * **Web server**: deny `plugins/galbridge/` (README 2.6), in particular on iRedMail's nginx, whose
   `static.php` alias serves plugin files directly.
 * **`dont_override`** as defence in depth: the plugin already ignores user preferences named
@@ -118,11 +137,12 @@ See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the full threat model and
 
   Requests with an empty key are not limited. Roundcube also accepts `_action` in a POST body, which
   `$arg__action` does not see: a coarser per-address limit on all Roundcube PHP requests covers that.
-* **Log retention.** The `galbridge` log (or the mail log with iRedMail's syslog setup) records the
-  numeric Roundcube user id, book ids, counts, SQLSTATEs, reason codes and 12-character hashes of
-  rejected group IDs – never search terms, addresses or names at normal levels. `galbridge_debug`
-  adds driver error texts and exception messages, which may contain personal data: keep it off in
-  normal operation. Restrict access to `log_dir` and limit retention.
+* **Log retention.** The `galbridge` log (`<log_dir>/galbridge.log`, or the mail log with iRedMail's
+  syslog setup) records the numeric Roundcube user id, book ids, counts, SQLSTATEs, reason codes,
+  12-character hashes of rejected group IDs and server names (`host_mismatch`) – never search terms,
+  addresses or names at normal levels. `galbridge_debug` adds only driver error texts, exception
+  messages and schema hints; driver and exception texts are not filtered and may contain personal
+  data: keep it off in normal operation. Restrict access to `log_dir` and limit retention.
 * **Database server logs contain search terms.** `rcube_db` inlines bound values into the SQL text
   on the client side, so the statements the server sees – and logs – carry the literal search words
   and addresses: the MariaDB/MySQL general and slow query logs, and on PostgreSQL every failed
@@ -152,6 +172,6 @@ as known and accepted, not as new findings, unless the stated rationale no longe
 | GB-20 | **No per-user opt-out** in iRedMail's SQL schema; hiding uses deny-lists and an optional administrator-created `galbridge_visibility_column`. | The SQL editions have no "hide from address book" column; the plugin does not alter the vmail schema. | Use the hidden lists or add the column (README 3.7). |
 | GB-14 | **Unknown `accesspolicy` values hide** the alias account or list (iRedAPD lets them pass); `membersonly` lists are shown to moderators and owners only. | Fail closed; mlmmj subscribers are not in SQL, so membership cannot be evaluated. | `galbridge_list_policy = 'all'` is the explicit opt-out. |
 | GB-13 | **One global book**; `'*'` data domains need `galbridge_global_allow_wildcard` as a second opt-in. | `'*'` exposes every tenant added later; a typo or copy of the old plugin's defaults must not do that. | Prefer explicit data domains. |
-| GB-21 | Database errors are logged with the **SQLSTATE only**; connection failures still reach Roundcube's errors log with the PDO driver message (host and user name, never the password). | `ignore_errors` keeps core from logging SQL text with inlined search values; core logs connection errors itself. | Restrict the Roundcube errors log like the mail log. |
-| GB-06 | **Search lists are capped** (`galbridge_max_results` / `galbridge_global_max_results`) with a notice; an export of a search result contains at most that many entries without a notice (a file download cannot show one). | A search list is not a recipient set; recipient sets are refused instead of being cut. | Raise the caps if users need larger exports. |
+| GB-21 | Database errors are logged with the **SQLSTATE only**; connection failures still reach Roundcube's errors log with the PDO driver message (host and user name, never the password). `diag` prints the same message on its `connect` line (in the CLI core writes it to stderr only). | `ignore_errors` keeps core from logging SQL text with inlined search values; core logs connection errors itself. | Restrict the Roundcube errors log like the mail log. |
+| GB-06 | **Search lists are capped** (`galbridge_max_results` / `galbridge_global_max_results`) with a notice; an export of a search result contains at most that many entries without a notice, and a refused export downloads nothing (`204 No Content`) without a message (a file download cannot show one). | A search list is not a recipient set; recipient sets are refused instead of being cut. | Raise the caps if users need larger exports. |
 | GB-01 | Roundcube **1.7.7 only**. | The backend contract was verified against 1.7.7's call paths; other releases are untested. | Check for a GAL Bridge release before upgrading Roundcube (README 5). |

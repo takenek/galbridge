@@ -55,11 +55,6 @@ final class BookDefinition
     ) {
     }
 
-    public function isGlobal(): bool
-    {
-        return $this->id === self::GLOBAL;
-    }
-
     /**
      * Is a (normalised) domain inside the data scope?
      */

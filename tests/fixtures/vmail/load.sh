@@ -31,8 +31,13 @@ SQLDIR="$(cd "$HERE/../../../SQL" && pwd)"
 [[ "$RO_PASS" =~ ^[A-Za-z0-9._-]{8,64}$ ]] || { echo "invalid test password" >&2; exit 1; }
 
 grants() {
-  # rename role/password/database in the documented template
-  sed -e "s/CHANGE_ME_RANDOM_PASSWORD/$RO_PASS/g" \
+  # rename role/password/database in the documented template; the test role also gets the optional,
+  # commented-out personal-data grants (the suites exercise every field) and no connection limit (a
+  # PHPUnit process keeps dozens of connections open until garbage collection; a Roundcube request
+  # opens at most one)
+  sed -e "s/^-- GRANT /GRANT /" \
+      -e "s/CONNECTION LIMIT 25/CONNECTION LIMIT -1/" \
+      -e "s/CHANGE_ME_RANDOM_PASSWORD/$RO_PASS/g" \
       -e "s/'galbridge'@/'$RO_USER'@/g" \
       -e "s/\bgalbridge\b/$RO_USER/g" \
       -e "s/\bvmail\./$DB./g" \

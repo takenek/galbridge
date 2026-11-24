@@ -537,6 +537,226 @@ final class IsolationTest extends TestCase
         self::assertSame('ok', $_SESSION['galbridge']['status'] ?? null);
     }
 
+    /**
+     * A query failure during the request (here: the outage is memoised after the Viewer was cached)
+     * is shown to the user as "directory unavailable" - core's read actions never call get_error() -
+     * at most once per request, however many methods and books fail.
+     */
+    #[DataProvider('engines')]
+    public function testUnavailableNoticeIsShownOncePerRequest(string $dsn): void
+    {
+        $config = Env::config($dsn);
+        self::assertNotNull(Env::factory($config, self::JAN)->resolver()->resolve()); // the Viewer is cached
+        $_SESSION['galbridge_down_until'] = time() + Connection::OUTAGE_SECONDS;        // the server just failed
+        self::resetUnavailableNotice();
+
+        $notices = [];
+        $factory = self::notifyingFactory($config, $notices);
+        self::assertSame([BookDefinition::DOMAIN], array_keys($factory->books()), 'the cached Viewer still lists the book');
+        $book = $factory->create(BookDefinition::DOMAIN);
+        self::assertInstanceOf(AddressBook::class, $book);
+        $book->set_pagesize(50);
+        self::assertSame(0, $book->list_records()->count);
+        self::assertSame(0, $book->search('*', 'kowalski')->count);
+        self::assertSame(0, $book->count()->count);
+        self::assertSame([], $book->list_groups());
+        self::assertNull($book->get_record('u_janDkowalskiAexampleDcom'));
+        self::assertSame(['type' => \rcube_addressbook::ERROR_SEARCH, 'message' => 'galbridge.unavailable'], $book->get_error());
+        // another instance in the same request (e.g. a second source of the same book)
+        $again = $factory->create(BookDefinition::DOMAIN);
+        $again->set_pagesize(50);
+        self::assertSame(0, $again->list_records()->count);
+        self::assertSame([['unavailable', []]], $notices, 'one notice per request');
+
+        // the next request tells the user again
+        self::resetUnavailableNotice();
+        $notices = [];
+        $book = self::notifyingFactory($config, $notices)->create(BookDefinition::DOMAIN);
+        $book->set_pagesize(50);
+        self::assertSame(0, $book->list_records()->count);
+        self::assertSame([['unavailable', []]], $notices);
+        self::assertStringNotContainsString('testonly-ro', implode("\n", $GLOBALS['galbridge_test_log']));
+        self::resetUnavailableNotice();
+
+        // a working directory shows nothing
+        $_SESSION['galbridge_down_until'] = time() - 1;
+        $notices = [];
+        $book = self::notifyingFactory($config, $notices)->create(BookDefinition::DOMAIN);
+        $book->set_pagesize(50);
+        self::assertSame(13, $book->list_records()->count);
+        self::assertSame([], $notices);
+        self::assertNull($book->get_error());
+    }
+
+    /**
+     * During an outage after the Viewer's TTL, the books of this session stay listed (from the
+     * expired Viewer, without touching the database) as DeniedBooks that tell the user the directory
+     * is unavailable - except for the sender-photo lookup of every opened message. Nothing is ever
+     * read through the expired Viewer and nothing is cached.
+     */
+    #[DataProvider('engines')]
+    public function testOutageAfterTheTtlKeepsTheBooksListedAsUnavailable(string $dsn): void
+    {
+        $options = ['galbridge_global_book' => true, 'galbridge_global_viewer_domains' => ['*'], 'galbridge_global_data_domains' => ['example.org']];
+        $config = Env::config($dsn, $options);
+        self::assertNotNull(Env::factory($config, self::JAN)->resolver()->resolve());
+        $_SESSION['galbridge']['at'] -= 3600;                                       // the TTL has expired
+        $_SESSION['galbridge_down_until'] = time() + Connection::OUTAGE_SECONDS;    // and the server is down
+        $expired = $_SESSION['galbridge'];
+
+        $notices = [];
+        $created = 0;
+        $factory = self::notifyingFactory($config, $notices, 1, Env::IMAP_HOST, $created);
+        self::assertSame([BookDefinition::DOMAIN, BookDefinition::GLOBAL], array_keys($factory->books()));
+        self::assertSame('db_down', $factory->resolver()->status());
+        self::assertNotNull($factory->resolver()->staleViewer());
+        foreach ([BookDefinition::DOMAIN => 'domainbook', BookDefinition::GLOBAL => 'globalbook'] as $id => $name) {
+            $notices = [];
+            self::resetUnavailableNotice(); // one request per book
+            $book = $factory->create($id);
+            self::assertInstanceOf(DeniedBook::class, $book, $id);
+            self::assertSame($name, $book->get_name());
+            self::assertFalse($book->ready, 'core skips it in the compose list and mailto');
+
+            // the sender photo of every opened message: never a notice
+            self::assertSame(0, $book->search(['email'], 'bob@example.org', 1, true, true, 'photo')->count);
+            self::assertSame(0, $book->search(['email'], 'bob@example.org', 1, true, true, ['photo'])->count);
+            self::assertSame([], $notices, $id . ': no notice for the photo lookup');
+
+            // a real read: the notice, once for this book
+            self::assertSame(0, $book->search('*', 'jan')->count);
+            self::assertSame(0, $book->list_records()->count);
+            self::assertSame(0, $book->count()->count);
+            self::assertNull($book->get_record('u_janDkowalskiAexampleDcom'));
+            self::assertSame([], $book->list_groups());
+            self::assertSame([['unavailable', []]], $notices, $id);
+        }
+        // both books in ONE request: one notice in total (shared with AddressBook::failed())
+        self::resetUnavailableNotice();
+        $notices = [];
+        $factory->create(BookDefinition::DOMAIN)->search('*', 'jan');
+        $factory->create(BookDefinition::GLOBAL)->search('*', 'jan');
+        self::assertSame([['unavailable', []]], $notices, 'one notice per request for all books');
+        self::assertSame(0, $created, 'the database was not contacted');
+        self::assertSame($expired, $_SESSION['galbridge'], 'the expired Viewer is neither refreshed nor replaced');
+
+        // no expired Viewer in this session: nothing to list, nothing to say
+        $_SESSION = ['galbridge_down_until' => time() + Connection::OUTAGE_SECONDS];
+        $notices = [];
+        $factory = self::notifyingFactory($config, $notices);
+        self::assertSame([], $factory->books());
+        self::assertSame(0, $factory->create(BookDefinition::DOMAIN)->list_records()->count);
+        self::assertSame([], $notices);
+
+        // the expired Viewer is bound to its context: another user, another configuration, or an
+        // entry that was not a positive decision is never listed
+        $variants = [
+            'another user' => [$expired, $config, 2],
+            'another configuration' => [$expired, Env::config($dsn, ['galbridge_global_book' => false] + $options), 1],
+            'a negative decision' => [['status' => 'no_mailbox', 'viewer' => null] + $expired, $config, 1],
+        ];
+        foreach ($variants as $label => [$cache, $cfg, $uid]) {
+            $_SESSION = ['galbridge' => $cache, 'galbridge_down_until' => time() + Connection::OUTAGE_SECONDS];
+            $factory = self::notifyingFactory($cfg, $notices, $uid);
+            self::assertSame([], $factory->books(), $label);
+            self::assertNull($factory->resolver()->staleViewer(), $label);
+        }
+
+        // not a database error (IMAP host not allowed): no stale listing either
+        $_SESSION = ['galbridge' => $expired, 'galbridge_down_until' => time() + Connection::OUTAGE_SECONDS];
+        $factory = self::notifyingFactory($config, $notices, 1, 'imap.evil.example');
+        self::assertSame([], $factory->books());
+        self::assertSame('host_mismatch', $factory->resolver()->status());
+
+        // the server is back: the real books again
+        $_SESSION = ['galbridge' => $expired];
+        $factory = self::notifyingFactory($config, $notices);
+        self::assertInstanceOf(AddressBook::class, $factory->create(BookDefinition::DOMAIN));
+        self::assertSame('ok', $factory->resolver()->status());
+        self::assertGreaterThan($expired['at'], $_SESSION['galbridge']['at'] ?? 0, 'refreshed');
+    }
+
+    /**
+     * The same for a database that answers with errors (db_error, e.g. a broken table) instead of
+     * refusing connections: the books stay listed from the expired Viewer and say "unavailable".
+     */
+    public function testQueryErrorsAfterTheTtlKeepTheBooksListedAsUnavailable(): void
+    {
+        $file = sys_get_temp_dir() . '/galbridge-dberror-' . getmypid() . '-' . bin2hex(random_bytes(4)) . '.sqlite';
+        try {
+            $pdo = new \PDO('sqlite:' . $file);
+            $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+            $dir = dirname(__DIR__) . '/fixtures/vmail/';
+            $pdo->exec((string) file_get_contents($dir . 'schema.sqlite.sql'));
+            $pdo->exec((string) file_get_contents($dir . 'seed.sql'));
+            $pdo = null;
+            $config = Env::config('sqlite:///' . $file . '?mode=0600');
+            self::assertNotNull(Env::factory($config, self::JAN)->resolver()->resolve());
+            $_SESSION['galbridge']['at'] -= 3600;
+            $expired = $_SESSION['galbridge'];
+
+            file_put_contents($file, str_repeat('not a database ', 512)); // every statement fails now
+            self::resetUnavailableNotice();
+            $notices = [];
+            $factory = self::notifyingFactory($config, $notices);
+            self::assertSame([BookDefinition::DOMAIN], array_keys($factory->books()));
+            self::assertSame('db_error', $factory->resolver()->status());
+            $book = $factory->create(BookDefinition::DOMAIN);
+            self::assertInstanceOf(DeniedBook::class, $book);
+            self::assertSame(0, $book->search(['email'], self::JAN, 1, true, true, 'photo')->count);
+            self::assertSame([], $notices);
+            self::assertSame(0, $book->search('*', 'jan')->count);
+            self::assertSame([['unavailable', []]], $notices);
+            self::assertSame($expired, $_SESSION['galbridge'], 'a query error is not an entitlement decision');
+            self::assertStringContainsString('db_error', implode("\n", $GLOBALS['galbridge_test_log']));
+        } finally {
+            @unlink($file);
+        }
+    }
+
+    // ------------------------------------------------------------------ organization search in the global book
+
+    /**
+     * The global book never lists a whole organization from a prefix of its name (as for domain
+     * fragments of addresses): only the complete label matches there. The domain book keeps the
+     * normal search modes.
+     */
+    #[DataProvider('engines')]
+    public function testGlobalBookMatchesOnlyTheCompleteOrganizationLabel(string $dsn): void
+    {
+        $options = [
+            'galbridge_fields' => ['name', 'firstname', 'surname', 'email', 'department', 'organization'],
+            'galbridge_organizations' => ['Example Group' => ['example.com'], 'Acme' => ['example.org'], 'Bücher Gruppe' => ['xn--bcher-kva.example']],
+            'galbridge_global_book' => true, 'galbridge_global_viewer_domains' => ['*'], 'galbridge_global_data_domains' => ['example.org', 'xn--bcher-kva.example'],
+        ];
+        $global = Env::factory(Env::config($dsn, $options), self::JAN)->create(BookDefinition::GLOBAL);
+        self::assertInstanceOf(AddressBook::class, $global);
+        $global->set_pagesize(50);
+
+        foreach (['ac', 'acm', 'Ac', 'cme'] as $prefix) {
+            self::assertSame([], self::emails($global->search('*', $prefix)), $prefix);
+            self::assertSame([], self::emails($global->search(['organization'], $prefix)), $prefix);
+            self::assertSame([], self::emails($global->search(['organization'], [$prefix])), $prefix . ' (advanced)');
+            foreach ([\rcube_addressbook::SEARCH_PREFIX, \rcube_addressbook::SEARCH_ALL] as $mode) {
+                self::assertSame([], self::emails($global->search(['name', 'organization'], $prefix, $mode)), $prefix . ' mode ' . $mode);
+            }
+        }
+        // the complete label lists the organization
+        $acme = self::emails($global->search('*', 'acme'));
+        self::assertContains('bob@example.org', $acme);
+        self::assertSame(['example.org'], self::domains($acme));
+        self::assertSame($acme, self::emails($global->search(['organization'], 'ACME')));
+        // a label of several words: only as a whole (strict search)
+        self::assertSame([], self::emails($global->search(['organization'], 'bücher')));
+        self::assertSame(['klaus@xn--bcher-kva.example'], self::emails($global->search(['organization'], 'Bücher Gruppe', \rcube_addressbook::SEARCH_STRICT)));
+        self::assertSame('Acme', $global->get_record('u_bobAexampleDorg', true)['organization'] ?? null);
+
+        // the domain book: a partial organization search still works
+        $domain = Env::factory(Env::config($dsn, $options), self::JAN)->create(BookDefinition::DOMAIN);
+        $domain->set_pagesize(50);
+        self::assertSame(self::JAN_DOMAIN_BOOK, self::emails($domain->search(['organization'], 'grou')));
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private static function domainBook(string $dsn, string $login): AddressBook
@@ -557,6 +777,41 @@ final class IsolationTest extends TestCase
             return $connection ??= new Connection(new Dsn($config->string('galbridge_db_dsn'), $config), 3);
         };
         return new ViewerResolver($config, $connect, $uid, $login, $host, $host);
+    }
+
+    /**
+     * A factory on the current session with the user-visible notices collected (and the rcube_db
+     * instances created counted).
+     *
+     * @param list<array{string, array<string, string>}> $notices
+     */
+    private static function notifyingFactory(Config $config, ?array &$notices, int $uid = 1, string $host = Env::IMAP_HOST, int &$created = 0): Factory
+    {
+        $notices = [];
+        $connection = null;
+        $connect = static function () use ($config, &$connection, &$created): Connection {
+            return $connection ??= new Connection(
+                new Dsn($config->string('galbridge_db_dsn'), $config),
+                3,
+                static function (string $dsn) use (&$created): \rcube_db {
+                    $created++;
+                    return \rcube_db::factory($dsn, '', false);
+                },
+            );
+        };
+        $resolver = new ViewerResolver($config, $connect, $uid, self::JAN, $host, $host);
+        $notify = static function (string $label, array $vars) use (&$notices): void {
+            $notices[] = [$label, $vars];
+        };
+        return new Factory($config, $resolver, $connect, static fn (string $l): string => $l, 'list', $notify);
+    }
+
+    /**
+     * AddressBook shows the "unavailable" notice once per request (a static flag): a new request.
+     */
+    private static function resetUnavailableNotice(): void
+    {
+        (new \ReflectionProperty(AddressBook::class, 'unavailableShown'))->setValue(null, false);
     }
 
     /**

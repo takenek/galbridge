@@ -8,6 +8,7 @@ use GalBridge\AddressBook;
 use GalBridge\Config;
 use GalBridge\DeniedBook;
 use GalBridge\Directory\BookDefinition;
+use GalBridge\Directory\IdCodec;
 use GalBridge\Log;
 use GalBridge\Tests\Support\Env;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -15,8 +16,9 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * The real galbridge plugin class on Roundcube 1.7.7's plugin API (docs/ARCHITECTURE.md 3, 15):
- * init() registers only addressbooks_list and addressbook_get and never touches the database; the
- * autocomplete options are wired for mail/compose and mail/autocomplete only; addressbooks_list
+ * init() registers only addressbooks_list and addressbook_get (plus addressbook_export for
+ * addressbook/export) and never touches the database; the autocomplete options are wired for
+ * mail/compose, mail/bounce (the Redirect dialog) and mail/autocomplete only; addressbooks_list
  * appends safe, HTML-escaped, read-only entries; addressbook_get ALWAYS answers our IDs with an
  * instance (core dies with error 700 otherwise) and never touches foreign IDs. Core's own
  * rcmail::get_address_sources() / get_address_book() are driven through the plugin as well.
@@ -40,7 +42,7 @@ final class PluginHooksTest extends TestCase
 
     private \rcmail $rc;
 
-    /** @var object{messages: list<array{0: string, 1: string, 2: mixed}>} */
+    /** @var object{messages: list<array{0: string, 1: string, 2: mixed}>, exits: list<array{0: string, 1: list<string>}>} */
     private object $output;
 
     protected function setUp(): void
@@ -111,6 +113,7 @@ final class PluginHooksTest extends TestCase
             'mail/show (sender photo of every message)' => ['mail', 'show'],
             'mail/list' => ['mail', 'list'],
             'mail/compose' => ['mail', 'compose'],
+            'mail/bounce (the Redirect dialog)' => ['mail', 'bounce'],
             'mail/autocomplete' => ['mail', 'autocomplete'],
             'mail/group-expand' => ['mail', 'group-expand'],
             'addressbook index' => ['addressbook', ''],
@@ -144,7 +147,8 @@ final class PluginHooksTest extends TestCase
     public function testAutocompleteIsWiredOnlyForComposeAndAutocomplete(string $task, string $action): void
     {
         $this->boot(Env::sqliteDsn(), [], task: $task, action: $action);
-        $wired = $task === 'mail' && in_array($action, ['compose', 'autocomplete'], true);
+        // mail/bounce renders the same recipient inputs as compose (rcmail_sendmail::compose_headers)
+        $wired = $task === 'mail' && in_array($action, ['compose', 'bounce', 'autocomplete'], true);
         self::assertSame($wired ? ['sql', BookDefinition::DOMAIN] : ['sql'], $this->rc->config->get('autocomplete_addressbooks'));
         self::assertSame($wired ? 2 : 1, $this->rc->config->get('autocomplete_min_length'));
     }
@@ -173,6 +177,176 @@ final class PluginHooksTest extends TestCase
         self::assertSame(5, $this->rc->config->get('autocomplete_min_length'));
         $this->boot($dsn, ['galbridge_min_search_length' => 50], action: 'compose');
         self::assertSame(10, $this->rc->config->get('autocomplete_min_length'));
+    }
+
+    /**
+     * The Redirect (bounce) dialog renders recipient inputs through rcmail_sendmail::compose_headers()
+     * like compose: the client minimum and the autocomplete sources are wired there as well.
+     */
+    public function testRedirectDialogGetsTheAutocompleteWiring(): void
+    {
+        $this->boot(Env::sqliteDsn(), ['galbridge_global_book' => true, 'galbridge_min_search_length' => 3, 'autocomplete_threads' => 2], action: 'bounce');
+        self::assertSame(['sql', BookDefinition::DOMAIN, BookDefinition::GLOBAL], $this->rc->config->get('autocomplete_addressbooks'));
+        self::assertSame(3, $this->rc->config->get('autocomplete_min_length'));
+        self::assertSame(['addressbooks_list', 'addressbook_get'], array_keys($this->api->handlers));
+        self::assertArrayNotHasKey('galbridge', $_SESSION, 'wiring never touches the database');
+    }
+
+    /**
+     * addressbook_export is registered for addressbook/export only (a refused export must not
+     * download an empty file).
+     *
+     * @return array<string, array{string, string, bool}>
+     */
+    public static function exportHookRequests(): array
+    {
+        return [
+            'addressbook/export' => ['addressbook', 'export', true],
+            'mail/export' => ['mail', 'export', false],
+            'addressbook/import' => ['addressbook', 'import', false],
+            'addressbook/list' => ['addressbook', 'list', false],
+            'addressbook/qrcode' => ['addressbook', 'qrcode', false],
+        ];
+    }
+
+    #[DataProvider('exportHookRequests')]
+    public function testExportHookIsRegisteredOnlyForTheExport(string $task, string $action, bool $registered): void
+    {
+        $plugin = $this->boot('pgsql://galbridge_ro:testonly-ro@127.0.0.1:1/galbridge_vmail_test', [], task: $task, action: $action);
+        self::assertSame($registered ? ['addressbooks_list', 'addressbook_get', 'addressbook_export'] : ['addressbooks_list', 'addressbook_get'], array_keys($this->api->handlers));
+        if ($registered) {
+            self::assertSame([$plugin, 'addressbook_export'], $this->api->handlers['addressbook_export'][0]);
+        }
+        self::assertSame([], $GLOBALS['galbridge_test_log'], 'never touches the database');
+        self::assertArrayNotHasKey('galbridge_down_until', $_SESSION);
+    }
+
+    /**
+     * @return array<string, array{string, array<string, mixed>, string}>
+     */
+    public static function refusedExports(): array
+    {
+        $out = [];
+        foreach (Env::engines() as $engine => [$dsn]) {
+            $out["{$engine}: export disabled"] = [$dsn, ['galbridge_domain_export' => false], 'book'];
+            $out["{$engine}: more entries than galbridge_max_export"] = [$dsn, ['galbridge_max_export' => 5], 'book'];
+            $out["{$engine}: a group above the expansion cap"] = [$dsn, ['galbridge_max_group_members' => 1], 'group'];
+            $out["{$engine}: more selected contacts than galbridge_max_ids"] = [$dsn, ['galbridge_max_ids' => 1], 'selected'];
+        }
+        return $out;
+    }
+
+    /**
+     * contacts/export is a download: a warning queued for the page is never shown and core would save
+     * an empty contacts.vcf. A refusal is recorded instead, and addressbook_export ends the request
+     * with 204 No Content - the browser stays on the page and saves nothing.
+     *
+     * @param array<string, mixed> $options
+     */
+    #[DataProvider('refusedExports')]
+    public function testRefusedExportAnswersNoContent(string $dsn, array $options, string $what): void
+    {
+        $this->boot($dsn, $options, task: 'addressbook', action: 'export');
+        $book = $this->api->exec_hook('addressbook_get', ['id' => BookDefinition::DOMAIN, 'writeable' => false])['instance'];
+        self::assertInstanceOf(AddressBook::class, $book);
+        $result = self::coreExport($book, $what);
+        self::assertSame([], $result->records, 'complete or nothing');
+        self::assertNotEmpty($book->get_error());
+        self::assertSame([], $this->output->messages, 'nothing is queued for a page that is never rendered');
+
+        try {
+            $this->api->exec_hook('addressbook_export', ['result' => $result]);
+            self::fail('the refused export went on to send a file');
+        } catch (\LogicException $e) {
+            self::assertSame('sendExit', $e->getMessage());
+        }
+        self::assertSame([['', ['HTTP/1.1 204 No Content']]], $this->output->exits);
+    }
+
+    /**
+     * An export that is not refused is left alone (core sends the vCards).
+     */
+    #[DataProvider('engines')]
+    public function testAllowedExportIsNotIntercepted(string $dsn): void
+    {
+        foreach (['book' => 13, 'group' => 2, 'selected' => 2] as $what => $count) {
+            $this->boot($dsn, [], task: 'addressbook', action: 'export');
+            $book = $this->api->exec_hook('addressbook_get', ['id' => BookDefinition::DOMAIN, 'writeable' => false])['instance'];
+            self::assertInstanceOf(AddressBook::class, $book);
+            $result = self::coreExport($book, $what);
+            self::assertCount($count, $result->records, $what);
+            $p = $this->api->exec_hook('addressbook_export', ['result' => $result]);
+            self::assertSame($result, $p['result'], $what);
+            self::assertEmpty($p['abort'] ?? null, $what);
+            self::assertSame([], $this->output->exits, $what);
+            self::assertSame([], $this->output->messages, $what);
+        }
+
+        // a refusal in another action is still shown (only a download cannot carry a message)
+        $this->boot($dsn, ['galbridge_domain_export' => false], task: 'addressbook', action: 'list');
+        $book = $this->api->exec_hook('addressbook_get', ['id' => BookDefinition::DOMAIN, 'writeable' => false])['instance'];
+        self::coreExport($book, 'book');
+        self::assertSame([['galbridge.exportdisabled', 'warning', []]], $this->output->messages);
+    }
+
+    /**
+     * During a database outage after the Viewer's TTL the books stay in the address-book list and
+     * tell the user "The directory is temporarily unavailable." on use (never for the sender photo).
+     */
+    #[DataProvider('engines')]
+    public function testOutageKeepsTheBooksListedAndTellsTheUser(string $dsn): void
+    {
+        $options = ['galbridge_global_book' => true, 'galbridge_global_viewer_domains' => ['*'], 'galbridge_global_data_domains' => ['example.org']];
+        $this->boot($dsn, $options);
+        self::assertSame([BookDefinition::DOMAIN, BookDefinition::GLOBAL], array_keys($this->api->exec_hook('addressbooks_list', ['sources' => []])['sources']));
+        $session = $_SESSION;
+        $session['galbridge']['at'] -= 3600;
+        $session['galbridge_down_until'] = time() + 30;
+
+        $this->boot($dsn, $options, task: 'addressbook', action: 'search');
+        $_SESSION = $session;
+        $sources = $this->api->exec_hook('addressbooks_list', ['sources' => []])['sources'];
+        self::assertSame([BookDefinition::DOMAIN, BookDefinition::GLOBAL], array_keys($sources), 'still listed');
+        self::assertSame(['Domain directory', 'Global directory'], array_column($sources, 'name'));
+        foreach ([BookDefinition::DOMAIN => 'Domain directory', BookDefinition::GLOBAL => 'Global directory'] as $id => $name) {
+            $this->output->messages = [];
+            (new \ReflectionProperty(AddressBook::class, 'unavailableShown'))->setValue(null, false); // one request per book
+            $book = $this->api->exec_hook('addressbook_get', ['id' => $id, 'writeable' => false])['instance'];
+            self::assertInstanceOf(DeniedBook::class, $book, $id);
+            self::assertSame($name, $book->get_name());
+            self::assertSame(0, $book->search(['email'], 'bob@example.org', 1, true, true, 'photo')->count);
+            self::assertSame([], $this->output->messages, $id . ': never for the sender photo');
+            self::assertSame(0, $book->search('*', 'jan')->count);
+            self::assertSame(0, $book->list_records()->count);
+            self::assertSame([['galbridge.unavailable', 'warning', []]], $this->output->messages, $id);
+        }
+        // both books in ONE request (e.g. the compose recipient search): a single notice in total
+        (new \ReflectionProperty(AddressBook::class, 'unavailableShown'))->setValue(null, false);
+        $this->output->messages = [];
+        foreach ([BookDefinition::DOMAIN, BookDefinition::GLOBAL] as $id) {
+            $this->api->exec_hook('addressbook_get', ['id' => $id, 'writeable' => false])['instance']->search('*', 'jan');
+        }
+        self::assertSame([['galbridge.unavailable', 'warning', []]], $this->output->messages, 'one notice per request for all books');
+        self::assertSame($session['galbridge'], $_SESSION['galbridge'], 'the expired Viewer is not cached again');
+    }
+
+    /**
+     * core's contacts/export calls for the whole book, a group (_gid) or selected contacts (_cid).
+     */
+    private static function coreExport(\rcube_addressbook $book, string $what): \rcube_result_set
+    {
+        if ($what === 'selected') {
+            $ids = [IdCodec::contactId(IdCodec::PERSON, self::JAN), IdCodec::contactId(IdCodec::PERSON, 'anna.nowak@example.com')];
+            $book->set_page(1);
+            $book->set_pagesize(count($ids));
+            return $book->search('ID', $ids, 1, true, true);
+        }
+        if ($what === 'group') {
+            $book->set_group(IdCodec::groupId('d', IdCodec::GROUP_DEPARTMENT, 'sprzedaż'));
+        }
+        $book->set_page(1);
+        $book->set_pagesize(99999);
+        return $book->list_records(null, 0, true);
     }
 
     // ------------------------------------------------------------------ addressbooks_list
@@ -450,6 +624,8 @@ final class PluginHooksTest extends TestCase
     private function boot(string $dsn, array $options = [], string $login = self::JAN, string $task = 'mail', string $action = 'show',
         array $prefs = [], string $host = Env::IMAP_HOST, ?int $userId = 7, bool $injectConfig = true, ?\Closure $before = null): \galbridge
     {
+        // a new request: the once-per-request "unavailable" notice may be shown again
+        (new \ReflectionProperty(AddressBook::class, 'unavailableShown'))->setValue(null, false);
         $_SESSION = ['storage_host' => $host];
         $admin = $options + ['galbridge_db_dsn' => $dsn, 'imap_host' => 'tls://' . Env::IMAP_HOST . ':143'];
         $config = new \rcube_config();
@@ -479,6 +655,23 @@ final class PluginHooksTest extends TestCase
             public function show_message($message, $type = 'notice', $vars = null, $override = true, $timeout = 0): void
             {
                 $this->messages[] = [(string) $message, (string) $type, $vars];
+            }
+
+            /** @var list<array{0: string, 1: list<string>}> */
+            public array $exits = [];
+
+            /**
+             * rcube_output::sendExit() sends headers and the body and ends the request: recorded here,
+             * and the request is ended with an exception.
+             *
+             * @param string       $body
+             * @param list<string> $headers
+             */
+            #[\Override]
+            public function sendExit($body = '', $headers = [])
+            {
+                $this->exits[] = [(string) $body, (array) $headers];
+                throw new \LogicException('sendExit');
             }
         };
 

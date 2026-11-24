@@ -45,6 +45,9 @@ final class ViewerResolver
     /** @var false|null|Viewer per-request memo (false = not resolved yet) */
     private Viewer|false|null $memo = false;
 
+    /** the last good Viewer of this session after its TTL expired (advertising during an outage only) */
+    private ?Viewer $stale = null;
+
     private string $status = 'unresolved';
 
     /**
@@ -116,7 +119,10 @@ final class ViewerResolver
         $mailHost = self::normaliseHost($this->mailHost);
         if (!in_array($storage, $allowed, true) || !in_array($mailHost, $allowed, true)) {
             $this->status = 'host_mismatch';
-            Log::warning('viewer', 'host_mismatch: session IMAP host is not an allowed directory host');
+            // server names, not personal data: what the administrator needs for galbridge_imap_hosts
+            Log::once('warning', 'viewer', 'host_mismatch', 'session IMAP host is not an allowed directory host', [
+                'host' => $storage, 'mail_host' => $mailHost, 'allowed' => implode(' ', $allowed),
+            ]);
             return $this->memo = null;
         }
 
@@ -135,11 +141,14 @@ final class ViewerResolver
             && ($cache['login'] ?? null) === $login
             && ($cache['host'] ?? null) === $storage
             && ($cache['fp'] ?? null) === $fingerprint
-            && is_int($cache['at'] ?? null) && time() - $cache['at'] < $ttl
+            && is_int($cache['at'] ?? null)
             && is_string($cache['status'] ?? null)) {
-            $this->status = $cache['status'];
             $viewer = is_array($cache['viewer'] ?? null) ? Viewer::fromArray($cache['viewer']) : null;
-            return $this->memo = ($this->status === 'ok' ? $viewer : null);
+            if (time() - $cache['at'] < $ttl) {
+                $this->status = $cache['status'];
+                return $this->memo = ($this->status === 'ok' ? $viewer : null);
+            }
+            $this->stale = $cache['status'] === 'ok' ? $viewer : null;
         }
 
         try {
@@ -171,6 +180,16 @@ final class ViewerResolver
     }
 
     /**
+     * The expired Viewer of this session (same user, login, host and configuration), available only
+     * after resolve() failed with a database error: the books can stay listed (answering "directory
+     * unavailable") instead of silently disappearing. Never used to read directory data.
+     */
+    public function staleViewer(): ?Viewer
+    {
+        return in_array($this->status, ['db_down', 'db_error'], true) ? $this->stale : null;
+    }
+
+    /**
      * Look a (normalised) login up in vmail: probe, home domain, address set. No IMAP-host binding
      * and no caching - resolve() adds both; bin/galbridge.sh diag --user uses this directly.
      *
@@ -187,20 +206,13 @@ final class ViewerResolver
             return null;
         }
 
+        $missing = Schema::missingRequired($this->config, $columns);
+        if ($missing !== []) {
+            $this->status = 'column_missing';
+            Log::once('error', 'schema', 'column_missing', 'required vmail columns not readable: ' . implode(', ', $missing) . ' (see bin/galbridge.sh diag)');
+            return null;
+        }
         $hideExpired = $this->config->bool('galbridge_hide_expired');
-        $required = ['mailbox' => ['username', 'domain', 'active'], 'domain' => ['domain', 'active', 'backupmx'], 'forwardings' => ['address', 'forwarding', 'is_alias', 'active']];
-        if ($hideExpired) {
-            $required['mailbox'][] = 'expired';
-            $required['domain'][] = 'expired';
-        }
-        foreach ($required as $table => $cols) {
-            $missing = array_diff($cols, $columns[$table] ?? []);
-            if ($missing !== []) {
-                $this->status = 'column_missing';
-                Log::once('error', 'schema', 'column_missing', 'required vmail columns not readable: ' . $table . '.' . implode(', ' . $table . '.', $missing) . ' (see bin/galbridge.sh diag)');
-                return null;
-            }
-        }
 
         $sql = 'SELECT m.username, m.`domain` FROM `mailbox` m JOIN `domain` d ON d.`domain` = m.`domain`'
             . ' WHERE m.username = ? AND m.active = 1 AND d.active = 1 AND d.backupmx = 0';

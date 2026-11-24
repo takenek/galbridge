@@ -22,6 +22,8 @@
 -- Grants are additive; re-running this file is harmless. Drop what you do not use.
 
 CREATE USER IF NOT EXISTS 'galbridge'@'localhost' IDENTIFIED BY 'CHANGE_ME_RANDOM_PASSWORD';
+-- (re)set the password, so re-running a freshly generated file always matches its DSN
+ALTER USER 'galbridge'@'localhost' IDENTIFIED BY 'CHANGE_ME_RANDOM_PASSWORD';
 
 -- MariaDB only (MySQL 8 has no per-user statement time; the plugin also sets a session limit):
 -- ALTER USER 'galbridge'@'localhost' WITH MAX_STATEMENT_TIME 5 MAX_USER_CONNECTIONS 25;
@@ -40,7 +42,9 @@ GRANT SELECT (address, owner) ON vmail.maillist_owners TO 'galbridge'@'localhost
 -- Optional fields (galbridge_fields). Grant only what you enable; the organization field needs no
 -- column (it comes from galbridge_organizations).
 GRANT SELECT (department) ON vmail.mailbox TO 'galbridge'@'localhost';
--- Columns added by iRedMail 1.7.3 (update/1.7.3/vmail.*): first name, surname, phones, birthday.
--- On a server upgraded without that update these GRANTs fail ("Unknown column"): apply the update or
--- leave them out - GAL Bridge then works with fewer fields (bin/galbridge.sh diag lists them).
-GRANT SELECT (first_name, last_name, telephone, mobile, birthday) ON vmail.mailbox TO 'galbridge'@'localhost';
+-- Columns added by iRedMail 1.7.3 (update/1.7.3/vmail.*). On a server upgraded without that update
+-- these GRANTs fail ("Unknown column"): apply the update or leave them out - GAL Bridge then works with
+-- fewer fields (bin/galbridge.sh diag lists them). First name and surname are default fields:
+GRANT SELECT (first_name, last_name) ON vmail.mailbox TO 'galbridge'@'localhost';
+-- Personal data, only if you enable the fields phone / mobile / birthday in galbridge_fields:
+-- GRANT SELECT (telephone, mobile, birthday) ON vmail.mailbox TO 'galbridge'@'localhost';

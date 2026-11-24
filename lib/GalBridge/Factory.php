@@ -24,6 +24,7 @@ use GalBridge\Directory\Limits;
 use GalBridge\Directory\QueryBuilder;
 use GalBridge\Directory\RecordMapper;
 use GalBridge\Directory\Repository;
+use GalBridge\Directory\Schema;
 use GalBridge\Directory\Viewer;
 use GalBridge\Directory\ViewerResolver;
 use GalBridge\Exception\GalBridgeException;
@@ -37,6 +38,9 @@ final class Factory
 {
     /** @var null|array<string, BookDefinition> */
     private ?array $books = null;
+
+    /** books listed from the expired Viewer during a database outage (they answer "unavailable") */
+    private bool $unavailable = false;
 
     /** @var callable(string): string */
     private $label;
@@ -78,6 +82,12 @@ final class Factory
             return $this->books;
         }
         $viewer = $this->viewer();
+        if ($viewer === null && Entitlements::enabledIds($this->config) !== []) {
+            // database outage: keep listing the books this session had, answering "unavailable",
+            // instead of letting them disappear silently (computed without touching the database)
+            $viewer = $this->resolver->staleViewer();
+            $this->unavailable = $viewer !== null;
+        }
         return $this->books = $viewer === null ? [] : Entitlements::books($viewer, $this->config, $this->label);
     }
 
@@ -89,6 +99,14 @@ final class Factory
     {
         $book = $this->books()[$id] ?? null;
         $instance = null;
+        if ($book !== null && $this->unavailable) {
+            $notify = $this->notify;
+            return new DeniedBook($book->name, $notify === null ? null : static function () use ($notify): void {
+                if (AddressBook::claimUnavailableNotice()) {
+                    $notify('unavailable', []);
+                }
+            });
+        }
         if ($book !== null) {
             try {
                 $instance = $this->addressBook($book);
@@ -111,15 +129,21 @@ final class Factory
      */
     public function grouping(BookDefinition $book): string
     {
+        $viewer = $this->viewer() ?? $this->resolver->staleViewer();
+        return self::effectiveGrouping($book, $viewer === null ? null : FieldMap::fromConfig($this->config, $viewer));
+    }
+
+    /**
+     * The grouping a book really has (also used by bin/galbridge.sh diag --user).
+     */
+    public static function effectiveGrouping(BookDefinition $book, ?FieldMap $fields): string
+    {
         if ($book->grouping === 'none' || $book->searchonly !== false) {
             return 'none';
         }
-        if ($book->grouping === 'department') {
-            $viewer = $this->viewer();
-            if ($viewer === null || !FieldMap::fromConfig($this->config, $viewer)->has('department')) {
-                Log::once('warning', 'groups', 'grouping_disabled', 'department groups need the department field', ['book' => $book->id]);
-                return 'none';
-            }
+        if ($book->grouping === 'department' && ($fields === null || !$fields->has('department'))) {
+            Log::once('warning', 'groups', 'grouping_disabled', 'department groups need the department field', ['book' => $book->id]);
+            return 'none';
         }
         return $book->grouping;
     }
@@ -139,51 +163,25 @@ final class Factory
             return null;
         }
         $config = $this->config;
-        $hideExpired = $config->bool('galbridge_hide_expired');
-        $required = ['mailbox' => ['username', 'name', 'domain', 'active', 'enabledeliver'], 'domain' => ['domain', 'active', 'backupmx']];
-        if ($hideExpired) {
-            $required['mailbox'][] = 'expired';
-            $required['domain'][] = 'expired';
-        }
-        foreach ($required as $table => $cols) {
-            foreach ($cols as $col) {
-                if (!$viewer->hasColumn($table, $col)) {
-                    Log::once('error', 'schema', 'column_missing', 'required vmail column not readable: ' . $table . '.' . $col . ' (see bin/galbridge.sh diag)');
-                    return null;
-                }
-            }
+        $missing = Schema::missingRequired($config, $viewer->columns);
+        if ($missing !== []) {
+            Log::once('error', 'schema', 'column_missing', 'required vmail columns not readable: ' . implode(', ', $missing) . ' (see bin/galbridge.sh diag)');
+            return null;
         }
 
         $fields = FieldMap::fromConfig($config, $viewer);
-        $missing = $fields->missing($config->fields());
-        if ($missing !== []) {
-            Log::once('warning', 'schema', 'field_unavailable', 'configured fields unavailable (missing or not granted columns): ' . implode(', ', $missing));
+        $missingFields = $fields->missing($config->fields());
+        if ($missingFields !== []) {
+            Log::once('warning', 'schema', 'field_unavailable', 'configured fields unavailable (missing or not granted columns): ' . implode(', ', $missingFields));
         }
 
         $connection = ($this->connection)();
-        $hidden = $config->hiddenAddresses() ?? [];
-        $localparts = $config->hiddenLocalparts() ?? [];
-        $queries = new QueryBuilder(
-            driver: $connection->driver(),
-            book: $book,
-            viewer: $viewer,
-            fields: $fields,
-            hideExpired: $hideExpired,
-            now: gmdate('Y-m-d H:i:s'),
-            hiddenAddresses: $hidden,
-            hiddenLocalparts: $localparts,
-            visibilityColumn: (string) $config->visibilityColumn(),
-            includeAliases: $config->bool('galbridge_include_aliases'),
-            includeLists: $config->bool('galbridge_include_mailing_lists'),
-            listPolicy: $config->choice('galbridge_list_policy', Config::LIST_POLICIES),
-            minLength: $config->int('galbridge_min_search_length', 1, 10),
-            maxLength: $config->int('galbridge_max_search_length', 16, 255),
-        );
+        $queries = QueryBuilder::forBook($config, $connection->driver(), $book, $viewer, $fields);
         $limits = Limits::fromConfig($config);
         $repository = new Repository(
             $connection,
             $queries,
-            new RecordMapper($book, $fields, $hidden, $localparts),
+            new RecordMapper($book, $fields, $queries->hiddenAddresses(), $queries->hiddenLocalparts()),
             $fields,
             $this->grouping($book),
             $limits->maxGroups,

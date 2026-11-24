@@ -23,8 +23,14 @@ use GalBridge\Config;
  */
 final class Limits
 {
+    /** absolute upper bound of a normal page (DoS bound, independent of core settings) */
+    public const HARD_PAGE_CAP = 1000;
+
     public function __construct(
-        /** largest page size Roundcube's own lists ever ask for (core max_pagesize) */
+        /**
+         * largest page size Roundcube's own lists use: max(core max_pagesize, addressbook_pagesize),
+         * bounded by HARD_PAGE_CAP (core clamps addressbook_pagesize only when a user saves it)
+         */
         public readonly int $corePageCap,
         public readonly int $maxIds,
         /** members of one group expansion: min(galbridge_max_group_members, core max_group_members) */
@@ -42,13 +48,17 @@ final class Limits
     {
         $corePageCap = $config->get('max_pagesize');
         $corePageCap = is_numeric($corePageCap) && (int) $corePageCap > 0 ? (int) $corePageCap : 200;
+        $listSize = $config->get('addressbook_pagesize');
+        if (is_numeric($listSize) && (int) $listSize > $corePageCap) {
+            $corePageCap = (int) $listSize;
+        }
         $groupCap = $config->int('galbridge_max_group_members', 1, 100000);
         $coreGroup = $config->get('max_group_members');
         if (is_numeric($coreGroup) && (int) $coreGroup > 0) {
             $groupCap = min($groupCap, (int) $coreGroup);
         }
         return new self(
-            corePageCap: max(10, min($corePageCap, 1000)),
+            corePageCap: max(10, min($corePageCap, self::HARD_PAGE_CAP)),
             maxIds: $config->int('galbridge_max_ids', 1, 1000),
             groupCap: $groupCap,
             maxGroups: $config->int('galbridge_max_groups', 1, 500),

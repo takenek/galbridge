@@ -15,12 +15,17 @@ use GalBridge\Db\Connection;
 use GalBridge\Db\Dsn;
 use GalBridge\DeniedBook;
 use GalBridge\Directory\BookDefinition;
+use GalBridge\Directory\FieldMap;
 use GalBridge\Directory\IdCodec;
+use GalBridge\Directory\RecordMapper;
+use GalBridge\Directory\Viewer;
 use GalBridge\Directory\ViewerResolver;
 use GalBridge\Factory;
 use GalBridge\Log;
 use GalBridge\Tests\Support\Env;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\DataProviderExternal;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -48,6 +53,18 @@ final class CorePathsTest extends TestCase
     private const PERSONS = [
         'anna.nowak@example.com', 'forwarder@example.com', 'jan.kowalski@example.com', 'lukasz.slowik@example.com',
         'pct_user@example.com', 'postmaster@example.com', 'zofia.zolkiewska@example.com',
+    ];
+
+    /**
+     * contactlist_name_template values, by key (PHPUnit's process-isolation template would read a
+     * "{name}" inside a data set as one of its own placeholders)
+     */
+    private const NAME_TEMPLATES = [
+        'default' => '{name}',
+        'name and address' => '{name} ({email})',
+        'first and last name' => '{firstname} {surname}',
+        'last and first name with address' => '{surname} {firstname} <{email}>',
+        'name and department' => '{name} - {department}',
     ];
 
     /** @var array<string, mixed> */
@@ -1079,5 +1096,207 @@ final class CorePathsTest extends TestCase
         $contacts->set_group(self::sprzedaz());
         self::assertSame(['anna.nowak@example.com', self::JAN], self::addresses($contacts->list_records()));
         $contacts->close();
+    }
+
+    // ------------------------------------------------------------------ list names (compose_list_name)
+
+    /**
+     * @return array<string, array{int, string}>
+     */
+    public static function listingModes(): array
+    {
+        $out = [];
+        foreach ([0, 1, 2, 3] as $mode) {
+            $out["addressbook_name_listing {$mode}"] = [$mode, 'default'];
+        }
+        $out['contactlist_name_template: name and address, mode 0'] = [0, 'name and address'];
+        $out['contactlist_name_template: first and last name, mode 1'] = [1, 'first and last name'];
+        $out['contactlist_name_template: last and first name with address, mode 3'] = [3, 'last and first name with address'];
+        $out['contactlist_name_template: name and department, mode 2'] = [2, 'name and department'];
+        return $out;
+    }
+
+    /**
+     * rcube_addressbook::compose_list_name() - used by autocomplete, group-expand, the compose
+     * contact list and the address-book list - builds the name from first/last name in the user's
+     * modes 1-3 and applies the administrator's contactlist_name_template. In every mode a name never
+     * poses as another address (no at-sign or look-alike) and a foreign global-book entry is never
+     * shown without its "(domain)" marker (blank padding cannot push it out of view either).
+     *
+     * Each mode runs in its own process: core caches the mode and the template in static variables.
+     */
+    #[RunInSeparateProcess]
+    #[DataProvider('listingModes')]
+    public function testListNamesKeepTheProtectionsInEveryListingMode(int $mode, string $templateKey): void
+    {
+        $template = self::NAME_TEMPLATES[$templateKey];
+        \rcube::get_instance()->config->set('addressbook_name_listing', $mode);
+        \rcube::get_instance()->config->set('contactlist_name_template', $template);
+        $mapper = self::mapper(['example.com', 'example.org']);
+        $records = [
+            'home' => $mapper->person(['username' => self::JAN, 'domain' => 'example.com', 'name' => 'Jan Kowalski', 'first_name' => 'Jan', 'last_name' => 'Kowalski', 'department' => 'Sprzedaż']),
+            'home without a display name' => $mapper->person(['username' => 'anna.nowak@example.com', 'domain' => 'example.com', 'name' => '', 'first_name' => 'Anna', 'last_name' => 'Nowak']),
+            'home impersonating' => $mapper->person(['username' => 'zofia.zolkiewska@example.com', 'domain' => 'example.com', 'name' => "CEO\u{FF20}bank.example",
+                'first_name' => 'ceo@bank.example', 'last_name' => "Smith\u{FE6B}evil.example"]),
+            'foreign' => $mapper->person(['username' => 'bob@example.org', 'domain' => 'example.org', 'name' => 'Bob Smith', 'first_name' => 'Bob', 'last_name' => 'Smith', 'department' => 'Sales']),
+            'foreign padded' => $mapper->person(['username' => 'bob.smith@example.org', 'domain' => 'example.org', 'name' => 'Bob' . str_repeat("\u{2800}", 200) . str_repeat("\u{3164}", 50),
+                'first_name' => "Bob\u{FFA0}", 'last_name' => "Smith\u{00AD}\u{E0041}"]),
+            'foreign impersonating' => $mapper->person(['username' => 'eve@example.org', 'domain' => 'example.org', 'name' => '', 'first_name' => "ceo\u{FF20}bank.example", 'last_name' => 'Smith']),
+        ];
+        $names = [];
+        foreach ($records as $label => $record) {
+            self::assertIsArray($record, $label);
+            $email = $record['email:work'][0];
+            $name = \rcube_addressbook::compose_list_name($record);
+            $names[$label] = $name;
+            self::assertDoesNotMatchRegularExpression('/[\x{FF20}\x{FE6B}]|\p{Cf}|[\x{2800}\x{3164}\x{115F}\x{1160}\x{FFA0}]/u', $name, $label);
+            self::assertStringNotContainsString('@', str_replace($email, '', $name), "{$label}: an at-sign outside the entry's own address");
+            if (str_starts_with($label, 'foreign')) {
+                // either marked, or no name at all (the bare address is shown)
+                self::assertTrue(str_contains($name, ' (example.org)') || !preg_match('/Bob|Smith|ceo|Sales/', $name), "{$label}: unmarked foreign name '{$name}'");
+            }
+            // the recipient core builds from it (autocomplete, group-expand)
+            $recipient = format_email_recipient($email, $name);
+            self::assertStringNotContainsString('@', str_replace($email, '', $recipient), "{$label}: {$recipient}");
+        }
+
+        if ($template === '{name}') {
+            $expected = [
+                0 => ['Jan Kowalski', 'Anna Nowak', 'CEO', 'Bob Smith (example.org)', 'Bob (example.org)', 'ceo Smith (example.org)'],
+                1 => ['Jan Kowalski', 'Anna Nowak', 'ceo Smith', 'Bob Smith (example.org)', 'Bob (example.org)', 'ceo Smith (example.org)'],
+                2 => ['Kowalski Jan', 'Nowak Anna', 'Smith ceo', 'Bob Smith (example.org)', 'Bob (example.org)', 'ceo Smith (example.org)'],
+                3 => ['Kowalski, Jan', 'Nowak, Anna', 'Smith, ceo', 'Bob Smith (example.org)', 'Bob (example.org)', 'ceo Smith (example.org)'],
+            ][$mode];
+            self::assertSame($expected, array_values($names));
+
+            // end to end: autocomplete of the global book from the database
+            $options = ['galbridge_global_book' => true, 'galbridge_global_viewer_domains' => ['*'], 'galbridge_global_data_domains' => ['example.org']];
+            $book = self::book(Env::sqliteDsn(), $options, self::JAN, 'autocomplete', $n, BookDefinition::GLOBAL);
+            self::assertSame(['"Bob Smith (example.org)" <bob@example.org>'], array_keys(self::autocomplete($book, BookDefinition::GLOBAL, 'bob')));
+        }
+    }
+
+    /**
+     * A RecordMapper for jan's global book (home domain example.com, foreign entries marked).
+     *
+     * @param list<string> $domains
+     */
+    private static function mapper(array $domains): RecordMapper
+    {
+        $book = new BookDefinition(
+            id: BookDefinition::GLOBAL,
+            tag: 'g',
+            name: 'Global directory',
+            allDomains: false,
+            domains: $domains,
+            excludeDomains: [],
+            homeDomains: ['example.com'],
+            grouping: 'none',
+            searchonly: true,
+            autocomplete: true,
+            export: false,
+            prefixOnly: true,
+            everyWordMinLength: true,
+            maxResults: 100,
+            markForeign: true,
+            orgLabels: [],
+        );
+        $viewer = new Viewer(self::JAN, 'example.com', [self::JAN], ['mailbox' => ['username', 'name', 'domain', 'first_name', 'last_name', 'department']]);
+        return new RecordMapper($book, new FieldMap(['name', 'firstname', 'surname', 'email', 'department'], $viewer, false, false), [], []);
+    }
+
+    // ------------------------------------------------------------------ page sizes above max_pagesize
+
+    /**
+     * Core lists with addressbook_pagesize as configured (it clamps the preference to max_pagesize
+     * only when a user saves it): a normal page larger than max_pagesize must page - never take the
+     * export or group-expansion policy. Export, mailto and group-expand stay full-set requests.
+     */
+    #[DataProviderExternal(Env::class, 'engines')]
+    public function testPageSizeAboveMaxPagesizeStillPages(string $dsn): void
+    {
+        $sizes = ['max_pagesize' => 10, 'addressbook_pagesize' => 12];
+        foreach ($sizes as $name => $value) {
+            $this->core($name, $value);
+        }
+        $options = $sizes + ['galbridge_domain_export' => false, 'galbridge_max_group_members' => 1];
+
+        // addressbook/list, page 1 and 2
+        $contacts = self::contactSource(self::book($dsn, $options, self::JAN, 'list', $notices));
+        self::assertSame(12, $contacts->page_size);
+        $result = $contacts->list_records(self::cfg('contactlist_fields'));
+        self::assertSame(13, $result->count);
+        self::assertSame(0, $result->first);
+        self::assertCount(12, self::records($result), 'a page, not the whole book');
+        self::assertSame([], $notices, 'no export refusal while browsing');
+        self::assertNull($contacts->get_error());
+        self::assertEquals(2, ceil($result->count / 12), 'pagecount');
+        $_GET['_page'] = '2';
+        $contacts = self::contactSource(self::book($dsn, $options, self::JAN, 'list', $notices));
+        $result = $contacts->list_records(self::cfg('contactlist_fields'));
+        self::assertSame(12, $result->first);
+        self::assertCount(1, self::records($result));
+        unset($_GET['_page']);
+        $_SESSION['page'] = 1;
+
+        // browsing a group above galbridge_max_group_members: listed, not refused as an expansion
+        $_GET['_gid'] = self::sprzedaz();
+        $contacts = self::contactSource(self::book($dsn, $options, self::JAN, 'list', $notices));
+        self::assertSame(['anna.nowak@example.com', self::JAN], self::addresses($contacts->list_records(self::cfg('contactlist_fields'))));
+        self::assertSame([], $notices, 'viewing a group is not expanding it');
+        unset($_GET['_gid']);
+
+        // mail/list-contacts (compose): the same page size
+        $contacts = self::book($dsn, $options, self::JAN, 'list-contacts', $notices);
+        $contacts->set_pagesize(self::cfg('addressbook_pagesize'));
+        $contacts->set_page(1);
+        self::assertCount(12, self::records($contacts->list_records(self::cfg('contactlist_fields'))));
+        self::assertSame([], $notices);
+
+        // the export is still a whole-book request (refused here: export is off)
+        $export = self::contactSource(self::book($dsn, $options, self::JAN, 'export', $notices));
+        $export->set_page(1);
+        $export->set_pagesize(99999);
+        self::assertSame([], self::records($export->list_records(null, 0, true)));
+        self::assertSame(['exportdisabled'], self::labels($notices));
+
+        // mailto and group-expand are recipient sets by action, whatever page size they use
+        $_POST = ['_gid' => self::sprzedaz(), '_source' => self::SOURCE];
+        $_REQUEST = $_POST;
+        self::assertSame([], self::mailto(self::book($dsn, $options, self::JAN, 'mailto', $notices), 12));
+        self::assertSame(['grouptoolarge'], self::labels($notices));
+        $_POST = $_REQUEST = [];
+        $book = self::book($dsn, $options, self::JAN, 'group-expand', $notices);
+        $book->set_group(self::sprzedaz());
+        $book->set_pagesize(12);
+        self::assertSame([], self::records($book->list_records()));
+        self::assertSame(['grouptoolarge'], self::labels($notices));
+    }
+
+    // ------------------------------------------------------------------ autocomplete switch
+
+    /**
+     * galbridge_domain_autocomplete = false covers groups too: an autocomplete request naming the
+     * book (core accepts any _source) gets neither contacts nor groups; other actions keep the groups.
+     */
+    #[DataProviderExternal(Env::class, 'engines')]
+    public function testAutocompleteSwitchAlsoHidesGroups(string $dsn): void
+    {
+        $off = ['galbridge_domain_autocomplete' => false];
+        $mode = (int) self::cfg('addressbook_search_mode') | \rcube_addressbook::SEARCH_GROUPS;
+
+        $book = self::book($dsn, $off, self::JAN, 'autocomplete');
+        self::assertTrue($book->groups, 'the book still has groups');
+        self::assertSame([], $book->list_groups('sprz', $mode));
+        self::assertSame([], $book->list_groups());
+        self::assertSame([], self::autocomplete(self::book($dsn, $off, self::JAN, 'autocomplete'), self::SOURCE, 'sprz'));
+        self::assertSame([], self::autocomplete(self::book($dsn, $off, self::JAN, 'autocomplete'), self::SOURCE, 'kowal'));
+
+        // the same book outside autocomplete: groups as usual
+        self::assertSame([self::sprzedaz()], array_column(self::book($dsn, $off, self::JAN, 'search-contacts')->list_groups('sprz', $mode), 'ID'));
+        self::assertCount(3, self::book($dsn, $off)->list_groups());
+
+        // autocomplete on: the group is offered
+        self::assertArrayHasKey('Sprzedaż', self::autocomplete(self::book($dsn, [], self::JAN, 'autocomplete'), self::SOURCE, 'sprz'));
     }
 }

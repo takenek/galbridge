@@ -49,8 +49,8 @@ chmod 0700 "$RUN"
 
 # plugin link (a stale link or an old copy of the plugin is replaced)
 if [ -L "$RC/plugins/galbridge" ] || [ ! -e "$RC/plugins/galbridge" ]; then
-  rm -f "$RC/plugins/galbridge"
-  ln -s "$PLUGIN" "$RC/plugins/galbridge"
+  # atomic replacement (-n: never follow an existing link into the repository)
+  ln -sfn "$PLUGIN" "$RC/plugins/galbridge"
 else
   echo "$RC/plugins/galbridge exists and is not a symbolic link; not replaced" >&2; exit 1
 fi

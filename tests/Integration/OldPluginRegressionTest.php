@@ -541,11 +541,13 @@ final class OldPluginRegressionTest extends TestCase
             foreach (['DEFINER', 'dblink', 'CREATE VIEW', 'global_addressbook', 'GRANT ALL', 'SELECT *', 'password)', ' password,'] as $forbidden) {
                 self::assertStringNotContainsStringIgnoringCase($forbidden, $sql, $flavour . ': ' . $forbidden);
             }
-            self::assertSame(1, preg_match_all("/(?:IDENTIFIED BY|PASSWORD) '([^']*)'/", $sql, $m), $flavour);
-            self::assertSame(['CHANGE_ME_RANDOM_PASSWORD'], $m[1], $flavour . ': only a placeholder password');
+            self::assertGreaterThanOrEqual(1, preg_match_all("/(?:IDENTIFIED BY|PASSWORD) '([^']*)'/", $sql, $m), $flavour);
+            self::assertSame(['CHANGE_ME_RANDOM_PASSWORD'], array_values(array_unique($m[1])), $flavour . ': only a placeholder password');
             self::assertMatchesRegularExpression('/GRANT SELECT \(username, name, domain, active, enabledeliver, expired\) ON (?:vmail\.)?mailbox/', $sql);
-            // the iRedMail 1.7.3 columns are a separate statement, so a server without them can skip it
-            self::assertMatchesRegularExpression('/GRANT SELECT \(first_name, last_name, telephone, mobile, birthday\) ON (?:vmail\.)?mailbox/', $sql);
+            // the iRedMail 1.7.3 columns are a separate statement, so a server without them can skip it;
+            // the personal-data columns are not granted unless the administrator enables those fields
+            self::assertMatchesRegularExpression('/GRANT SELECT \(first_name, last_name\) ON (?:vmail\.)?mailbox/', $sql);
+            self::assertStringNotContainsString('telephone', $sql, $flavour . ': phone/mobile/birthday are commented out by default');
         }
 
         // iRedMail's own broad roles (the old PostgreSQL template told admins to use "vmail") and a
@@ -684,5 +686,85 @@ final class OldPluginRegressionTest extends TestCase
         $book = self::book($dsn);
         $book->set_pagesize(50);
         self::assertSame(13, $book->list_records()->count);
+    }
+
+    /**
+     * tests/e2e/matrix.sh covers the supported PHP branches x both iRedMail SQL editions, and a
+     * combination that cannot run is a failure, never a silent skip (run here on a copy of the script
+     * with no Roundcube present: every combination is MISSING and the matrix fails).
+     */
+    public function testE2eMatrixCountsMissingCombinationsAsFailures(): void
+    {
+        $script = dirname(__DIR__) . '/e2e/matrix.sh';
+        $text = (string) file_get_contents($script);
+        self::assertSame(1, preg_match('/^runs=\((.*?)^\)/ms', $text, $m));
+        preg_match_all('/^\s*"([^"]+)"/m', $m[1], $entries);
+        $expected = [];
+        foreach (['php8.1', 'php8.4', 'php8.5'] as $php) {
+            foreach (['mysql', 'pgsql'] as $db) {
+                $expected[] = "1.7.7 {$php} {$db}";
+            }
+        }
+        self::assertEqualsCanonicalizing($expected, $entries[1]);
+
+        $dir = sys_get_temp_dir() . '/galbridge-matrix-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        mkdir($dir, 0o700);
+        try {
+            copy($script, $dir . '/matrix.sh');
+            $proc = proc_open(['bash', $dir . '/matrix.sh', $dir . '/no-roundcube-here'], [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+            self::assertIsResource($proc);
+            $out = (string) stream_get_contents($pipes[1]);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            $code = proc_close($proc);
+            self::assertNotSame(0, $code, $out);
+            self::assertSame(6, substr_count($out, 'MISSING ' . $dir . '/no-roundcube-here/1.7.7 (not present)'), $out);
+            self::assertStringContainsString('MATRIX: 0/6 combinations green', $out);
+        } finally {
+            self::rmTree($dir);
+        }
+    }
+
+    private static function rmTree(string $path): void
+    {
+        if (is_link($path) || is_file($path)) {
+            @unlink($path);
+            return;
+        }
+        foreach (is_dir($path) ? (scandir($path) ?: []) : [] as $entry) {
+            if ($entry !== '.' && $entry !== '..') {
+                self::rmTree($path . '/' . $entry);
+            }
+        }
+        @rmdir($path);
+    }
+
+    /**
+     * The E2E setup replaces the plugin link atomically (a concurrent run must never create a
+     * galbridge -> galbridge link inside the repository); the fixture directory documents itself.
+     */
+    public function testE2eSetupAndFixtureDocumentation(): void
+    {
+        $root = dirname(__DIR__, 2);
+        $setup = (string) file_get_contents($root . '/tests/e2e/setup.sh');
+        self::assertStringContainsString('ln -sfn "$PLUGIN" "$RC/plugins/galbridge"', $setup);
+        self::assertStringNotContainsString('rm -f "$RC/plugins/galbridge"', $setup);
+        self::assertDoesNotMatchRegularExpression('/\bln -s "\$PLUGIN"/', $setup, 'never ln -s without -n onto an existing link');
+        self::assertFileDoesNotExist($root . '/galbridge', 'no self-referential link in the repository');
+
+        self::assertStringContainsString('tests/fixtures/vmail/README.txt', (string) file_get_contents($root . '/.gitignore'));
+        $readme = (string) file_get_contents($root . '/tests/fixtures/vmail/README.txt');
+        foreach (['TEST-ONLY', 'TEST DATA', 'CANARIES', 'testonly-ro', 'load.sh', 'iRedMail 1.8.11'] as $text) {
+            self::assertStringContainsString($text, $readme);
+        }
+
+        // the test role gets the commented-out personal-data grants (the suites exercise every field)
+        $load = (string) file_get_contents($root . '/tests/fixtures/vmail/load.sh');
+        self::assertStringContainsString('s/^-- GRANT /GRANT /', $load);
+        foreach (['grants.mysql.sql', 'grants.postgres.sql'] as $template) {
+            preg_match_all('/^-- (GRANT .*)$/m', (string) file_get_contents($root . '/SQL/' . $template), $m);
+            self::assertCount(1, $m[1], $template);
+            self::assertStringContainsString('(telephone, mobile, birthday)', $m[1][0], $template);
+        }
     }
 }

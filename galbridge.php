@@ -44,6 +44,12 @@ class galbridge extends rcube_plugin
 
     private ?Connection $connection = null;
 
+    /** a GAL Bridge book refused the current export (a download cannot carry a message) */
+    private bool $exportRefused = false;
+
+    /** refusal labels that can occur during contacts/export */
+    private const EXPORT_REFUSALS = ['exportdisabled', 'exporttoolarge', 'grouptoolarge', 'toomanyids'];
+
     #[\Override]
     public function init(): void
     {
@@ -61,9 +67,13 @@ class galbridge extends rcube_plugin
         $this->add_hook('addressbooks_list', [$this, 'addressbooks_list']);
         $this->add_hook('addressbook_get', [$this, 'addressbook_get']);
 
-        // the only readers of these two options; never touch the database here
-        if ($this->rc->task === 'mail' && in_array((string) $this->rc->action, ['compose', 'autocomplete'], true)) {
+        // the only readers of these two options (compose and the Redirect dialog render recipient
+        // inputs through rcmail_sendmail::compose_headers); never touch the database here
+        if ($this->rc->task === 'mail' && in_array((string) $this->rc->action, ['compose', 'bounce', 'autocomplete'], true)) {
             $this->wireAutocomplete();
+        }
+        if ($this->rc->task === 'addressbook' && (string) $this->rc->action === 'export') {
+            $this->add_hook('addressbook_export', [$this, 'addressbook_export']);
         }
     }
 
@@ -138,6 +148,18 @@ class galbridge extends rcube_plugin
         return $p;
     }
 
+    /**
+     * A refused export must not download an empty contacts.vcf: answer 204 No Content, so the browser
+     * stays on the page and saves nothing (an export is a download - no message can be shown).
+     */
+    public function addressbook_export(array $p): array
+    {
+        if ($this->exportRefused && $this->rc->output instanceof rcube_output) {
+            $this->rc->output->sendExit('', ['HTTP/1.1 204 No Content']);
+        }
+        return $p;
+    }
+
     // ------------------------------------------------------------------ internals
 
     private function factory(): ?Factory
@@ -174,7 +196,11 @@ class galbridge extends rcube_plugin
             (string) ($_SESSION['storage_host'] ?? ''),
         );
         $rc = $this->rc;
-        $notify = static function (string $label, array $vars) use ($rc): void {
+        $notify = function (string $label, array $vars) use ($rc): void {
+            if ((string) $rc->action === 'export' && in_array($label, self::EXPORT_REFUSALS, true)) {
+                $this->exportRefused = true;
+                return;
+            }
             if ($rc->output instanceof rcmail_output_html || $rc->output instanceof rcmail_output_json) {
                 $rc->output->show_message('galbridge.' . $label, 'warning', $vars);
             }

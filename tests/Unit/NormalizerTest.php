@@ -546,6 +546,107 @@ final class NormalizerTest extends TestCase
         self::assertSame(str_repeat('é', 100), Normalizer::displayText(str_repeat("e\u{0301}", 100)));
     }
 
+    /**
+     * @return iterable<string, array{0: int}>
+     */
+    public static function formatCharacters(): iterable
+    {
+        // \p{Cf} beyond the explicit INVISIBLE list: soft hyphen, Arabic/Syriac format marks, invisible
+        // operators, interlinear annotation, Kaithi number sign, tag characters (incl. CANCEL TAG)
+        foreach ([0x00AD, 0x0600, 0x06DD, 0x070F, 0x08E2, 0x2061, 0x2064, 0xFFF9, 0xFFFB, 0x110BD, 0xE0001, 0xE0041, 0xE005A, 0xE007F] as $cp) {
+            yield sprintf('U+%04X', $cp) => [$cp];
+        }
+    }
+
+    /**
+     * Format characters (\p{Cf}) are invisible in a recipient bubble: removed, never kept.
+     */
+    #[DataProvider('formatCharacters')]
+    public function testDisplayTextRemovesFormatCharacters(int $codePoint): void
+    {
+        $char = (string) mb_chr($codePoint, 'UTF-8');
+        self::assertSame(1, preg_match('/^\p{Cf}$/u', $char), 'the fixture is a format character');
+        $out = Normalizer::displayText('Jan' . $char . 'Kowalski' . str_repeat($char, 20));
+        self::assertStringNotContainsString($char, $out);
+        self::assertSame('Jan Kowalski', $out);
+    }
+
+    /**
+     * @return iterable<string, array{0: int}>
+     */
+    public static function blankCharacters(): iterable
+    {
+        $set = [
+            // render blank without being whitespace: Braille blank, Hangul fillers
+            0x2800, 0x3164, 0x115F, 0x1160, 0xFFA0,
+            // \p{Z}: space and line separators beyond ASCII
+            0x00A0, 0x1680, 0x2000, 0x2003, 0x2007, 0x2009, 0x200A, 0x202F, 0x205F, 0x3000,
+        ];
+        foreach ($set as $cp) {
+            yield sprintf('U+%04X', $cp) => [$cp];
+        }
+    }
+
+    /**
+     * Blank look-alikes and separators collapse like a space: padding a display name with them cannot
+     * push a suffix such as the foreign-domain marker out of view.
+     */
+    #[DataProvider('blankCharacters')]
+    public function testDisplayTextCollapsesBlankLookAlikes(int $codePoint): void
+    {
+        $char = (string) mb_chr($codePoint, 'UTF-8');
+        self::assertSame('Jan Kowalski', Normalizer::displayText(str_repeat($char, 5) . 'Jan' . str_repeat($char, 60) . 'Kowalski' . str_repeat($char, 200)));
+        self::assertSame('Bob', Normalizer::displayText('Bob' . str_repeat($char, 300)), 'trailing padding is trimmed');
+        // the padding never counts towards the length cap
+        self::assertSame('Jan ' . str_repeat('x', 20), Normalizer::displayText('Jan' . str_repeat($char, 500) . str_repeat('x', 20)));
+    }
+
+    public function testDisplayTextMixedPaddingIsOneSpace(): void
+    {
+        $padding = "\u{2800}\u{3164}\u{00AD}\u{115F}\u{1160}\u{FFA0}\u{00A0}\u{3000}\u{E0020}\u{200B}\t ";
+        $out = Normalizer::displayText('Bob' . str_repeat($padding, 30) . 'Smith' . str_repeat($padding, 30));
+        self::assertSame('Bob Smith', $out);
+        self::assertSame($out, Normalizer::displayText($out), 'idempotent');
+    }
+
+    // ------------------------------------------------------------------ containsAt()
+
+    /**
+     * @return iterable<string, array{0: string, 1: bool}>
+     */
+    public static function atSigns(): iterable
+    {
+        yield 'ASCII at' => ['ceo@bank.example', true];
+        yield 'FULLWIDTH COMMERCIAL AT U+FF20' => ["ceo\u{FF20}bank.example", true];
+        yield 'SMALL COMMERCIAL AT U+FE6B' => ["ceo\u{FE6B}bank.example", true];
+        yield 'at sign alone' => ['@', true];
+        yield 'leading fullwidth at' => ["\u{FF20}", true];
+        yield 'plain name' => ['Jan Kowalski', false];
+        yield 'empty' => ['', false];
+        yield 'circled latin A is not an at sign' => ["\u{24B6}cme", false];
+        yield 'copyright sign' => ["\u{00A9} Acme", false];
+        yield 'domain without at' => ['bank.example', false];
+    }
+
+    #[DataProvider('atSigns')]
+    public function testContainsAtRecognisesEveryAtSign(string $value, bool $expected): void
+    {
+        self::assertSame($expected, Normalizer::containsAt($value));
+    }
+
+    /**
+     * The look-alikes survive displayText (they are ordinary symbols), so the anti-impersonation rule
+     * must recognise them after sanitising.
+     */
+    public function testAtLookAlikesSurviveDisplayTextAndAreRecognised(): void
+    {
+        foreach (["\u{FF20}", "\u{FE6B}"] as $at) {
+            $text = Normalizer::displayText('ceo' . $at . 'bank.example');
+            self::assertStringContainsString($at, $text);
+            self::assertTrue(Normalizer::containsAt($text));
+        }
+    }
+
     public function testDisplayTextOutputIsSafeForRecipientHeaders(): void
     {
         $hostile = "Eve\u{202E}lp.amrif@evil\r\n\"Admin\" <admin@firma.pl>\\\u{200B}\x1B[31m\u{FEFF}";

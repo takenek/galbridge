@@ -20,14 +20,14 @@ namespace GalBridge\Exception;
  * Base exception of the plugin.
  *
  * Every exception carries two independent messages:
- *  - a reason code (also a localization label without the "galbridge." prefix) that is safe to show
- *    to the end user and to write to the normal log,
- *  - an internal message for the administrator debug log (never shown to the user).
+ *  - an internal reason code ('config_invalid', 'db_down', 'db_error', ...) that is safe for the normal
+ *    log; it is not a localization label (users see 'galbridge.unavailable' at most),
+ *  - an internal message for the administrator log (never shown to the user; never a secret).
  */
 class GalBridgeException extends \RuntimeException
 {
     /**
-     * @param string $reason   Reason code / localization label (plugin domain)
+     * @param string $reason   Internal reason code (safe for the normal log)
      * @param string $internal Detailed message for the debug log (must not contain secrets)
      */
     public function __construct(private readonly string $reason, string $internal = '', ?\Throwable $previous = null)

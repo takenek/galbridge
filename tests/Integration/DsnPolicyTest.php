@@ -6,6 +6,7 @@ namespace GalBridge\Tests\Integration;
 
 use GalBridge\AddressBook;
 use GalBridge\Config;
+use GalBridge\Db\Connection;
 use GalBridge\Db\Dsn;
 use GalBridge\DeniedBook;
 use GalBridge\Directory\BookDefinition;
@@ -13,6 +14,7 @@ use GalBridge\Exception\GalBridgeException;
 use GalBridge\Log;
 use GalBridge\Tests\Support\Env;
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\DataProviderExternal;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -604,6 +606,89 @@ final class DsnPolicyTest extends TestCase
         self::assertStringNotContainsString('db_error', $log);
     }
 
+    /**
+     * forwardings.domain is required only for galbridge_user_aliases (the display aliases join their
+     * domain): with the option a role without it is column_missing - never a db_error on the first
+     * listing - and without the option the same role works.
+     */
+    #[DataProvider('serverEngines')]
+    public function testForwardingsDomainIsRequiredOnlyForUserAliases(string $dsn): void
+    {
+        if ($dsn === '') {
+            self::markTestSkipped('needs GALBRIDGE_TEST_MYSQL_DSN / GALBRIDGE_TEST_PGSQL_DSN');
+        }
+        $columns = self::requiredColumns();
+        $columns['forwardings'] = array_values(array_diff($columns['forwardings'], ['domain']));
+        $roleDsn = $this->createRole($dsn, 'nofd', $columns);
+
+        $factory = Env::factory(Env::config($roleDsn, ['galbridge_user_aliases' => true]), 'jan.kowalski@example.com');
+        self::assertSame([], $factory->books());
+        self::assertSame('column_missing', $factory->resolver()->status());
+        $book = $factory->create(BookDefinition::DOMAIN);
+        self::assertInstanceOf(DeniedBook::class, $book);
+        self::assertSame(0, $book->list_records()->count);
+        $log = implode("\n", $GLOBALS['galbridge_test_log']);
+        self::assertStringContainsString('column_missing: required vmail columns not readable: forwardings.domain', $log);
+        self::assertStringNotContainsString('db_error', $log);
+
+        $GLOBALS['galbridge_test_log'] = [];
+        Log::resetOnce();
+        $book = Env::factory(Env::config($roleDsn), 'jan.kowalski@example.com')->create(BookDefinition::DOMAIN);
+        self::assertInstanceOf(AddressBook::class, $book);
+        $book->set_pagesize(200);
+        self::assertSame(13, $book->list_records()->count);
+        self::assertStringNotContainsString('db_error', implode("\n", $GLOBALS['galbridge_test_log']));
+    }
+
+    /**
+     * The probe covers exactly the tables GAL Bridge reads (alias_domain is not one of them).
+     */
+    #[DataProviderExternal(Env::class, 'engines')]
+    public function testOnlyTheReadTablesAreProbed(string $dsn): void
+    {
+        self::assertNotContains('alias_domain', Connection::TABLES);
+        $conn = new Connection(new Dsn($dsn, Env::config($dsn)), 3);
+        $columns = $conn->visibleColumns();
+        self::assertSame(Connection::TABLES, array_keys($columns));
+        foreach (['mailbox', 'domain', 'forwardings'] as $table) {
+            self::assertNotSame([], $columns[$table], $table);
+        }
+        $conn->close();
+    }
+
+    /**
+     * Connection::lastError() keeps the sanitised reason of a failed connect for diag (a CLI run never
+     * writes Roundcube's errors log): the server's refusal, never the password.
+     */
+    #[DataProviderExternal(Env::class, 'engines')]
+    public function testConnectFailureReasonIsKeptWithoutThePassword(string $dsn): void
+    {
+        $variants = [];
+        if (str_starts_with($dsn, 'sqlite:')) {
+            $variants['unreadable file'] = ['sqlite:///' . sys_get_temp_dir() . '?mode=0600', '/unable to open/i'];
+        } else {
+            $variants['refused port'] = [(string) preg_replace('~@[^/]+/~', '@127.0.0.1:1/', $dsn, 1), '/refused|2002/i'];
+            $user = (string) (\rcube_db::parse_dsn($dsn)['username'] ?? '');
+            $variants['wrong password'] = [(string) preg_replace('~^([a-z]+://[^:]+):[^@]*@~', '$1:' . self::PASSWORD . '@', $dsn), '/' . preg_quote($user, '/') . '/'];
+        }
+        foreach ($variants as $label => [$bad, $reason]) {
+            $_SESSION = [];
+            $conn = new Connection(new Dsn($bad, Env::config($bad)), 3);
+            self::assertSame('', $conn->lastError(), $label . ': nothing before connecting');
+            try {
+                $conn->flavour();
+                self::fail($label . ': connected');
+            } catch (GalBridgeException $e) {
+                self::assertSame('db_down', $e->getReason());
+            }
+            self::assertMatchesRegularExpression($reason, $conn->lastError(), $label);
+            self::assertStringNotContainsString(self::PASSWORD, $conn->lastError(), $label);
+            self::assertStringNotContainsString('testonly-ro', $conn->lastError(), $label);
+            self::assertDoesNotMatchRegularExpression('/[\x00-\x1F]/', $conn->lastError(), $label . ': one log-safe line');
+        }
+        $_SESSION = [];
+    }
+
     // ------------------------------------------------------------------ helpers
 
     /**
@@ -656,7 +741,8 @@ final class DsnPolicyTest extends TestCase
     }
 
     /**
-     * The columns GAL Bridge cannot work without (persons, aliases, lists, accesspolicy).
+     * The columns GAL Bridge cannot work without (persons, aliases, lists, accesspolicy). alias_domain
+     * is not read (and not probed: Connection::TABLES).
      *
      * @return array<string, list<string>>
      */
@@ -665,7 +751,6 @@ final class DsnPolicyTest extends TestCase
         return [
             'mailbox' => ['username', 'name', 'domain', 'active', 'enabledeliver', 'expired'],
             'domain' => ['domain', 'active', 'backupmx', 'expired'],
-            'alias_domain' => ['alias_domain', 'target_domain', 'active'],
             'forwardings' => ['address', 'forwarding', 'domain', 'is_alias', 'is_list', 'is_maillist', 'active'],
             'alias' => ['address', 'name', 'accesspolicy', 'domain', 'active', 'expired'],
             'maillists' => ['address', 'name', 'accesspolicy', 'domain', 'active', 'expired'],

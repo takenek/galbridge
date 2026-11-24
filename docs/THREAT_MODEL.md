@@ -72,7 +72,8 @@ untouched). For our IDs it returns an `AddressBook` only when the resolved user 
 (`Entitlements::books`, a pure function of the Viewer and the administrator configuration) and the
 scope is non-empty; otherwise a `DeniedBook` (not ready, no groups, empty reads, `get_record()` null,
 never connects). `addressbooks_list` advertises entitled books only. The per-book autocomplete flag
-is enforced in `search()` for `_action=autocomplete`, because core accepts any `_source` there.
+is enforced in `search()` and `list_groups()` for `_action=autocomplete`, because core accepts any
+`_source` there and asks every source for groups as well.
 
 *Tests.* `IsolationTest`, `CorePathsTest::testEveryOwnSourceIdResolvesToAnInstance`,
 `ContractTest::testDeniedBookContract`, `EntitlementsTest::testEmptyScopeIsNotListedAndGivesADeniedBook`,
@@ -132,15 +133,18 @@ prefix.
 *Threat.* Core asks for page sizes of 999, 9999 and 99999 and passes `_page` unbounded; the old
 plugin had no LIMIT and `count()` always returned 1.
 
-*Controls.* `set_page()` ≥ 1; the page size is capped at core `max_pagesize` (clamped to 10–1000).
-A larger size on page 1 is a full-set request handled explicitly (ARCHITECTURE 11): a group without
-a filter is counted first and returned completely or refused above the expansion cap; an ID search is
-limited by `galbridge_max_ids`; a search list is capped at `galbridge_max_results` /
-`galbridge_global_max_results` with a notice; a whole-book export follows the book's export policy
-and `galbridge_max_export`. `count()` is a `COUNT` over the same root predicate inside a `LIMIT`
-subquery bounded by `galbridge_max_count`; list offsets beyond it return an empty page. All
-membership predicates are semi-joins (`EXISTS` / `IN`), so rows are unique by primary key and totals
-and paging are exact; the order is stable (sort key, address, kind).
+*Controls.* `set_page()` ≥ 1; the page size is capped at max(core `max_pagesize`,
+`addressbook_pagesize`), clamped to 10–1000 (`Limits::corePageCap`), so the page size Roundcube's own
+lists use is never mistaken for a full-set request. A larger size on page 1 is a full-set request
+handled explicitly (ARCHITECTURE 11): a group without a filter is counted first and returned
+completely or refused above the expansion cap; an ID search is limited by `galbridge_max_ids`; a
+search list is capped at `galbridge_max_results` / `galbridge_global_max_results` with a notice; a
+whole-book export follows the book's export policy and `galbridge_max_export`. A refused export
+downloads nothing (`204 No Content` from the `addressbook_export` hook) instead of an empty file.
+`count()` is a `COUNT` over the same root predicate inside a `LIMIT` subquery bounded by
+`galbridge_max_count`; list offsets beyond it return an empty page. All membership predicates are
+semi-joins (`EXISTS` / `IN`), so rows are unique by primary key and totals and paging are exact; the
+order is stable (sort key, address, kind).
 
 *Tests.* `ContractTest` (`testListRecordsPagingCountAndFirst`, `testPageAndPageSizeAreClamped`,
 `testCountHonoursScopeFilterGroupAndPage`), `CorePathsTest`
@@ -148,8 +152,8 @@ and paging are exact; the order is stable (sort key, address, kind).
 `testMailtoGroupWithCoreMaxGroupMembersIsCompleteOrRefused`, `testExportPaths`),
 `OldPluginRegressionTest::testDefect06CountIsTheRealTotalAndListsArePaged`.
 
-*Residual risk.* An export of a search result is a file download: when it is capped, the notice
-cannot be shown (README 10).
+*Residual risk.* An export is a file download: when a search-result export is capped, or an
+export is refused, no message can be shown (README 4 and 10).
 
 ### GB-07 SQL injection and engine-specific SQL errors
 
@@ -216,10 +220,12 @@ unless escaped; a book without `searchonly` can be listed completely.
 *Controls.* `galbridge_min_search_length` (2) is enforced on the server: no query unless at least
 one word reaches it (global book: every word); shorter words narrow only as word prefixes; at most 5
 words; wildcards in the input are literals. The client-side `autocomplete_min_length` is raised to
-the same value in compose, so Roundcube's JavaScript does not stop asking after an empty answer.
-Search-only books (global default; `'auto'` above `galbridge_searchonly_threshold`) list nothing
-without a search and have no groups. The global book forces prefix search and matches e-mail
-addresses from the local part, never on a domain fragment.
+the same value in compose and in the Redirect dialog (`mail/bounce`), so Roundcube's JavaScript does
+not stop asking after an empty answer. Search-only books (global default; `'auto'` above
+`galbridge_searchonly_threshold`) list nothing without a search and have no groups. The global book
+forces prefix search, matches e-mail addresses from the local part, never on a domain fragment, and
+the `organization` field only by its complete label, so a two-letter word cannot list a whole
+organization.
 
 *Tests.* `ContractTest::testEmptyTooShortAndTooLongInputNeverQueries`,
 `ContractTest::testSearchOnlyBook`, `CorePathsTest::testAutocompleteContactsAndGroups`,
@@ -256,8 +262,11 @@ life of the session.
 *Controls.* The resolved Viewer is cached in `$_SESSION['galbridge']`, bound to the user id, login,
 IMAP host and the configuration fingerprint (a hash of every effective `galbridge_*` value and
 `imap_host`), for `galbridge_scope_ttl` (300 s, 30–3600). A configuration change applies on the next
-request; a database outage is cached separately for 30 s and never as "no entitlement". Directory
-content is never cached: every list and search re-applies all visibility predicates.
+request; a database outage is cached separately for 30 s and never as "no entitlement". When the
+re-resolution of an expired Viewer fails with a database error, the expired Viewer is used only to
+keep listing the session's books as inert DeniedBooks that answer "The directory is temporarily
+unavailable."; it never reads directory data and is never written back. Directory content is never
+cached: every list and search re-applies all visibility predicates.
 
 *Tests.* `IsolationTest` (`testViewerIsCachedInTheSessionAndBoundToItsContext`,
 `testConfigurationChangeOrExpiredTtlInvalidatesTheCache`, `testNegativeDecisionsAreCachedToo`,
@@ -272,10 +281,12 @@ defaulted to `['*']` lists and grouped the global book by domain).
 
 *Controls.* Only the domain book is on by default. The global book is off; its viewer list is empty
 by default; its data list is explicit, and `'*'` needs `galbridge_global_allow_wildcard` as a
-second opt-in (`diag` warns). Deny-lists are applied after allow-lists and disable the book when
-malformed. The viewer's own domain-book scope is subtracted unless `galbridge_global_include_home`.
-Defaults: no groups (and no groups at all while search-only), search-only, prefix search, every word
-at the minimum length, result cap 100, no whole-book export, foreign entries marked `Name (domain)`.
+second opt-in (`diag` warns while it is in effect). Deny-lists are applied after allow-lists and
+disable the book when malformed. The viewer's own domain-book scope is subtracted unless
+`galbridge_global_include_home`. Defaults: no groups (and no groups at all while search-only),
+search-only, prefix search, every word at the minimum length, the `organization` field matched by
+its complete label only, result cap 100, no whole-book export, foreign entries marked
+`Name (domain)`.
 The domain book itself can be restricted per viewer domain (`galbridge_domain_viewer_domains`,
 `..._exclude`).
 
@@ -308,8 +319,10 @@ packed caches use `unserialize()`.
 
 *Controls.* By construction: GAL Bridge uses no Roundcube cache (`get_cache`, `get_cache_shared`),
 no APCu and no `unserialize()`; results are memoised only inside one request (groups and counts in
-`Repository`). The only cross-request state is the Viewer in the user's own session, bound to the
-user id (GB-12).
+`Repository`). The only cross-request state lives in the user's own session: the Viewer
+(`$_SESSION['galbridge']`, bound to the user id, GB-12), the 30-second outage memo
+(`galbridge_down_until`) and the `'auto'` search-only decision per book (`galbridge_searchonly`,
+bound to the book id and the configuration fingerprint; a boolean and a timestamp).
 
 *Tests.* `IsolationTest::testViewerIsCachedInTheSessionAndBoundToItsContext`; the absence of cache
 APIs is a property of the source.
@@ -353,8 +366,8 @@ HTML attributes and JavaScript strings without escaping.
 *Controls.* Source names are escaped with `rcube::Q()` in `addressbooks_list`. Source IDs are
 constants without `-`; contact and group IDs use `[A-Za-z0-9_]` only, so they are inert in HTML and
 JavaScript. Contact and group names are passed unescaped because core escapes them, and they are
-sanitised (`Normalizer::displayText`: control, bidi and zero-width characters and `\ " < >`
-removed). GAL Bridge renders no HTML of its own.
+sanitised (`Normalizer::displayText`: control and format characters - bidi, zero-width, soft hyphen,
+tag characters - and `\ " < >` removed). GAL Bridge renders no HTML of its own.
 
 *Tests.* `ContractTest::testSourceListingInvariants`, `ContractTest::testRecordShapeAndColtypes`,
 `NormalizerTest::testDisplayText`, `IdCodecTest`, `PluginHooksTest::testAddressbooksListEscapesTheName`,
@@ -366,11 +379,16 @@ the end-to-end suite
 *Threat.* `format_email_recipient()` does not strip CR/LF; names with bidi overrides, quotes,
 backslashes or embedded addresses can impersonate another recipient; IDN homographs.
 
-*Controls.* `RecordMapper`: names NFC-normalised, control, bidi and zero-width characters, CR/LF and
-`\ " < >` removed, capped at 128 characters; a name containing `@` is cut at the `@`; addresses are
-canonical lower-case ASCII (A-labels, no homographs) and must pass `rcube_utils::check_email()`;
-rows that fail are dropped (`row_dropped`). In the global book, entries outside the viewer's home
-domain(s) are shown as `Name (domain)` with the ASCII domain.
+*Controls.* `RecordMapper`: names NFC-normalised; control and format characters (`\p{Cf}`: bidi,
+zero-width, soft hyphen, tag characters), CR/LF and `\ " < >` removed; separators and blank-looking
+characters (U+2800, U+3164, U+115F, U+1160, U+FFA0) collapsed, so padding cannot push a marker out
+of view; capped at 128 characters. The display name **and** the first and last names (core builds
+recipient names from them for `addressbook_name_listing` 1-3 and `contactlist_name_template`) are
+cut at the first at-sign, including the look-alikes U+FF20 and U+FE6B. Addresses are canonical
+lower-case ASCII (A-labels, no homographs) and must pass `rcube_utils::check_email()`; rows that fail
+are dropped (`row_invalid`, or `row_out_of_scope` for a row outside the book's scope). In the global
+book, entries outside the viewer's home domain(s) are shown as `Name (domain)` with the ASCII domain
+and carry no first or last name, so every listing mode shows the marker.
 
 *Tests.* `NormalizerTest::testDisplayTextOutputIsSafeForRecipientHeaders`,
 `NormalizerTest::testDisplayTextRemovesInvisibleCharacters`, `LeakageTest`,
@@ -405,15 +423,18 @@ error pages could reveal schema details.
 
 *Controls.* The plugin's own `rcube_db` instance has `ignore_errors` on; a failed query is logged as
 `db_error` with the SQLSTATE only (driver text with `galbridge_debug`); the user sees the generic
-"The directory is temporarily unavailable." and an empty result (`set_error()`).
+"The directory is temporarily unavailable." (at most once per request; core's read actions never
+read `get_error()`, so the book sends the message itself) and an empty result. During a connection
+outage the session's books stay listed and give the same message (GB-12); a session without a
+resolved Viewer gets no books.
 
 *Tests.* `DsnPolicyTest::testPasswordNeverAppearsInErrorsOrDescriptions`,
 `DsnPolicyTest::testRefusedDsnFailsClosedWithoutLoggingThePassword`,
 `LeakageTest::testDebugLogNeverContainsSecrets`.
 
 *Residual risk.* Connection failures are logged by Roundcube core with the PDO driver message (host
-and user name). Database server logs contain the literal search terms, because `rcube_db` inlines
-bound values on the client side (SECURITY.md).
+and user name; in the CLI only on stderr, and `diag` prints it). Database server logs contain the
+literal search terms, because `rcube_db` inlines bound values on the client side (SECURITY.md).
 
 ### GB-22 Log injection and personal data in plugin logs
 
@@ -423,8 +444,11 @@ logging them forges lines and stores personal data in shared logs.
 *Controls.* `Log::sanitize()` replaces control, bidi and zero-width characters, redacts invalid
 UTF-8, truncates values to 300 characters and masks DSN passwords. Normal levels carry reason codes,
 the numeric user id, book ids, counts and SQLSTATEs only; rejected group IDs are logged as a
-12-character hash (`Log::tag`). Request-triggered reason codes are logged at most once per request
-(`Log::once`), so a crafted request loop cannot flood the mail log.
+12-character hash (`Log::tag`). Reason codes triggered by request input or directory rows are
+logged at most once per request (`Log::once`, keyed by operation and code; the malformed-row WARN
+`row_invalid` and the scope tripwire ERROR `row_out_of_scope` have separate codes, so one cannot
+hide the other), so a crafted request loop cannot flood the mail log. `galbridge_debug` adds only
+driver error texts, exception messages and schema hints.
 
 *Tests.* `LogTest` (`testLogInjectionStaysOneLine`, `testBidiSpoofingIsNeutralised`,
 `testOnceCannotBeFlooded`, `testDsnPasswordIsRedacted`, `testExceptionDetailsRequireDebugLogging`),
@@ -441,16 +465,23 @@ PostgreSQL view embedded the `vmail` password in a `dblink` connection string.
 `password_db_dsn` user. `ViewerResolver` probes `information_schema.columns` and denies every book
 when `mailbox.password`, `recovery_email` or `allow_nets` is visible (`role_too_broad`). The grant
 templates create a new role with column-level `SELECT` only (PostgreSQL: `NOINHERIT`, read-only
-transactions, statement timeout, connection limit); `bin/galbridge.sh grants` prints them with a
-fresh password and never writes into the plugin directory. No views, `dblink` or `DEFINER`
-objects. `diag` checks that `SELECT password` and an `UPDATE` of `mailbox` are both denied.
+transactions, statement timeout, connection limit); the personal-data columns (`telephone`,
+`mobile`, `birthday`) are a commented-out grant. `bin/galbridge.sh grants` prints them with a fresh
+password that the statements also apply to an existing role (so the printed DSN always works) and
+never writes into the plugin directory. No views, `dblink` or `DEFINER` objects. `diag` checks that
+`SELECT password` is denied and reads the role's write privileges from the catalogs (PostgreSQL
+`has_table_privilege` / `has_any_column_privilege`, MariaDB/MySQL `information_schema` privileges);
+a statement probe would only hit the plugin's own read-only session and could never report a
+write-capable role.
 
 *Tests.* `DsnPolicyTest` (`testIredmailAndSuperuserRolesAreRefused`,
 `testRoundcubeAndPasswordPluginUsersAreRefused`, `testRoleThatCanReadSecretColumnsDisablesEveryBook`,
 `testRoleWithoutARequiredColumnFailsClosed`),
-`OldPluginRegressionTest::testDefect11PortableSqlLeastPrivilegeAndStableIds`; CI and the local
-integration databases connect with a
-role created from the shipped templates (`tests/fixtures/vmail/load.sh`).
+`OldPluginRegressionTest::testDefect11PortableSqlLeastPrivilegeAndStableIds`, `CliToolTest` (the
+`grants` output applied to both servers as a new role, re-run included; `diag` against a
+write-capable role); CI and the local integration databases connect with a role created from the
+shipped templates (`tests/fixtures/vmail/load.sh`, with the commented-out personal-data grant
+enabled).
 
 *Residual risk.* The password is in the plugin configuration file; protect it with `0640
 root:<PHP group>` and the web-server deny rule (README 2.3, 2.6).
@@ -493,7 +524,8 @@ query (never in `init()`; the sender-photo lookup of every opened message runs n
 and the Viewer is resolved at most once per `galbridge_scope_ttl`); a connect timeout
 injected into the DSN (`galbridge_db_connect_timeout`, 2 s); a statement timeout and read-only
 session per connection (`galbridge_db_timeout`, 3 s) as a backstop to the role limits; a failed
-connection memoised for the request and for 30 s in the session.
+connection memoised for the request and for 30 s in the session; a role connection limit sized with
+`grants --connection-limit` (PostgreSQL; `diag` shows it).
 
 *Tests.* `CorePathsTest::testSenderPhotoOfEveryOpenedMessageNeverQueries`,
 `PluginHooksTest::testInitRegistersTwoHooksAndNeverTouchesTheDatabase`,
@@ -530,9 +562,11 @@ before Roundcube's CSRF and authentication checks.
 
 *Controls.* A whole-book export is allowed only when the book's export option is on (domain book
 `true`, global book `false`) and only up to `galbridge_max_export`; a search-only book exports
-nothing without a search. Exports contain the effective fields only. `init()` returns without an
-authenticated user, never touches the database, registers no actions and reads only core's resolved
-action name; the plugin is limited to the `mail` and `addressbook` tasks.
+nothing without a search. A refused export downloads nothing (`204 No Content`). Exports contain
+the effective fields only. `init()` returns without an authenticated user, never touches the
+database, registers no actions and reads only core's resolved action name (it adds the
+`addressbook_export` hook for `addressbook/export` only); the plugin is limited to the `mail` and
+`addressbook` tasks.
 
 *Tests.* `CorePathsTest::testExportPaths`, `PluginHooksTest` (`testAnonymousRequestsRegisterNothing`,
 `testInitRegistersTwoHooksAndNeverTouchesTheDatabase`, `testAutocompleteIsWiredOnlyForComposeAndAutocomplete`).
