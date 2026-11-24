@@ -1,0 +1,22 @@
+# local configuration (contains the vmail database password)
+/config.inc.php
+# tooling
+/vendor/
+/composer.lock
+/.phpunit.cache/
+/.phpunit.result.cache
+/.php-cs-fixer.cache
+/tmp/
+/build/
+/tests/e2e/run/
+/tests/e2e/*.log
+# NOTE: tests/fixtures/vmail/ IS committed on purpose: TEST-ONLY data (see tests/fixtures/vmail/README.txt)
+__pycache__/
+# editors / local tooling
+.claude/
+.idea/
+.vscode/
+.DS_Store
+*.swp
+.env
+/phpstan.neon

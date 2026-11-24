@@ -1,0 +1,41 @@
+# GAL Bridge - PHPStan configuration
+#
+# Run (PHPStan 2.x):
+#   php -d memory_limit=2G vendor/bin/phpstan analyse -c phpstan.neon.dist
+#
+# Roundcube is not a Composer dependency of the plugin; its classes are resolved from a Roundcube
+# 1.7.7 installation via scanDirectories. The paths below point to the test installation; copy this
+# file to phpstan.neon (git-ignored) and adjust them, or symlink your Roundcube to /opt/rcrun/1.7.7.
+# The scanned tree MUST be 1.7.7: its rcube_addressbook declares the ': void' return types that a
+# backend has to repeat (a 1.6 tree would hide that class of fatal errors).
+
+parameters:
+    level: 8
+    phpVersion:
+        min: 80100
+        max: 80599
+    paths:
+        - lib
+        - galbridge.php
+        - bin/galbridge.sh
+    fileExtensions:
+        - php
+        - sh
+    bootstrapFiles:
+        - tests/phpstan-bootstrap.php
+    scanDirectories:
+        - /opt/rcrun/1.7.7/program/lib
+        - /opt/rcrun/1.7.7/program/include
+        - /opt/rcrun/1.7.7/program/actions
+    treatPhpDocTypesAsCertain: false
+    reportUnmatchedIgnoredErrors: true
+    tmpDir: tmp/phpstan
+
+    # Every ignore below is a false positive caused by Roundcube's untyped or mis-documented API.
+    # Do NOT add ignores for real issues; fix the code instead.
+    ignoreErrors:
+        # Plugin hook handlers: rcube_plugin_api::exec_hook() passes an untyped array whose shape
+        # differs per hook; the handler signature is dictated by Roundcube.
+        -
+            identifier: missingType.iterableValue
+            path: galbridge.php
