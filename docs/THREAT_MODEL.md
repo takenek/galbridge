@@ -5,7 +5,7 @@ from the security review of the design (before implementation) and were re-check
 1.0.0 code; GB-29 to GB-32 and the changes to the other entries come from the security audit of
 1.0.0, whose findings were remediated in 1.0.1 (identifiers U-xx / I-xx in
 [CHANGELOG.md](../CHANGELOG.md); 1.0.0 and 1.0.1 were development versions that were never tagged or
-published), and from the two verification passes after it (CHANGELOG "Unreleased", F-xx). Each entry names the implemented controls (classes under
+published), and from the two verification passes after it (CHANGELOG 1.0.2, F-xx). Each entry names the implemented controls (classes under
 `lib/GalBridge/`) and the tests that exercise them (`tests/Integration/*Test`, `tests/Unit/*Test`,
 `tests/e2e/`, `tests/ui/`). Where the implementation differs from the original proposal of the
 review, the entry describes the implementation. Section references ("ARCHITECTURE 11") point to

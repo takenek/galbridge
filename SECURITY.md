@@ -532,11 +532,11 @@ the plugin, its command line tool, grant templates, test harness, CI configurati
 documentation, with a check of dependency and platform advisories. It found no vulnerability of
 high or medium risk; eleven low-risk findings and seventeen informational ones were all remediated
 in 1.0.1 – a development version that was never tagged or published (neither was 1.0.0); the first
-published release carries these fixes and those listed under "Unreleased" – they are listed, with
+published release, 1.0.2, carries these fixes and those listed under 1.0.2 – they are listed, with
 their identifiers, in [CHANGELOG.md](CHANGELOG.md), and
 the changes to the code are covered by regression tests on all three database engines. The
 remediation was verified against the audit report on 2026-11-25 (Anthropic's Claude Opus 5.5);
-the fixes it completed are listed under "Unreleased" in the changelog.
+the fixes it completed are listed under 1.0.2 in the changelog.
 
 The remediation was reviewed again before 1.0.1 was completed: seven areas of the change were read
 independently, every finding was challenged and then reproduced by a test that fails on the code
@@ -557,7 +557,7 @@ residual risks of the decisions in the register above. Every one of them was rem
 2026-11-25 with Anthropic's Claude Opus 5.5 – in the code where code can help (fail-closed
 checks, `diag` WARN and FAIL lines), otherwise in this document and the threat model – each with a
 regression test that fails on the code before its fix, verified with the suites on all three
-database engines; they are listed under "Unreleased", "Second verification pass", in
+database engines; they are listed under 1.0.2, "Second verification pass", in
 [CHANGELOG.md](CHANGELOG.md), and the accepted risks that remain are in the register above. What
 lies outside the repository – the settings of the GitHub repository and of Packagist, and the
 reverse proxy, web server and logs of each installation – is named there and in the checklist. An

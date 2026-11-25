@@ -206,8 +206,13 @@ registered on Packagist right after the repository becomes public.
    ```sh
    git config gpg.format ssh
    git config user.signingkey /path/to/the-release-key.pub   # the key whose fingerprint SECURITY.md names
+   git config user.email '<id>+<login>@users.noreply.github.com'   # an address of the maintainer's GitHub account
    git tag -s vX.Y.Z -m "GAL Bridge X.Y.Z"
    ```
+
+   GitHub verifies an SSH signature only when the tagger's address belongs to the account that
+   registered the key (a verified address or the account's `noreply` address, which publishes no
+   personal address); otherwise it reports `no_user` and the CI job `release` refuses the tag.
 
    Never use a lightweight, unsigned or GPG-signed tag for a release: CI refuses all three. The key
    must be listed in `.github/release-signers` **on `main`** and registered as an SSH signing key of

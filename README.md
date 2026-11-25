@@ -2060,7 +2060,7 @@ user; what that found is fixed in 1.0.1 as well (changelog, "Fixed after the rev
 remediation"). On 2026-11-25 the
 remediation was verified against the audit report with Anthropic's Claude Opus 5.5 – in the code and
 with the suites on all three engines – and where a fix was incomplete it was completed (changelog,
-"Unreleased").
+1.0.2).
 
 A second, independent assessment of 1.0.1 (Anthropic's Mythos 5.2, 2026-11-25; full source review,
 Roundcube 1.7.0 – 1.7.7 core integration, CI and release, dependency and platform advisories)
@@ -2068,7 +2068,7 @@ reported 36 findings (1 high, 1 medium, 23 low, 11 informational). All of them w
 2026-11-25 with **Anthropic's Claude Opus 5.5** – plugin, command line tool, grant templates, CI,
 release procedure, test harness and documentation, each fix with a regression test that fails on the
 code before it, the suites run on SQLite, MariaDB and PostgreSQL with Roundcube 1.7.0 and 1.7.7; see
-[CHANGELOG.md](CHANGELOG.md) ("Unreleased", "Second verification pass") and the register of accepted
+[CHANGELOG.md](CHANGELOG.md) (1.0.2, "Second verification pass") and the register of accepted
 risks in [SECURITY.md](SECURITY.md#accepted-risks-and-design-decisions). An automated review is not
 a certification: report anything it missed as described in SECURITY.md.
 

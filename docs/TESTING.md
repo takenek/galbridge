@@ -319,10 +319,10 @@ fix** (checked by running the new tests against that tree) and passes after it.
 | low | only the first warning of the DSN policy reached the log | every warning on a line of its own, once per request |
 | low | documentation: the documented archive installation left files group-writable; the upgrade command reset a sized connection limit without saying so; two stale cross-references; the secret-scan verification was described more broadly than what had been run | corrected (README 2.1 and 5, CHANGELOG, MIGRATION, this document) |
 
-### Verification of the remediation (2026-11-25, changelog "Unreleased")
+### Verification of the remediation (2026-11-25, changelog 1.0.2)
 
 The remediation of 1.0.1 was verified against the audit report in the code and with the suites;
-where a fix was incomplete it was completed (CHANGELOG, "Unreleased"). Each completing fix has a
+where a fix was incomplete it was completed (CHANGELOG, 1.0.2). Each completing fix has a
 test that **fails on the code of 1.0.1** (the new tests run against `git archive 062c3b0`: 16 tests,
 66 failing cases - among them eight forms of a session host that 1.0.1 bound to the allowed server,
 on every engine) and passes after it. Environment as in section 1 (PHP 8.1.34 / 8.4.28 / 8.5.13
