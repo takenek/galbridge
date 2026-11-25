@@ -67,6 +67,10 @@ final class DbAdmin
         self::$command[$engine] = null;
         foreach ($candidates as $candidate) {
             $cmd = preg_split('/\s+/', trim($candidate)) ?: [];
+            if ($engine !== 'pgsql') {
+                // UTF-8 rows stay UTF-8 whatever the locale of the client (load.sh does the same)
+                $cmd[] = '--default-character-set=utf8mb4';
+            }
             $probe = $engine === 'pgsql' ? [...$cmd, '-X', '-q', '-t', '-d', 'postgres', '-c', 'SELECT 1'] : [...$cmd, '-N', '-e', 'SELECT 1'];
             [$code, $out] = CliRun::exec($probe);
             if ($code === 0 && trim($out) === '1') {

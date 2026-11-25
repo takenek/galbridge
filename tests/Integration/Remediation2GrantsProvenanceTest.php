@@ -173,7 +173,17 @@ final class Remediation2GrantsProvenanceTest extends TestCase
         (new \ReflectionMethod(Tool::class, 'pluginCode'))->invoke(new Tool(\rcube::get_instance(), $plugin, $out));
         rewind($out);
         $text = (string) stream_get_contents($out);
-        CliRun::assertLine($text, 'WARN', 'plugin code', 'lib/GalBridge/Directory/Sql.php');
+        if (CliRun::isRoot()) {
+            // root's copy: the one group-writable class is the only entry
+            CliRun::assertLine($text, 'WARN', 'plugin code', 'lib/GalBridge/Directory/Sql.php');
+        } else {
+            // the user's own copy: every file and directory is "owned by this user" - the line names
+            // the first ones and counts the rest, which covers every class below lib/
+            CliRun::assertLine($text, 'WARN', 'plugin code', 'galbridge.php (owned by this user)');
+            self::assertSame(1, preg_match('/^  \[WARN\] +plugin code .*\.\.\. \((\d+) more\)/m', $text, $m), $text);
+            $classes = count(glob($plugin . '/lib/GalBridge/*/*.php') ?: []) + count(glob($plugin . '/lib/GalBridge/*.php') ?: []);
+            self::assertGreaterThanOrEqual($classes, (int) $m[1] + 8);
+        }
         CliRun::assertLine($text, 'WARN', 'plugin code', 'grants and --allow-root refuse to run from such a tree');
     }
 

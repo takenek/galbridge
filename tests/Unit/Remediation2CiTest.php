@@ -257,8 +257,11 @@ final class Remediation2CiTest extends TestCase
         self::assertNotSame('', (string) ($entry['roundcube/roundcubemail']['reason'] ?? ''));
         self::assertArrayNotHasKey('on-audit', $entry['roundcube/roundcubemail']);
         self::assertSame(0, preg_match('/composer audit[^\n]*\|/', $code), 'no audit output is piped or ignored');
-        // the committed manifest has no exception of its own
-        $manifest = json_decode((string) file_get_contents(dirname(__DIR__, 2) . '/composer.json'), true);
+        // the committed manifest has no exception of its own (the 1.7.0 legs edit the working copy:
+        // read the manifest of the checked-out commit where git can)
+        $root = dirname(__DIR__, 2);
+        $committed = is_dir($root . '/.git') ? shell_exec('git -C ' . escapeshellarg($root) . ' show HEAD:composer.json 2>/dev/null') : null;
+        $manifest = json_decode(is_string($committed) && $committed !== '' ? $committed : (string) file_get_contents($root . '/composer.json'), true);
         self::assertIsArray($manifest);
         self::assertArrayNotHasKey('policy', $manifest['config'] ?? []);
         self::assertArrayNotHasKey('audit', $manifest['config'] ?? []);
@@ -317,6 +320,11 @@ final class Remediation2CiTest extends TestCase
         self::assertStringNotContainsString('GALBRIDGE_E2E_ALLOW_ROOT', $code);
         self::assertStringContainsString('dovecot.sh install', $code);
         self::assertStringContainsString('dovecot.sh remove', $code);
+        // an init process reaps the daemons the job stops, and the Dovecot checks before the install
+        // and after the removal ignore a zombie (the first CI run counted Dovecot's unreaped master)
+        self::assertMatchesRegularExpression('/^    container:\n      image: debian:13-slim@sha256:[0-9a-f]{64}\n(?:      #[^\n]*\n)*      options: --init$/m', $block);
+        self::assertStringNotContainsString('pgrep -x dovecot', $code);
+        self::assertSame(2, substr_count($code, "if ps -C dovecot -o stat= | grep -q '^[^Z]'; then"));
         self::assertStringContainsString("grep -q 'refusing to run Roundcube and Chromium as root'", $code);
         // the local matrix covers the same cores (OldPluginRegressionTest checks its entries)
         $matrix = (string) file_get_contents(dirname(__DIR__) . '/e2e/matrix.sh');

@@ -224,7 +224,8 @@ final class Remediation2DiagConfigTest extends TestCase
         CliRun::assertLine($this->configuration([], ['des_key' => 'short']), 'WARN', 'des_key', 'is shorter than 24 characters: set a random 24-character des_key');
         CliRun::assertLine($this->configuration([], ['des_key' => 123456789012345678]), 'WARN', 'des_key', 'is not a string (int)');
         CliRun::assertLine($this->configuration([], ['des_key' => 'rcmail-!24ByteDESkey*Str']), 'WARN', 'des_key', "is Roundcube's published default");
-        self::assertStringNotContainsString('des_key', $this->configuration([], ['des_key' => 'TESTONLY-a-random-24-chr']));
+        // no des_key line (a non-root run also gets the core-config ownership WARN, whose text names des_key)
+        self::assertDoesNotMatchRegularExpression('/^  \[(WARN|FAIL)\] des_key /m', $this->configuration([], ['des_key' => 'TESTONLY-a-random-24-chr']));
     }
 
     public function testDiagShowsTheRefusedRoles(): void

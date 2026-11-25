@@ -340,7 +340,11 @@ final class Remediation2HarnessTest extends TestCase
         $password = getenv('GALBRIDGE_RO_PASSWORD');
         $password = is_string($password) && $password !== '' ? $password : 'testonly-ro';
         $this->loaded[] = ['mysql', self::DB];
-        [$code, $out, $err] = self::load(['mysql', self::DB]);
+        // the role is reached the way the fixture role is: in CI the tests connect from the Docker
+        // bridge, so load.sh gave the fixture role its '%' account - the own role needs it as well
+        $fixtureUser = (string) preg_replace('~^mysql://([^:@/]+).*$~', '$1', $fixture);
+        $anyHost = DbAdmin::query('mysql', 'mysql', "SELECT COUNT(*) FROM mysql.user WHERE User = '" . addslashes($fixtureUser) . "' AND Host = '%'") === '1';
+        [$code, $out, $err] = self::load(['mysql', self::DB], $anyHost ? ['GALBRIDGE_LOAD_ANY_HOST' => '1'] : []);
         self::assertSame(0, $code, $err);
         self::assertStringContainsString(self::DB, $out);
         $plugins = DbAdmin::queryAll('mysql', 'mysql', "SELECT DISTINCT plugin FROM mysql.user WHERE User = '" . self::ROLE . "'");

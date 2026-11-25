@@ -99,7 +99,9 @@ running() {
     local base pid
     base="$(doveconf -h base_dir 2>/dev/null || echo /run/dovecot)"
     pid="$(cat "$base/master.pid" 2>/dev/null || true)"
-    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+    # a master that has exited but was not reaped (a container whose PID 1 reaps nothing) is a
+    # zombie: kill -0 still succeeds, but it runs no more
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ "$(awk '{ print $3 }' "/proc/$pid/stat" 2>/dev/null)" != Z ]
   fi
 }
 service_start() { if with_systemd; then systemctl start dovecot; else dovecot; fi; }

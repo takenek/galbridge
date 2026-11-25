@@ -127,6 +127,9 @@ grants() {
 case "$MODE:$ENGINE" in
   drop:mysql)
     read -r -a ADMIN <<< "${MYSQL_ADMIN:-mariadb -u root}"
+    # the fixture is UTF-8: without this a client in a locale without UTF-8 (a container, the client
+    # of the MySQL images) sends it as latin1 and stores mojibake
+    ADMIN+=(--default-character-set=utf8mb4)
     not_a_mail_server "$("${ADMIN[@]}" -N -B -e "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME IN ($MAIL_DATABASES)" 2>/dev/null || true)"
     "${ADMIN[@]}" -e "DROP DATABASE IF EXISTS \`$DB\`; DROP USER IF EXISTS '$RO_USER'@'localhost', '$RO_USER'@'127.0.0.1', '$RO_USER'@'%';"
     echo "load.sh: dropped the database $DB and the role $RO_USER"
@@ -141,6 +144,9 @@ case "$MODE:$ENGINE" in
   load:mysql)
     [ "${#RO_VERIFIER}" -eq 41 ] || die "openssl is needed to compute the password verifier of the test role"
     read -r -a ADMIN <<< "${MYSQL_ADMIN:-mariadb -u root}"
+    # the fixture is UTF-8: without this a client in a locale without UTF-8 (a container, the client
+    # of the MySQL images) sends it as latin1 and stores mojibake
+    ADMIN+=(--default-character-set=utf8mb4)
     not_a_mail_server "$("${ADMIN[@]}" -N -B -e "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME IN ($MAIL_DATABASES)" 2>/dev/null || true)"
     # MySQL 8.4 and later do not load mysql_native_password unless the administrator enables it (9.x
     # does not ship it): CREATE USER ... IDENTIFIED WITH mysql_native_password AS '<verifier>' fails

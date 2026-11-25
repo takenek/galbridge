@@ -712,6 +712,9 @@ jobs:
     # from the signed Debian archive. The image is pinned by digest (docs/RELEASING.md step 3).
     container:
       image: debian:13-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+      # an init process as PID 1 reaps the daemons the job starts and stops (Dovecot's master is
+      # left a zombie otherwise, and the checks below would count it as running)
+      options: --init
     strategy:
       fail-fast: false
       matrix:
@@ -775,7 +778,7 @@ jobs:
           mariadb -e "CREATE USER 'e2e'@'localhost' IDENTIFIED VIA unix_socket; GRANT SELECT, INSERT, UPDATE, DELETE ON galbridge_vmail_test.* TO 'e2e'@'localhost';"
           runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 -c 'CREATE ROLE e2e LOGIN'
           PSQL_ADMIN="runuser -u postgres -- psql" GALBRIDGE_FIXTURE_USER=e2e tests/fixtures/vmail/load.sh pgsql
-          if pgrep -x dovecot > /dev/null; then echo "Dovecot runs before the install" >&2; exit 1; fi
+          if ps -C dovecot -o stat= | grep -q '^[^Z]'; then echo "Dovecot runs before the install" >&2; exit 1; fi
           tests/e2e/dovecot.sh install
 
       - name: Control - the harness refuses to run Roundcube and Chromium as root
@@ -808,7 +811,7 @@ jobs:
         if: always()
         run: |
           tests/e2e/dovecot.sh remove
-          if pgrep -x dovecot > /dev/null; then echo "Dovecot still runs although it did not before the install" >&2; exit 1; fi
+          if ps -C dovecot -o stat= | grep -q '^[^Z]'; then echo "Dovecot still runs although it did not before the install" >&2; ps -C dovecot -o pid,ppid,stat,args >&2; exit 1; fi
 
   release:
     name: Release checks (signed tag, versions, archive)
