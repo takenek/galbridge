@@ -496,7 +496,7 @@ key, no SSH agent, no GitHub or Packagist credentials; docs/RELEASING.md step 2)
 unprivileged user `tester` unless noted: PHP 8.4.28, Roundcube 1.7.0 and 1.7.7 (release tarballs,
 SHA-256 as in CI), MariaDB 11.8.9, PostgreSQL 17.12, Dovecot 2.4.1, Chromium 156, PHPUnit 13.4.8,
 PHPStan 2.3, PHP-CS-Fixer 3.95. The development dependencies were resolved afresh in the container
-(the CI run of the commit is recorded in the next section); PHP 8.1 – 8.3 and 8.5 are covered by CI.
+(the CI run of the release commit is linked from the notes of the GitHub release); PHP 8.1 – 8.3 and 8.5 are covered by CI.
 
 | Run | Result |
 |---|---|
