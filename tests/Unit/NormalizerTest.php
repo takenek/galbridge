@@ -470,7 +470,9 @@ final class NormalizerTest extends TestCase
         yield 'header breaking' => ['"Jan" <jan@firma.pl>, "Eve" <eve@evil.test>', 'Jan jan@firma.pl , Eve eve@evil.test'];
         yield 'html stays text' => ['<b>Jan</b> & Co', "b Jan /b \u{FF06} Co"];
         yield 'ampersand becomes its full-width form' => ['R&D', "R\u{FF06}D"];
-        yield 'encoded-word delimiters are split' => ['=?UTF-8?Q?x?=', '= ?UTF-8?Q?x? ='];
+        yield 'encoded-word delimiters are split' => ['x =?UTF-8?Q?x?= y', 'x = ?UTF-8?Q?x? = y'];
+        yield 'a text never starts or ends with = or ? (fields next to each other in a name template)' => ['=?UTF-8?Q?x?=', "\u{FF1D} ?UTF-8?Q?x? \u{FF1D}"];
+        yield 'a question at the end' => ['Why?', "Why\u{FF1F}"];
         yield 'question and equals signs alone stay' => ['Why? a=b', 'Why? a=b'];
         yield 'empty round brackets are removed' => ['Jan () Kowalski', 'Jan Kowalski'];
         yield 'empty square brackets are removed' => ['Jan[] Kowalski', 'Jan Kowalski'];
@@ -789,9 +791,45 @@ final class NormalizerTest extends TestCase
 
     public function testLabelWordsUseTheNotationOfDisplayText(): void
     {
-        foreach (['R&D', 'a=?b', 'a?=b', '=?UTF-8?Q?x?='] as $word) {
+        // (a text that starts or ends with '=' or '?' is display text of its own: those characters
+        // are only changed at the edges of a whole text, never in a word of it)
+        foreach (['R&D', 'a=?b', 'a?=b', 'x =?UTF-8?Q?x?= y', '{dept}', 'a}b{'] as $word) {
             self::assertSame(Normalizer::displayText($word), Normalizer::labelWord($word), $word);
         }
+    }
+
+    /**
+     * STAGE 6: a "{placeholder}" inside directory text would be filled by core's name template with
+     * another field (it replaces placeholder by placeholder) - curly brackets never survive.
+     */
+    public function testCurlyBracketsCannotFormAPlaceholderOfTheNameTemplate(): void
+    {
+        self::assertSame("Jan \u{FF5B}department\u{FF5D}", Normalizer::displayText('Jan {department}'));
+        self::assertSame(Normalizer::LEFT_BRACE . Normalizer::RIGHT_BRACE, Normalizer::displayText('{}'));
+        $a = Normalizer::displayText('={department}=');
+        $b = Normalizer::displayText('?UTF-8?B?Y2VvQGJhbmsuZXhhbXBsZQ==?');
+        foreach (['{name} ({department})', '{name}{department}', '{name} {department}'] as $template) {
+            $composed = self::composedByCore($template, ['name' => $a, 'department' => $b]);
+            self::assertStringNotContainsString('=?', $composed, $template);
+        }
+        // three fields next to each other without a blank: no delimiter at either boundary
+        $fields = ['name' => Normalizer::displayText('x='), 'department' => Normalizer::displayText('?UTF-8?B?Y2VvQGJhbmsuZXhhbXBsZQ?'), 'phone' => Normalizer::displayText('=1')];
+        $composed = self::composedByCore('{name}{department}{phone}', $fields);
+        self::assertStringNotContainsString('=?', $composed);
+        self::assertStringNotContainsString('?=', $composed);
+        self::assertSame("x\u{FF1D}", $fields['name']);
+        self::assertSame("\u{FF1F}UTF-8?B?Y2VvQGJhbmsuZXhhbXBsZQ\u{FF1F}", $fields['department']);
+        self::assertSame('=1', Normalizer::cutAtSign('=1'), 'without an at-sign nothing is cut (displayText() did the edges)');
+        self::assertSame("x\u{FF1D}", Normalizer::cutAtSign('x=@bank.example'), 'the new end follows the same rule');
+    }
+
+    public function testCutAtSignKeepsWhatStandsBeforeIt(): void
+    {
+        self::assertSame('Jan', Normalizer::cutAtSign('Jan'));
+        self::assertSame('ceo', Normalizer::cutAtSign('ceo@bank.example'));
+        self::assertSame('IT', Normalizer::cutAtSign("IT (\u{FF20}HQ)"));
+        self::assertSame('+48', Normalizer::cutAtSign("+48 \u{FE6B}x"));
+        self::assertSame('', Normalizer::cutAtSign('@x'));
     }
 
     public function testAmpersandStaysReadable(): void

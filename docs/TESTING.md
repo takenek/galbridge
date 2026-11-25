@@ -199,6 +199,30 @@ fix** (checked by running the new tests against that tree) and passes after it.
 | low | only the first warning of the DSN policy reached the log | every warning on a line of its own, once per request |
 | low | documentation: the documented archive installation left files group-writable; the upgrade command reset a sized connection limit without saying so; two stale cross-references; the secret-scan verification was described more broadly than what had been run | corrected (README 2.1 and 5, CHANGELOG, MIGRATION, this document) |
 
+### Verification of the remediation (2026-11-25, changelog "Unreleased")
+
+The remediation of 1.0.1 was verified against the audit report in the code and with the suites;
+where a fix was incomplete it was completed (CHANGELOG, "Unreleased"). Each completing fix has a
+test that **fails on the code of 1.0.1** (the new tests run against `git archive 062c3b0`: 16 tests,
+66 failing cases - among them eight forms of a session host that 1.0.1 bound to the allowed server,
+on every engine) and passes after it. Environment as in section 1 (PHP 8.1.34 / 8.4.28 / 8.5.13
+with `intl`, MariaDB 11.8.9, PostgreSQL 17.12, Dovecot 2.4.1, Chromium 156, release tarballs of
+Roundcube 1.7.0 and 1.7.7).
+
+| Run | Result |
+|---|---|
+| PHPUnit as root, PHP 8.4, 8.1 and 8.5 × Roundcube 1.7.0 and 1.7.7, all engines | **2307 tests, OK** in each of the six runs (40 853 assertions; 40 923 on PHP 8.5); 2 intentional skips |
+| PHPUnit, random order (seed 6061) | OK |
+| E2E (`matrix.sh`): Roundcube 1.7.0 × PHP 8.1 / 8.4 and 1.7.7 × PHP 8.1 / 8.4 / 8.5, × MariaDB / PostgreSQL | 10/10 combinations, 37/37 each |
+| Browser UI, Roundcube 1.7.0 and 1.7.7, MariaDB and PostgreSQL | 9/9 each |
+| PHPStan level 8 (Roundcube 1.7.7 release tarball), PHP-CS-Fixer, `php -l` (PHP 8.1, 8.5), ShellCheck (test scripts and every `run` step of the workflow) | clean |
+| `bin/galbridge.sh diag --allow-root` on a root-owned Roundcube 1.7.7 tree whose `logs/` (owned by another user) holds a link to a file outside it | 1.0.1 created that file as root; now nothing is written there, the line goes to syslog |
+
+Not run in this verification: the CI emulation as an unprivileged user (the new CI steps were
+checked with ShellCheck and a local run of their `jq` filter; their first real run is the next CI
+run), MySQL 8.x, the pinned gitleaks release (the anchored path patterns were checked with a regular
+expression engine).
+
 ## 7. Not available / not tested
 
 * MySQL 8 (iRedMail's MySQL edition installs MariaDB): the MySQL-specific statement timeout

@@ -528,7 +528,11 @@ final class CliToolTest extends TestCase
             self::assertContains('CREATE OR REPLACE SQL SECURITY DEFINER VIEW maildb.galbridge_forwardings AS', $statements);
             self::assertContains('FROM maildb.forwardings', $statements);
             self::assertContains("GRANT SELECT (address, forwarding, domain, is_alias, is_list, is_maillist, active) ON maildb.galbridge_forwardings TO 'acme_gal'@'10.0.0.%';", $statements);
-            self::assertSame("ALTER USER 'acme_gal'@'10.0.0.%' REQUIRE SSL;", end($statements));
+            // STAGE 6: right after the account is created, not at the end - a later statement that
+            // fails stops the script, and the account must not be left without the TLS requirement
+            $create = array_search("CREATE USER 'acme_gal'@'10.0.0.%' IDENTIFIED WITH mysql_native_password AS '" . Tool::mysqlVerifier($password) . "';", $statements, true);
+            self::assertIsInt($create);
+            self::assertSame("ALTER USER 'acme_gal'@'10.0.0.%' REQUIRE SSL;", $statements[$create + 1] ?? null);
             self::assertSame("mysql://acme_gal:{$password}@db.example.com/maildb", self::dsnOf($out), 'the DSN names the database server, not the account host');
         } else {
             self::assertContains("IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'acme_gal') THEN", $statements);
@@ -964,7 +968,9 @@ final class CliToolTest extends TestCase
         [$engine] = $this->target($dsn);
         [$code, $out, $err] = $this->diag(['galbridge_db_dsn' => $dsn], [], ['--user=' . self::JAN]);
         self::assertSame(0, $code, $out . $err);
-        self::assertStringEndsWith("\nResult: OK\n", $out);
+        // exit code 0; the summary never hides WARN lines behind a bare "OK" (STAGE 6, I-03)
+        self::assertMatchesRegularExpression('/\nResult: OK( with \d+ warning\(s\) - read the WARN lines)?\n$/', $out);
+        self::assertSame(substr_count($out, '[WARN]') === 0, str_ends_with($out, "\nResult: OK\n"));
         self::assertStringNotContainsString('[FAIL]', $out);
         self::assertNoPhpErrors($err);
         self::assertStringNotContainsString('testonly-ro', $out . $err, 'diag never prints the password');
@@ -1362,7 +1368,8 @@ final class CliToolTest extends TestCase
         $www = $this->base() . '/www';
         $rc = $www . '/roundcube';
         $files = [
-            'program/include/clisetup.php' => '<?php exit(42); // the checks passed: this file was loaded',
+            // the checks passed when this file is loaded: it reports the environment it got
+            'program/include/clisetup.php' => '<?php echo get_include_path(), "\n", getenv("ROUNDCUBE_LOG_DRIVER"), "\n"; exit(42);',
             'program/lib/Roundcube/bootstrap.php' => '<?php',
             'program/localization/index.inc' => '<?php',
             'plugins/foo/foo.php' => '<?php',
@@ -1390,8 +1397,15 @@ final class CliToolTest extends TestCase
 
         $run = fn (): array => self::exec([PHP_BINARY, '-d', 'display_errors=stderr', $plugin . '/bin/galbridge.sh', 'diag', '--allow-root'], null,
             ['ROUNDCUBE_INSTALL_PATH' => $rc, 'ROUNDCUBE_CONFIG_DIR' => $rc . '/config'] + getenv(), $rc);
-        [$code, , $err] = $run();
+        [$code, $out, $err] = $run();
         self::assertSame(42, $code, 'everything belongs to root: ' . $err);
+        // STAGE 6: no relative include_path entry (the working directory of root), logs to syslog
+        [$includePath, $logDriver] = explode("\n", $out) + ['', ''];
+        self::assertNotSame('', $includePath);
+        foreach (explode(PATH_SEPARATOR, $includePath) as $entry) {
+            self::assertStringStartsWith('/', $entry, $includePath);
+        }
+        self::assertSame('syslog', $logDriver, 'root never writes into log_dir, which the web server user owns');
 
         $nobody = 65534;
         foreach ([
@@ -1438,6 +1452,35 @@ final class CliToolTest extends TestCase
         self::assertSame(1, $code);
         self::assertStringContainsString($rc . '/plugins (owner uid 0, mode 1777)', $err);
         chmod($rc . '/plugins', 0o755);
+        clearstatcache();
+        self::assertSame(42, $run()[0]);
+
+        // STAGE 6: a symbolic link to nothing - whoever creates its target later decides what root loads
+        symlink($this->base() . '/not-yet', $rc . '/plugins/later');
+        [$code, , $err] = $run();
+        self::assertSame(1, $code, $err);
+        self::assertStringContainsString($rc . '/plugins/later (symbolic link to a path that does not exist)', $err);
+        unlink($rc . '/plugins/later');
+
+        // STAGE 6: the configuration directories as Roundcube finds them - RCUBE_CONFIG_PATH as well,
+        // and ROUNDCUBE_CONFIG_DIR "0" means the default directory (iniset.php reads it with ?:)
+        mkdir($this->base() . '/conf-extra', 0o755);
+        file_put_contents($this->base() . '/conf-extra/config.inc.php', '<?php');
+        chmod($this->base() . '/conf-extra/config.inc.php', 0o666);
+        $env = ['ROUNDCUBE_INSTALL_PATH' => $rc, 'ROUNDCUBE_CONFIG_DIR' => $rc . '/config'] + getenv();
+        $script = [PHP_BINARY, '-d', 'display_errors=stderr', $plugin . '/bin/galbridge.sh', 'diag', '--allow-root'];
+        [$code, , $err] = self::exec($script, null, ['RCUBE_CONFIG_PATH' => $this->base() . '/conf-extra'] + $env, $rc);
+        self::assertSame(1, $code, $err);
+        self::assertStringContainsString($this->base() . '/conf-extra/config.inc.php (owner uid 0, mode 0666)', $err);
+        [$code, , $err] = self::exec($script, null, ['RCUBE_CONFIG_PATH' => $this->base() . '/conf-none'] + $env, $rc);
+        self::assertSame(1, $code, $err);
+        self::assertStringContainsString('conf-none (configuration directory that does not exist)', $err);
+        chmod($rc . '/config/config.inc.php', 0o666);
+        clearstatcache();
+        [$code, , $err] = self::exec($script, null, ['ROUNDCUBE_CONFIG_DIR' => '0'] + $env, $rc);
+        self::assertSame(1, $code, $err);
+        self::assertStringContainsString($rc . '/config/config.inc.php (owner uid 0, mode 0666)', $err);
+        chmod($rc . '/config/config.inc.php', 0o644);
         clearstatcache();
         self::assertSame(42, $run()[0]);
     }
@@ -1721,6 +1764,9 @@ final class CliToolTest extends TestCase
                 self::assertSame(0, $code, $out);
                 self::assertLine($out, 'WARN', 'web access', 'http://127.0.0.1:' . $port . '/' . $prefix . ' does not answer like the Roundcube webmail (HTTP 404): check the address');
                 self::assertStringNotContainsString('is the webmail', $out);
+                // ... and no path gets an [ OK ] from such an address (STAGE 6, I-03)
+                self::assertLine($out, 'WARN', 'web access', 'plugins/galbridge/composer.json: HTTP 404 - inconclusive');
+                self::assertStringNotContainsString('is not served', $out);
             }
             // a page that is not Roundcube's
             file_put_contents($root . '/other/index.html', '<html><body>It works!</body></html>');
@@ -1786,7 +1832,8 @@ final class CliToolTest extends TestCase
             [$code, $out] = $this->runDiag($config, ['--url=http://127.0.0.1:' . $port . '/'], $copy);
             self::assertSame(2, $code, $out);
             self::assertLine($out, 'FAIL', 'web access', 'plugins/galbridge/composer.json is SERVED (HTTP 200)');
-            self::assertLine($out, 'OK', 'web access', 'static.php/plugins/galbridge/lib/autoload.php is not served (HTTP 404)');
+            // (this test server is no webmail, so a 404 is inconclusive - STAGE 6, I-03)
+            self::assertLine($out, 'WARN', 'web access', 'static.php/plugins/galbridge/lib/autoload.php: HTTP 404 - inconclusive');
             self::assertStringNotContainsString('galbridge-1.0.1', $out, 'the web path is the name of the plugin, not of the directory');
         } finally {
             proc_terminate($server);
@@ -1964,6 +2011,71 @@ final class CliToolTest extends TestCase
         self::assertLine($out, 'WARN', 'users on imap.old.example', '2 Roundcube users on this IMAP host get no directory');
         self::assertStringNotContainsString('users on 127.0.0.1', $out);
         self::assertStringNotContainsString('a@example.com', $out, 'counts only, never user names');
+
+        // a stored host that is not in the form of a regular login is counted, never printed - it may
+        // hold control characters (STAGE 6: judged like the runtime binding, the raw value)
+        $pdo = new \PDO('sqlite:' . $this->roundcubeDb());
+        $pdo->exec("INSERT INTO users (username, mail_host, created) VALUES ('c@example.com', 'imap.evil.example:143/x', '2024-01-01 00:00:00'),"
+            . " ('d@example.com', ' 127.0.0.1', '2024-01-01 00:00:00'), ('e@example.com', 'tls://127.0.0.1:143', '2024-01-01 00:00:00')");
+        $pdo->exec('INSERT INTO users (username, mail_host, created) VALUES (\'f@example.com\', \'127.0.0.1' . "\x1b[2J" . '\', \'2024-01-01 00:00:00\')');
+        $pdo = null;
+        [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn]);
+        self::assertSame(0, $code, $out);
+        self::assertLine($out, 'WARN', 'users on other hosts', '3 Roundcube users have a mail_host that is not a plain host name');
+        self::assertStringNotContainsString('evil', $out);
+        self::assertStringNotContainsString("\x1b", $out, 'no control character of the database reaches the terminal');
+        self::assertStringNotContainsString('users on 127.0.0.1', $out, 'the configured URI of an older Roundcube is the same host');
+    }
+
+    /**
+     * STAGE 6 (I-03, closing): an unexpected error outside the guarded diag sections ends with exit
+     * code 2 and a sanitised message - never with the exit code of "OK".
+     */
+    public function testAnUnexpectedErrorIsNeverReportedAsOk(): void
+    {
+        $out = fopen('php://memory', 'w+');
+        self::assertIsResource($out);
+        $failing = new class () extends \rcube_config {
+            public function __construct()
+            {
+                // nothing loaded here: the error has to happen inside the tool
+            }
+
+            public function load_from_file($file)
+            {
+                throw new \RuntimeException('broken with mysql://role:' . 'secret-value@db/vmail');
+            }
+        };
+        $rc = \rcube::get_instance();
+        $saved = $rc->config;
+        $rc->config = $failing;
+        try {
+            $code = (new Tool($rc, self::pluginDir(), $out))->run(['diag']);
+        } finally {
+            $rc->config = $saved;
+        }
+        rewind($out);
+        $text = (string) stream_get_contents($out);
+        self::assertSame(2, $code, $text);
+        self::assertStringContainsString('Result: aborted', $text);
+        self::assertStringContainsString('RuntimeException', $text);
+        self::assertStringNotContainsString('secret-value', $text, 'the message is sanitised (DSN password)');
+    }
+
+    /**
+     * STAGE 6 (I-02, closing): the fingerprint in sessions is an HMAC keyed with des_key - worth
+     * nothing with Roundcube's published default or without a key, so diag says so.
+     */
+    public function testDiagWarnsAboutAPublicOrMissingDesKey(): void
+    {
+        $dsn = $this->anyServerDsn();
+        foreach (['rcmail-!24ByteDESkey*Str' => "is Roundcube's published default", '' => 'is not set'] as $key => $text) {
+            [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn], ['des_key' => $key]);
+            self::assertSame(0, $code, $out);
+            self::assertLine($out, 'WARN', 'des_key', $text);
+        }
+        [, $out] = $this->diag(['galbridge_db_dsn' => $dsn]);
+        self::assertStringNotContainsString('des_key', $out, 'a key of its own: no line');
     }
 
     /**

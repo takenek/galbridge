@@ -28,12 +28,19 @@ use GalBridge\Log;
  *    logged here with the SQLSTATE only (driver text with galbridge_debug);
  *  - after connecting: read-only session and a statement timeout (backstop to the role limits);
  *  - a failed connection is memoised for the request and for OUTAGE_SECONDS in the session, so a
- *    dead directory server does not block every webmail request;
+ *    dead directory server does not block every webmail request - but not a refusal because the
+ *    connection limit of the role is reached (that is answered at once and ends with the peak);
  *  - vmail table names are never passed through rcube_db::table_name() (it would add db_prefix).
  */
 final class Connection
 {
     public const OUTAGE_SECONDS = 30;
+
+    /**
+     * A refusal because the connection limit of the role (or of the server) is reached: MySQL /
+     * MariaDB 1040, 1203, 1226; PostgreSQL "too many connections for role" / "too many clients".
+     */
+    private const LIMIT_REACHED = '/\[(?:1040|1203|1226)\]|too many (?:connections|clients)/i';
 
     /** the vmail relations GAL Bridge may read (column probe); forwardings only through its view */
     public const TABLES = ['mailbox', 'domain', 'alias', Schema::FORWARDINGS, 'maillists', 'moderators', 'maillist_owners'];
@@ -236,6 +243,14 @@ final class Connection
             $err = $db->is_error();
             $this->lastError = Log::sanitize(is_string($err) ? $err : '');
             $this->failed = true;
+            if (is_string($err) && preg_match(self::LIMIT_REACHED, $err) === 1) {
+                // The connection limit is reached: the server answered at once, it is not down. Not
+                // memoised for the session - the memo is there to spare requests the timeout of a
+                // dead server, and here it would keep the directory away from this user for
+                // OUTAGE_SECONDS after the peak (one user holding the limit would do that to all).
+                Log::warning('db', 'db_busy: the connection limit of the database role is reached (galbridge.sh grants --connection-limit)');
+                throw new GalBridgeException('db_down', 'the connection limit of the database role is reached');
+            }
             $_SESSION['galbridge_down_until'] = time() + self::OUTAGE_SECONDS;
             Log::error('db', 'db_down', ['retry_in' => self::OUTAGE_SECONDS]);
             throw new GalBridgeException('db_down', 'cannot connect to the vmail database');

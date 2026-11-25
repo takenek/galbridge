@@ -20,8 +20,9 @@
 #   Composer (2.9 and later) by itself leaves releases with a security advisory out of the
 #   dependency resolution: the pinned 1.7.0 would then not install at all, and for "~1.7.0" an
 #   older release would silently replace a newest one that has an advisory. COMPOSER_NO_BLOCKING
-#   switches that off - the jobs install exactly what they ask for, and it is "composer audit"
-#   that reports advisories;
+#   switches that off for the PHPUnit job only - it installs exactly what it asks for, and
+#   "composer audit" reports advisories (in the 1.7.0 legs for every package but that core). The
+#   other jobs keep Composer's blocking of releases with advisories;
 # - MariaDB 11.8 and PostgreSQL 17 are throw-away service containers on the job's ephemeral runner
 #   and hold only the TEST-ONLY fixture (tests/fixtures/vmail). They are pinned by digest: refresh
 #   tag and digest together (docs/RELEASING.md). "ci-throwaway" is their administrator password
@@ -34,7 +35,8 @@
 #   production code (no process execution, dynamic code, deserialisation or file writes; SQL in one
 #   class) are part of the PHPUnit suite (tests/Unit/SourceGuardTest.php) and so run in every leg;
 # - job "release" (tags only): the tag must be annotated and carry a signature that GitHub verifies,
-#   and its version must be the one in galbridge.php and CHANGELOG.md (docs/RELEASING.md).
+#   it must point to a commit of main, and its version must be the one in galbridge.php and
+#   CHANGELOG.md (docs/RELEASING.md). Which key may sign is not pinned here (docs/RELEASING.md).
 name: CI
 
 on:
@@ -59,10 +61,6 @@ defaults:
   run:
     shell: bash
 
-env:
-  # install what is asked for; advisories are reported by "composer audit" (see the notes above)
-  COMPOSER_NO_BLOCKING: '1'
-
 jobs:
   tests:
     name: PHPUnit (PHP ${{ matrix.php }}, Roundcube ${{ matrix.core }})
@@ -82,6 +80,8 @@ jobs:
             core: '1.7.0'
     env:
       CORE: ${{ matrix.core }}
+      # install what is asked for; advisories are reported by "composer audit" (see the notes above)
+      COMPOSER_NO_BLOCKING: '1'
     services:
       mariadb:
         image: mariadb:11.8@sha256:e1d5495f445654134f226f55a41ce0da227116f6f27f283101f405c794d841fc
@@ -141,10 +141,22 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       # Audit this PHP version's installed packages, including dev and transitive dependencies and
-      # the newest core. Not for the 1.7.0 leg: that core has advisories (fixed by later 1.7.x).
+      # the newest core.
       - name: Audit dependencies
         if: matrix.core != '1.7.0'
         run: composer audit --no-interaction --format=plain
+
+      # The 1.7.0 legs: that core has advisories (fixed by later 1.7.x), every OTHER package of the
+      # leg - its own dependency set - must have none.
+      - name: Audit dependencies (all but the pinned 1.7.0 core)
+        if: matrix.core == '1.7.0'
+        run: |
+          composer audit --no-interaction --format=json > "$RUNNER_TEMP/audit.json" || true
+          others='[(.advisories // {}) | to_entries[] | select(.key != "roundcube/roundcubemail") | .value | length] | add // 0'
+          if ! jq -e "($others) == 0" "$RUNNER_TEMP/audit.json" > /dev/null; then
+            jq '(.advisories // {}) | with_entries(select(.key != "roundcube/roundcubemail"))' "$RUNNER_TEMP/audit.json" || cat "$RUNNER_TEMP/audit.json"
+            exit 1
+          fi
 
       # The git-sourced package reports "1.7-git" in its constants, so the release is verified
       # through Composer's installed metadata. logs/ and temp/ mirror a real installation.
@@ -269,6 +281,10 @@ jobs:
       - name: Install dependencies
         run: composer install --no-interaction --no-progress
 
+      # This job resolves its dependencies on its own as well.
+      - name: Audit dependencies
+        run: composer audit --no-interaction --format=plain
+
       # Check only: the configured rules are not risky, but CI never rewrites code.
       - name: PHP-CS-Fixer (dry run)
         run: vendor/bin/php-cs-fixer fix --dry-run --diff --using-cache=no --config=.php-cs-fixer.dist.php
@@ -327,9 +343,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # the whole history: the tagged commit must be one of main (below)
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       # The tag object is read through the API: a checkout stores an annotated tag as a plain
       # reference to its commit. "verified" is GitHub's own check of the signature against the keys
@@ -344,6 +362,13 @@ jobs:
           test "$type" = tag || { echo "$TAG is a lightweight tag: releases are signed, annotated tags (docs/RELEASING.md)" >&2; exit 1; }
           verified="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$sha" --jq '.verification.verified')"
           test "$verified" = true || { echo "the signature of $TAG is not verified by GitHub (docs/RELEASING.md)" >&2; exit 1; }
+
+      # A signature that GitHub verifies proves only that SOME account signed: the tag must at least
+      # name a commit that is already part of main (reviewed, pushed by the maintainers).
+      - name: The tagged commit is part of main
+        run: |
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "the tagged commit is not part of main (docs/RELEASING.md)" >&2; exit 1; }
 
       - name: The tag, the plugin and the changelog name the same version
         env:

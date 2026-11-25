@@ -109,12 +109,17 @@ only database object is the view `galbridge_forwardings` in `vmail` (12).
      `parse_host()` is never called, because `%d`/`%n` come from the client's Host header. Explicit
      entries are host names or IP literals, optionally with a port (`host:port`, `[::1]:993`); an
      entry without a port covers every port of that host. The session's `storage_host` **and
-     `storage_port`** and the user's stored `mail_host` must be covered. An IMAP server on a local
+     `storage_port`** and the user's stored `mail_host` must be covered - in the raw form the login
+     wrote them (`ViewerResolver::canonicalHost()`: host name, IPv4, IPv6 in brackets, socket URI;
+     `mail_host` also the URI an older Roundcube stored), never trimmed or parsed a second time:
+     PHP connects with the raw value, taking the host up to its first colon, so a second parse could
+     name another server than the one the session was authenticated by. An IMAP server on a local
      socket (`unix:///run/dovecot/imap.sock`; core connects with port -1) is an endpoint of its
      own: derived from an `imap_host` of that form or listed, compared as a whole with the path as
      written (`Config::unixEndpoint()`), and never subject to the host-without-port rule. A placeholder or array
      `imap_host` without an explicit list disables the plugin (diag: FAIL), and so does
-     `include_host_config` (the effective `imap_host` then depends on the requested host name).
+     `include_host_config` (the effective `imap_host` then depends on the requested host name) or a
+     set `ROUNDCUBE_INCLUDE_HOST_CONFIG` (which the core ignores for that option).
      Otherwise a user who logs in through an IMAP server of their own choosing as
      `ceo@tenant-a.example` would get tenant A's directory. What the plugin cannot check is that
      every listed server authenticates against this vmail database (SECURITY.md).

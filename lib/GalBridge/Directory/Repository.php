@@ -146,7 +146,8 @@ final class Repository
             // the department key is used exactly as SQL computed it (LOWER(TRIM(department))), so the
             // group predicate matches on every engine and collation; PHP never re-lowercases it
             $key = $kind === IdCodec::GROUP_DOMAIN ? Normalizer::domain($row['gkey'] ?? null) : (string) ($row['gkey'] ?? '');
-            $label = Normalizer::displayText($row['label'] ?? '', 64);
+            // a label is display text of the directory like a department value of a record
+            $label = Normalizer::cutAtSign(Normalizer::displayText($row['label'] ?? '', 64));
             if ($key === null || $key === '' || $label === '' || strlen($key) > IdCodec::MAX_KEY_BYTES) {
                 continue;
             }

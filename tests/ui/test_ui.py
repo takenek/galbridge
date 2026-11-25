@@ -290,8 +290,11 @@ def u8_names(d):
             check(len(boxes) == 1, 'recipient elements: %r' % boxes)
             name, mail, title = boxes[0]
             check('@' not in name and '\uff20' not in name, 'the name of the recipient element looks like an address: %r' % name)
-            # the notation of Normalizer::displayText(): '&' full-width, both delimiters of an encoded word split
-            expected = fixture_admin.SPOOF_ROWS[address].replace('&', '\uff06').replace('=?', '= ?').replace('?=', '? =')
+            # the notation of Normalizer::displayText(): '&' and curly brackets full-width, both delimiters
+            # of an encoded word split, and no '=' or '?' at either end of the text (full-width there)
+            expected = fixture_admin.SPOOF_ROWS[address].replace('&', '\uff06').replace('{', '\uff5b').replace('}', '\uff5d')
+            expected = expected.replace('=?', '= ?').replace('?=', '? =')
+            expected = re.sub(r'^[=?]|[=?]$', lambda m: '\uff1d' if m.group(0) == '=' else '\uff1f', expected)
             # (Roundcube quotes a display name that holds special characters)
             check(name.strip('"') == expected, 'name shown for %s: %r, expected %r' % (address, name, expected))
             check(address in mail and address in title, 'the element does not carry the real address: %r' % boxes[0])

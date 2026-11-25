@@ -141,7 +141,11 @@ that can read `mailbox.password`, `recovery_email` or `allow_nets`, or the `forw
 
 **Generate the statements** (recommended; nothing is written to disk by the tool). The tool does not
 run as root – it loads PHP code from the plugin directory – so run it as the PHP user; the root
-shell only stores its output:
+shell only stores its output. The statements are then run **with the rights of the database
+administrator**, so they must come from code that the web server cannot change: run `grants` as the
+PHP user only when the plugin files belong to root and are not writable by that user (`diag`, line
+"plugin code"); otherwise run it from the verified release archive (README 2.1) as any unprivileged
+account – `grants` needs neither Roundcube nor the database. Read the output before you apply it:
 
 ```sh
 cd /opt/www/roundcubemail
@@ -230,17 +234,25 @@ What the role gets:
 * **the view `galbridge_forwardings` instead of the table `forwardings`.** That table also holds the
   private forwarding targets of every mailbox (often external addresses). The grant set creates one
   view with only the three kinds of rows the plugin needs – per-user alias addresses, members of
-  alias accounts and mailing-list rows – and grants the role the view, **not** the table: even with
-  the role's credentials nobody can read where a mailbox forwards its mail. It is the only object
-  GAL Bridge adds to `vmail`; it stores nothing (MariaDB/MySQL: `SQL SECURITY DEFINER`; PostgreSQL:
-  `security_barrier`) and is re-created by every run of the grant set. Before an iRedMail upgrade
+  alias accounts and mailing-list rows – and grants the role the view, **not** the table: the role
+  cannot select a single row of a private forwarding. That is a limit on what the role may read,
+  not a barrier against inference: whoever holds the role's credentials can still put conditions
+  into a query that the server evaluates on the rows behind the view (MariaDB/MySQL merge such a
+  view into the query; PostgreSQL's `security_barrier` still lets leakproof operators and
+  `EXPLAIN ANALYZE` counts through) and so learn single facts about them – keep the credentials as
+  secret as before. It is the only object GAL Bridge adds to `vmail`; it stores nothing
+  (MariaDB/MySQL: `SQL SECURITY DEFINER`; PostgreSQL: `security_barrier`, owned by the
+  administrator who runs the grant set) and is re-created by every run of the grant set; `diag`
+  checks that it holds no other rows. Before an iRedMail upgrade
   that alters the `forwardings` table, drop the view and run `grants --grants-only` afterwards
   (the templates say how);
 * **limits of the account on both engines**: at most 25 simultaneous connections
-  (`--connection-limit`) and a statement time of 5 seconds for the role itself (PostgreSQL
-  `statement_timeout`, MariaDB `MAX_STATEMENT_TIME`; MySQL has no per-account statement time).
-  Independently of the role, the plugin sets a read-only session and a statement timeout on every
-  connection (`galbridge_db_timeout`);
+  (`--connection-limit`), a hard limit the server enforces, and a statement time of 5 seconds as
+  the role's DEFAULT (PostgreSQL `statement_timeout`, MariaDB `MAX_STATEMENT_TIME`; MySQL has no
+  per-account statement time). A session may change its own statement time: the plugin sets a
+  read-only session and its own statement timeout on every connection (`galbridge_db_timeout`,
+  1–30 s, default 3), which is what bounds its statements; the role default applies to any other
+  session opened with these credentials until it changes it;
 * **PostgreSQL**: a new role (`NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT`) with
   the role defaults `default_transaction_read_only = on`, `statement_timeout = '5s'`,
   `idle_in_transaction_session_timeout = '10s'` and – because Roundcube sends statements with the
@@ -435,7 +447,9 @@ following checks still run.
   every configuration problem (FAIL for the fail-closed cases such as a switch that is not a
   boolean, a visibility column that is not a string, a malformed deny-list or overlapping
   organizations, WARN for dropped allow-list entries); a WARN for every `ROUNDCUBE_GALBRIDGE_*`
-  environment variable that overrides an option (the name only, never the value); a WARN while `'*'`
+  environment variable that overrides an option (the name only, never the value) – in the
+  environment of the shell that runs `diag`: a PHP-FPM pool has its own (`env[...]` in the pool
+  configuration, `clear_env`), check that one separately; a WARN while `'*'`
   global data domains are in effect (and when `'*'` is set without
   `galbridge_global_allow_wildcard`, which leaves the global book empty); the enabled books; the
   **effective value of every switch** – three `switches (...)` lines, each switch under the name of
@@ -836,8 +850,15 @@ directory server is derived from the administrator's `imap_host` when it is a si
 `127.0.0.1:143`). User preferences and the client's `Host` header play no part. A templated (`%d`,
 `%n`, `%s`), array or empty `imap_host` without an explicit list disables the plugin (`diag` FAIL,
 log `plugin disabled`). So does Roundcube's `include_host_config`: with it the effective
-`imap_host` depends on the requested host name, so nothing is derived from it – list the servers.
-With several IMAP servers that authenticate against the same vmail database, list them:
+`imap_host` depends on the requested host name, so nothing is derived from it – list the servers
+(likewise when the variable `ROUNDCUBE_INCLUDE_HOST_CONFIG` is set: Roundcube ignores it for this
+option, so what the core really does cannot be told). The session's host and the stored user host
+are compared exactly as Roundcube wrote them at login: a host name, an IPv4 address, an IPv6
+address in brackets or a socket URI (the stored host may also be the configured URI of an older
+Roundcube, `ssl://imap.example.com:993`). Any other form – a blank, a scheme, a user part, a colon,
+a path – is `host_mismatch`: PHP would have connected that login somewhere else than the text reads
+(Roundcube before 1.7.6 accepts a typed server unchecked). With several IMAP servers that
+authenticate against the same vmail database, list them:
 
 ```php
 $config['galbridge_imap_hosts'] = ['imap1.example.com:993', 'imap2.example.com:993'];   // no scheme, no %
@@ -853,12 +874,14 @@ that, and a login from another user database that happens to equal a mailbox nam
 that mailbox's directory (`diag` reminds you when more than one server is listed).
 
 `diag` checks that the directory servers cover `imap_host` and the `mail_host` of the existing
-Roundcube users. A session outside them gets no books and is logged once per request as
-`host_mismatch` with `host=` (session IMAP server), `mail_host=` (stored user host) and `allowed=`
-(the directory servers).
+Roundcube users (users with a `mail_host` in another form are counted, never printed). A session
+outside them gets no books and is logged once per request as `host_mismatch` with `host=` (session
+IMAP server), `mail_host=` (stored user host) and `allowed=` (the directory servers); a value in
+another form is logged as `not-canonical`.
 
 **The viewer cache and revocation.** The resolved user is cached in the session for
-`galbridge_scope_ttl`: a new alias or a changed column grant shows up after at most that time.
+`galbridge_scope_ttl`: a new **or removed** own alias (it decides which restricted alias accounts
+and lists the user sees) and a changed column grant take effect after at most that time.
 Losing the directory does not wait for it: every request that reads directory data first confirms
 with one small statement that the mailbox of the session is still active, unexpired and in its
 domain. A mailbox that was disabled, expired, deleted or moved – or whose domain was – gets "The
@@ -1030,7 +1053,7 @@ cause of almost every "empty directory".
 |---|---|
 | No GAL Bridge book in the address book | `diag`: `galbridge_db_dsn` missing or refused (FAIL on the `galbridge_db_dsn` line with the reason), plugin disabled by the IMAP host binding (FAIL "directory hosts"; log `plugin disabled` – also with `include_host_config`), session server not a directory server (log `host_mismatch host=… mail_host=… allowed=…`: add the host, or the right port, to `galbridge_imap_hosts`; `diag` checks `imap_host` and the hosts of Roundcube's users), login not an active mailbox (`diag --user`: "not found"; log `denied_source status=no_mailbox`), role too broad (log `role_too_broad`: it can read a secret column or the `forwardings` table), a required column or the view `galbridge_forwardings` missing (log `column_missing` names it: run `grants --grants-only`, section 5), **a switch that is not a boolean or another fail-closed configuration error** (log `config_invalid … all books are disabled`, `diag` FAIL names the option), home domain not in the viewer list, a login during a database outage (the books appear once the database is back, 3.9) |
 | Global book missing | `galbridge_global_viewer_domains` is empty by default; `'*'` data domains without `galbridge_global_allow_wildcard` (log `config_invalid`); its data scope minus the user's own domain(s) is empty |
-| "The directory is temporarily unavailable." | log `db_down` (connection failed or the role's connection limit reached – raise it, 2.2; in a web request Roundcube's errors log has the driver message, `diag` prints it on its `connect` line; next attempt after 30 s) or `db_error sqlstate=…`: `42000` (MariaDB/MySQL: access denied – grants), `42501` (PostgreSQL: permission denied – grants), `42S22` / `42703` (unknown column – iRedMail schema or the `galbridge_visibility_column` name), `70100` (MariaDB `max_statement_time`), `57014` (PostgreSQL `statement_timeout`), `HY000` (MySQL, includes `max_execution_time`) |
+| "The directory is temporarily unavailable." | log `db_down` (connection failed; in a web request Roundcube's errors log has the driver message, `diag` prints it on its `connect` line; next attempt after 30 s) or `db_busy` (the role's connection limit is reached – raise it, 2.2) or `db_error sqlstate=…`: `42000` (MariaDB/MySQL: access denied – grants), `42501` (PostgreSQL: permission denied – grants), `42S22` / `42703` (unknown column – iRedMail schema or the `galbridge_visibility_column` name), `70100` (MariaDB `max_statement_time`), `57014` (PostgreSQL `statement_timeout`), `HY000` (MySQL, includes `max_execution_time`) |
 | Export downloads nothing | a refused export (section 4): log `export_disabled`, `export_too_large` (also a search result above the result cap), `group_too_large`, `too_many_ids`, `set_incomplete`, or `db_down` / `db_error` during the export |
 | The directory disappears for one user in the middle of a session | the mailbox was disabled, expired, deleted or moved (log `viewer_revoked`; section 3.9) |
 | Autocomplete or search finds nothing | fewer than `galbridge_min_search_length` characters (global book: in every word); global book matches prefixes only, e-mail from the local part and organizations by their whole label; `galbridge_*_autocomplete = false`; search-only book opened without a search |
@@ -1057,11 +1080,13 @@ cause of almost every "empty directory".
 | `aliases_capped`, `aliases_skipped` | WARN | more per-user aliases than are shown for one person (20), or so many on one page that some entries are shown without aliases |
 | `field_unavailable` | WARN | configured fields whose columns are missing or not granted |
 | `db_error` | ERROR | a query failed (`sqlstate=`); the driver text only with `galbridge_debug` |
-| `db_down` | ERROR | connection failed, including a reached connection limit (`retry_in=30`) |
+| `db_down` | ERROR | connection failed (`retry_in=30`: the session does not try again before) |
+| `db_busy` | WARN | the connection limit of the role (or of the server) is reached: this request gets "directory unavailable", the next one tries again (raise `--connection-limit`, 2.2) |
 | `session limit not applied` | WARN | the server refused the per-connection statement timeout or read-only setting (the role limits still apply) |
 | `grouping_disabled`, `too_many_groups` | WARN | groups switched off (3.5) |
 | `group_too_large`, `too_many_ids`, `export_disabled`, `export_too_large` | WARN | a request was refused by a limit (3.8) |
 | `set_incomplete` | WARN | a recipient set or export was refused because an entry of it could not be delivered (`dropped=`; see `row_invalid`) |
+| `search_set_stale` | WARN | the export of a search was refused: its stored criteria belong to another configuration (search again) |
 | `invalid_gid`, `invalid_id` | WARN | an undecodable or foreign group or contact ID in a request (stale link or crafted request; `tag=` correlates repeats without revealing the value) |
 | `row_invalid` | WARN | a database row with an invalid address, or whose address does not belong to the row's `domain` column, was dropped (vmail data quality); for the mailbox row of a login: that login gets no directory |
 | `row_out_of_scope` | ERROR | a row outside the book's scope (or hidden, or failing the e-mail check) reached PHP and was dropped; the SQL should already exclude it – please report it |
@@ -1158,8 +1183,11 @@ platform advisory check, remediation of every accepted finding in release 1.0.1;
 [CHANGELOG.md](CHANGELOG.md) and [SECURITY.md](SECURITY.md)). The remediation was then reviewed
 once more before the release – area by area, each finding reproduced by a test that fails on the
 code before its fix, and the CI steps run as an unprivileged user; what that found is fixed in
-1.0.1 as well (changelog, "Fixed after the review of the remediation"). An automated review is not
-a certification: report anything it missed as described in SECURITY.md.
+1.0.1 as well (changelog, "Fixed after the review of the remediation"). On 2026-11-25 the
+remediation was verified against the audit report with Anthropic's Claude Opus 5.5 – in the code and
+with the suites on all three engines – and where a fix was incomplete it was completed (changelog,
+"Unreleased"). An automated review is not a certification: report anything it missed as described
+in SECURITY.md.
 
 Before that, the design was reviewed prior to implementation in three independent reviews –
 Roundcube core integration, security and operability – against the Roundcube 1.7.7 and iRedMail

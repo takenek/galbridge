@@ -49,6 +49,17 @@ final class Normalizer
     public const AMPERSAND = "\u{FF06}";
 
     /**
+     * What ASCII curly brackets become in display text: U+FF5B / U+FF5D FULLWIDTH CURLY BRACKETS. A
+     * contactlist_name_template is filled one placeholder after the other with str_replace()
+     * (rcube_addressbook::compose_search_name()), so a "{department}" INSIDE the name would be
+     * replaced as well - text of two fields could be joined into an encoded-word that neither of
+     * them contains ("={department}=" + "?...?").
+     */
+    public const LEFT_BRACE = "\u{FF5B}";
+
+    public const RIGHT_BRACE = "\u{FF5D}";
+
+    /**
      * Normalise a domain: trim, NFC, lower case, IDNA to ASCII, trailing dot removed, validated.
      */
     public static function domain(mixed $value): ?string
@@ -182,7 +193,10 @@ final class Normalizer
      *  - '&' becomes U+FF06: Roundcube's recipient widget (Elastic skin) inserts names as HTML after
      *    escaping only '<' and '>', so "&#64;" or "&commat;" would be shown as an at-sign;
      *  - "=?" and "?=" (the delimiters of an RFC 2047 encoded-word) are split: an ASCII name of that
-     *    form would be decoded by the recipients' mail clients into arbitrary text.
+     *    form would be decoded by the recipients' mail clients into arbitrary text;
+     *  - '{' and '}' become U+FF5B / U+FF5D: core fills a contactlist_name_template placeholder by
+     *    placeholder, so a "{field}" inside a value would be replaced by another field and the two
+     *    texts joined behind every check made here (see LEFT_BRACE).
      *
      * What Roundcube itself DELETES later is deleted here first, because a deletion joins the text on
      * both sides of it: with a contactlist_name_template other than "{name}", core removes every
@@ -222,11 +236,23 @@ final class Normalizer
         // notations decoded later (see above). Every character removed at the top left a space and
         // the deletions are done, so neither notation can be re-assembled from the pieces around a
         // removed part
-        $s = str_replace(['&', '=?', '?='], [self::AMPERSAND, '= ?', '? ='], $s);
+        $s = str_replace(['&', '{', '}', '=?', '?='], [self::AMPERSAND, self::LEFT_BRACE, self::RIGHT_BRACE, '= ?', '? ='], $s);
         if (mb_strlen($s) > $max) {
             // cutting the end joins nothing; it can only leave an opening bracket or a space there
             $s = (string) preg_replace('/[\s(\[]+$/u', '', mb_substr($s, 0, $max));
         }
+        return self::edges($s);
+    }
+
+    /**
+     * A text never starts or ends with '=' or '?' (they become U+FF1D / U+FF1F): a name template
+     * may put two fields next to each other without a blank ("{name}{department}"), and the two
+     * characters of an encoded-word delimiter would then come from two texts that are harmless
+     * each. Inside a text the delimiters are split (displayText()).
+     */
+    private static function edges(string $s): string
+    {
+        $s = (string) preg_replace_callback('/^[=?]|[=?]$/', static fn (array $m): string => $m[0] === '=' ? "\u{FF1D}" : "\u{FF1F}", $s);
         return $s;
     }
 
@@ -240,12 +266,28 @@ final class Normalizer
     }
 
     /**
+     * Display text that cannot pose as an e-mail address in a recipient field: cut at the first
+     * at-sign or look-alike (containsAt()); what is left never ends with a blank or an opening
+     * bracket (displayText()). Applied to every directory text that core can put into a recipient
+     * name: the name fields, and through a contactlist_name_template also department and phones.
+     */
+    public static function cutAtSign(string $text): string
+    {
+        if (!self::containsAt($text)) {
+            return $text;
+        }
+        $cut = preg_split('/[@\x{FF20}\x{FE6B}]/u', $text, 2);
+        // the new end follows the rules of displayText(): no opening bracket, no blank, no '=' or '?'
+        return self::edges((string) preg_replace('/[\s(\[]+$/u', '', is_array($cut) ? (string) $cut[0] : ''));
+    }
+
+    /**
      * A search word as it has to be compared with display text (labels of groups and
      * organizations), which went through displayText().
      */
     public static function labelWord(string $word): string
     {
-        return str_replace(['&', '=?', '?='], [self::AMPERSAND, '= ?', '? ='], $word);
+        return str_replace(['&', '{', '}', '=?', '?='], [self::AMPERSAND, self::LEFT_BRACE, self::RIGHT_BRACE, '= ?', '? ='], $word);
     }
 
     /**

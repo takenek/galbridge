@@ -19,7 +19,8 @@
 --    Replace CHANGE_ME_PASSWORD_VERIFIER below with the second line (41 characters, starting with
 --    '*') and, if your database is not called "vmail", every "vmail." below.
 -- 2. Use the same host part as your existing Roundcube account ("SHOW GRANTS FOR roundcube@...").
---    A remote Roundcube host: replace 'localhost' by its address and add  REQUIRE SSL.
+--    A remote Roundcube host: replace 'localhost' by its address and end the CREATE USER statement
+--    with  REQUIRE SSL  (there, not later: a GRANT that fails stops the script).
 -- 3. Run as the database administrator (root):   mysql < grants.mysql.sql
 --    Never with --force: the first error must stop the script.
 -- 4. Put the DSN (with the password, not the verifier) into plugins/galbridge/config.inc.php, e.g.

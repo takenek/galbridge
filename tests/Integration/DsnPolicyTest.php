@@ -351,6 +351,11 @@ final class DsnPolicyTest extends TestCase
             'host with a blank (two libpq settings)' => ["pgsql://{$u}@127.0.0.1%20sslmode=disable/vmail", 'host'],
             'host with a semicolon' => ["mysql://{$u}@127.0.0.1%3Bhost=db.evil.example/vmail", 'host'],
             'host with a quote' => ["pgsql://{$u}@127.0.0.1'x/vmail", 'host'],
+            // STAGE 6: spellings the driver reads differently from the policy
+            'localhost in upper case (MySQL: another socket)' => ["mysql://{$u}@LOCALHOST/vmail", 'lower case'],
+            'localhost in mixed case (PostgreSQL)' => ["pgsql://{$u}@LocalHost/vmail", 'lower case'],
+            'old driver(syntax) notation' => ["mysql(mysqli)://{$u}@127.0.0.1/vmail", 'must start with'],
+            'driver without //' => ["pgsql:{$u}@127.0.0.1/vmail", 'must start with'],
             // database
             'database with a second setting' => ["pgsql://{$u}@127.0.0.1/vmail%20host=db.evil.example", 'database'],
             'database with a quote' => ["mysql://{$u}@127.0.0.1/vmail'", 'database'],

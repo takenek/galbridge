@@ -36,11 +36,13 @@ final class SourceGuardTest extends TestCase
         'call_user_func' => [], 'call_user_func_array' => [], 'forward_static_call' => [], 'forward_static_call_array' => [],
         'func_get_args' => [], 'get_defined_vars' => [], 'compact' => [],
         // runtime environment
-        'putenv' => [], 'ini_set' => [], 'ini_alter' => [], 'set_include_path' => [], 'dl' => [], 'mail' => [], 'mb_send_mail' => [],
+        // (bin/galbridge.sh --allow-root: logs of a root process go to syslog, never into log_dir, and
+        // the working directory is taken off include_path)
+        'putenv' => [self::SCRIPT], 'ini_set' => [self::SCRIPT], 'ini_alter' => [], 'set_include_path' => [self::SCRIPT], 'dl' => [], 'mail' => [], 'mb_send_mail' => [],
         // (diag --url turns the warning of a failed request into its own WARN line)
         'set_error_handler' => [self::CLI], 'restore_error_handler' => [self::CLI],
         'set_exception_handler' => [], 'register_shutdown_function' => [], 'spl_autoload_register' => ['lib/autoload.php'],
-        'getenv' => ['lib/GalBridge/Config.php', 'lib/GalBridge/Db/Dsn.php', self::SCRIPT],
+        'getenv' => ['lib/GalBridge/Config.php', 'lib/GalBridge/Db/Dsn.php', 'lib/GalBridge/Directory/ViewerResolver.php', self::SCRIPT],
         'define' => [self::SCRIPT],
         // network: only "diag --url" (an address given by the operator on the command line)
         'curl_init' => [], 'curl_exec' => [], 'curl_multi_exec' => [], 'fsockopen' => [], 'pfsockopen' => [], 'stream_socket_client' => [],

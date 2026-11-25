@@ -94,6 +94,12 @@ final class Dsn
         if (trim($dsn) === '') {
             throw new GalBridgeException('config_invalid', 'galbridge_db_dsn is not configured');
         }
+        if (preg_match('~^[A-Za-z]+://~', $dsn) !== 1) {
+            // rcube_db::parse_dsn() still reads the old "driver(syntax)://" notation, while
+            // rcube_db::factory() takes everything before ':' as the driver - and ends the PHP process
+            // on an unknown one. Only the form both read alike is accepted.
+            throw new GalBridgeException('config_invalid', 'the DSN must start with mysql://, mysqli:// or pgsql://');
+        }
         $scheme = strtolower((string) preg_replace('~[(:].*$~s', '', $dsn));
         $driver = $scheme === 'mysqli' ? 'mysql' : $scheme;
         $allowed = ['mysql', 'pgsql'];
@@ -337,6 +343,12 @@ final class Dsn
         $host = (string) ($parsed['hostspec'] ?? '');
         if ($host !== '' && !preg_match('/^[A-Za-z0-9._:-]{1,255}$/D', $host)) {
             throw new GalBridgeException('config_invalid', 'the DSN host contains characters that are not part of a host name or an IP address');
+        }
+        if ($host !== 'localhost' && strtolower($host) === 'localhost') {
+            // pdo_mysql uses pdo_mysql.default_socket for "localhost" only, while mysqlnd treats any
+            // spelling as local and then takes its built-in socket path (/tmp/mysql.sock): the policy
+            // would judge one endpoint and the driver use another
+            throw new GalBridgeException('config_invalid', 'write the DSN host localhost in lower case (client libraries treat other spellings differently)');
         }
         if (isset($parsed['port'])) {
             $port = (string) $parsed['port'];

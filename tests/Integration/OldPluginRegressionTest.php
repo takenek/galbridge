@@ -546,8 +546,13 @@ final class OldPluginRegressionTest extends TestCase
             }
             // exactly ONE view, and it narrows: seven columns of forwardings, three kinds of rows -
             // never the private forwarding targets - and the role gets the view INSTEAD of the table
-            self::assertSame(1, preg_match_all('/\bVIEW\s+((?:vmail\.)?[a-z_]+)/', $sql, $views), $flavour);
+            self::assertSame(1, preg_match_all('/\bCREATE\b[^;]*?\bVIEW\s+((?:vmail\.)?[a-z_]+)/', $sql, $views), $flavour);
             self::assertSame($flavour === 'mysql' ? 'vmail.galbridge_forwardings' : 'galbridge_forwardings', $views[1][0]);
+            if ($flavour === 'postgres') {
+                // STAGE 6: CREATE OR REPLACE keeps the owner of a view that existed before - the
+                // administrator running the grant set takes it over
+                self::assertStringContainsString('ALTER VIEW galbridge_forwardings OWNER TO CURRENT_USER;', $sql);
+            }
             self::assertMatchesRegularExpression('/VIEW\s+\S+(?: WITH \(security_barrier = true\))? AS\s+SELECT address, forwarding, domain, is_alias, is_list, is_maillist, active\s+FROM (?:vmail\.)?forwardings\s+WHERE is_alias = 1 OR is_list = 1 OR is_maillist = 1;/', $sql, $flavour);
             self::assertDoesNotMatchRegularExpression('/\bGRANT\b[^;]*\bON (?:vmail\.)?forwardings\b/', $sql, $flavour . ': no grant on the forwardings table');
             self::assertMatchesRegularExpression('/GRANT SELECT \([a-z_, ]+\) ON (?:vmail\.)?galbridge_forwardings TO /', $sql, $flavour);

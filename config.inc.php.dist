@@ -51,7 +51,8 @@
 // DSN of the iRedMail vmail database, read with a DEDICATED READ-ONLY role that has column-level
 // SELECT grants only - never mailbox.password, recovery_email, allow_nets or settings - and that
 // reads the forwardings through the view galbridge_forwardings (alias and list rows only), never
-// the table itself: the private forwarding targets of the mailboxes stay out of its reach.
+// the table itself: the role cannot select the private forwarding targets of the mailboxes (keep its
+// password secret all the same - the view limits reading, not inference, README 2.2).
 // '' = not configured: no book is offered (fail closed) and diag reports FAIL. There is no fallback
 // to Roundcube's own db_dsnw: PostgreSQL cannot query across databases, and iRedMail's "roundcube"
 // role (used by the password plugin) can UPDATE vmail.mailbox and read every password hash.
@@ -144,11 +145,12 @@ $config['galbridge_db_connect_timeout'] = 2;
 // Statement timeout in seconds (1 .. 30), set for the plugin's database session right after
 // connecting, together with read-only transaction mode: MariaDB max_statement_time, MySQL
 // max_execution_time, PostgreSQL statement_timeout. It bounds what one slow or abusive search can
-// cost the database. It is a backstop: the reference grants limit the role itself on BOTH engines -
-// 25 connections (or "grants --connection-limit=N"; size it to the PHP-FPM pm.max_children of
-// Roundcube) and a statement time of 5 seconds (PostgreSQL and MariaDB; MySQL 8 has no per-account
-// statement time, there the session setting above is the only one). diag shows the limit of the
-// account and warns when it is unlimited or when the server refused a session setting.
+// cost the database. This value - not the role - bounds the plugin's statements: the reference
+// grants give the role 25 connections on BOTH engines (a hard limit; "grants --connection-limit=N",
+// size it to the PHP-FPM pm.max_children of Roundcube) and a statement time of 5 seconds as its
+// DEFAULT (PostgreSQL and MariaDB; MySQL 8 has none), which every session - this one too - may
+// change for itself. diag shows the limit of the account and warns when it is unlimited or when
+// the server refused a session setting.
 $config['galbridge_db_timeout'] = 3;
 
 // true: accept a NON-loopback database host without verified TLS (plaintext, or TLS without
@@ -195,7 +197,9 @@ $config['galbridge_db_refused_users'] = ['vmail', 'vmailadmin', 'roundcube', 'so
 // ['[2001:db8::10]:993']. An entry without a port allows every port of that host; give the port
 // whenever another IMAP service (a test instance, a proxy to another user database) listens on
 // the same host. Both the IMAP server of the session (host and port) and the host stored for the
-// Roundcube user must be covered.
+// Roundcube user must be covered, compared exactly as Roundcube wrote them at login (a host name,
+// an IP address - IPv6 in brackets - or a socket; anything else, e.g. a typed server with a blank
+// or a colon, is host_mismatch: PHP would have connected it somewhere else than it reads).
 // The one scheme that is accepted is a local socket in Roundcube's own notation,
 // ['unix:///run/dovecot/imap.sock'] (an absolute path): it has neither host name nor port and is
 // matched as a whole, the path exactly as written.
@@ -204,8 +208,9 @@ $config['galbridge_db_refused_users'] = ['vmail', 'vmailadmin', 'roundcube', 'so
 // '127.0.0.1:143': nothing to set. With an array or a templated imap_host and no explicit list the
 // plugin stays disabled (diag: FAIL), and a malformed entry disables it as well (fail closed). The
 // same holds when Roundcube's
-// include_host_config is enabled: imap_host can then differ per requested host name (the Host
-// header selects the configuration file), so nothing is derived from it - list the servers here.
+// include_host_config is enabled (or the variable ROUNDCUBE_INCLUDE_HOST_CONFIG is set, which
+// Roundcube ignores for it): imap_host can then differ per requested host name (the Host header
+// selects the configuration file), so nothing is derived from it - list the servers here.
 // EVERY listed server must authenticate against this vmail database; the plugin cannot verify that
 // and diag reminds you when more than one is listed. diag checks that the list covers imap_host
 // and the hosts stored for the existing Roundcube users; a session outside it is logged as
@@ -214,11 +219,12 @@ $config['galbridge_imap_hosts'] = [];
 
 // Seconds (30 .. 3600) for which the resolved viewer - home domain, the viewer's own alias
 // addresses, the column/privilege probe and therefore the book entitlements - is cached in the
-// Roundcube session. A new alias or a changed column grant takes effect after at most this time.
-// REVOCATION does not wait for it: every request that reads the directory first confirms, with one
-// small statement, that the mailbox of the session is still active, unexpired and in its domain -
-// a mailbox that was disabled, expired, deleted or moved (or whose domain was) loses the directory
-// with its next request. A change of THIS configuration takes effect immediately as well (the
+// Roundcube session. A new or REMOVED own alias of the viewer (which decides the restricted alias
+// accounts and lists it sees) and a changed column grant take effect after at most this time.
+// Losing the DIRECTORY does not wait for it: every request that reads the directory first
+// confirms, with one small statement, that the mailbox of the session is still active, unexpired
+// and in its domain - a mailbox that was disabled, expired, deleted or moved (or whose domain was)
+// loses the directory with its next request. A change of THIS configuration takes effect immediately as well (the
 // cache is bound to a keyed fingerprint of it). Lower = fresher, one lookup more per period and
 // session.
 $config['galbridge_scope_ttl'] = 300;

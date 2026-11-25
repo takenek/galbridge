@@ -121,19 +121,21 @@ final class RecordMapper
         // text of another domain that the name template would show before the marker, or without it
         $withheld = $isForeign ? $this->withheldFromForeign() : [];
         if ($this->fields->has('department') && !in_array('department', $withheld, true)) {
-            $dept = Normalizer::displayText($row['department'] ?? '');
+            // department and phones reach recipient names too (a contactlist_name_template such as
+            // "{name} ({department})"): the same anti-impersonation rule as for the name
+            $dept = $this->safeName(Normalizer::displayText($row['department'] ?? ''));
             if ($dept !== '') {
                 $record['department'] = $dept;
             }
         }
         if ($this->fields->has('phone') && !in_array('phone:work', $withheld, true)) {
-            $phone = Normalizer::displayText($row['telephone'] ?? '', 64);
+            $phone = $this->safeName(Normalizer::displayText($row['telephone'] ?? '', 64));
             if ($phone !== '') {
                 $record['phone:work'] = [$phone];
             }
         }
         if ($this->fields->has('mobile') && !in_array('phone:mobile', $withheld, true)) {
-            $mobile = Normalizer::displayText($row['mobile'] ?? '', 64);
+            $mobile = $this->safeName(Normalizer::displayText($row['mobile'] ?? '', 64));
             if ($mobile !== '') {
                 $record['phone:mobile'] = [$mobile];
             }
@@ -205,13 +207,8 @@ final class RecordMapper
 
     private function safeName(string $name): string
     {
-        if (Normalizer::containsAt($name)) {
-            // a display name that looks like an address could impersonate another recipient
-            $cut = preg_split('/[@\x{FF20}\x{FE6B}]/u', $name, 2);
-            // what is left never ends with an opening bracket either (Normalizer::displayText())
-            $name = (string) preg_replace('/[\s(\[]+$/u', '', is_array($cut) ? (string) $cut[0] : '');
-        }
-        return $name;
+        // a display name that looks like an address could impersonate another recipient
+        return Normalizer::cutAtSign($name);
     }
 
     /**

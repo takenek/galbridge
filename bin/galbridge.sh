@@ -24,9 +24,11 @@
  * installations the web server user - would run code as root. Root is refused unless --allow-root
  * is given, and then only when all of that code belongs to root and nobody else can write it:
  * the plugin, and below the Roundcube directory everything in program/, plugins/ (Roundcube loads
- * every enabled plugin at start), vendor/ and the configuration directory, together with the
- * directories they are reached through. A process whose user cannot be determined (no posix
- * extension and no /proc) is treated like root.
+ * every enabled plugin at start), vendor/ and every configuration directory (ROUNDCUBE_CONFIG_DIR,
+ * RCUBE_CONFIG_PATH), together with the directories they are reached through; a symbolic link to a
+ * path that does not exist is refused. Such a process keeps only absolute include_path entries (not
+ * the working directory) and logs to syslog, never into log_dir, which the web server user owns.
+ * A process whose user cannot be determined (no posix extension and no /proc) is treated like root.
  *
  * @license GPL-3.0-or-later
  */
@@ -59,6 +61,10 @@ function galbridge_cli_unsafe_path(array $paths): ?string
 {
     foreach ($paths as $path) {
         if (!file_exists($path)) {
+            if (is_link($path)) {
+                // a link to nothing: whoever can create its target later decides what is loaded
+                return $path . ' (symbolic link to a path that does not exist)';
+            }
             continue;
         }
         $real = realpath($path);
@@ -128,6 +134,10 @@ function galbridge_cli_code_paths(string $dir, array &$seen = [], array &$links 
             continue;
         }
         $path = $real . '/' . $entry;
+        if (is_link($path) && !file_exists($path)) {
+            $paths[] = $path; // a dangling link: refused by galbridge_cli_unsafe_path()
+            continue;
+        }
         $code = is_dir($path) || preg_match('/\.(php|inc|sql|sh)$/D', $entry) === 1;
         if ($code && is_link($path)) {
             $links[] = $path;
@@ -220,19 +230,45 @@ if ($galbridgeRoot) {
     // enabled plugin (plugins/<name>/<name>.php and what that includes), classes of vendor/ on
     // demand, the localization index, and the plugin reads the configuration of the password
     // plugin: everything PHP could load from these directories has to belong to root.
-    $configDir = is_string(getenv('ROUNDCUBE_CONFIG_DIR')) && getenv('ROUNDCUBE_CONFIG_DIR') !== '' ? rtrim((string) getenv('ROUNDCUBE_CONFIG_DIR'), '/') : $root . '/config';
+    // The configuration directories exactly as Roundcube finds them: ROUNDCUBE_CONFIG_DIR when it
+    // is not empty and not "0" (iniset.php reads it with ?:), and every entry of RCUBE_CONFIG_PATH
+    // (rcube_config: absolute, or relative to the Roundcube directory).
+    $configDirs = [(string) (getenv('ROUNDCUBE_CONFIG_DIR') ?: $root . '/config')];
+    foreach (explode(PATH_SEPARATOR, (string) (getenv('RCUBE_CONFIG_PATH') ?: '')) as $p) {
+        if ($p !== '') {
+            $configDirs[] = $p[0] === '/' ? $p : $root . '/' . $p;
+        }
+    }
     $seen = [];
     $links = [];
-    $unsafe = galbridge_cli_unsafe_path([$root, ...galbridge_cli_code_paths($root . '/program', $seen, $links), ...galbridge_cli_code_paths($root . '/plugins', $seen, $links),
-        ...galbridge_cli_code_paths($root . '/vendor', $seen, $links), ...galbridge_cli_code_paths($configDir, $seen, $links)])
-        ?? galbridge_cli_unsafe_ancestor([$root, $root . '/program', $root . '/plugins', $root . '/vendor', $configDir, ...$links]);
+    $codePaths = [$root, ...galbridge_cli_code_paths($root . '/program', $seen, $links), ...galbridge_cli_code_paths($root . '/plugins', $seen, $links),
+        ...galbridge_cli_code_paths($root . '/vendor', $seen, $links)];
+    $unsafe = null;
+    foreach ($configDirs as $dir) {
+        // a configuration directory that does not exist yet is created by somebody later: refused
+        $unsafe ??= is_dir($dir) ? null : $dir . ' (configuration directory that does not exist)';
+        array_push($codePaths, ...galbridge_cli_code_paths(rtrim($dir, '/'), $seen, $links));
+    }
+    $unsafe ??= galbridge_cli_unsafe_path($codePaths)
+        ?? galbridge_cli_unsafe_ancestor([$root, $root . '/program', $root . '/plugins', $root . '/vendor', ...$configDirs, ...$links]);
     if ($unsafe !== null) {
         fwrite(STDERR, "galbridge.sh --allow-root refused: {$unsafe} is not owned by root or is writable by its group or by others.\n");
         exit(1);
     }
+    // Class files are looked up along include_path, and PHP's default ends with "." - the working
+    // directory of the administrator. Only absolute entries are kept for a process of root.
+    set_include_path(implode(PATH_SEPARATOR, array_filter(explode(PATH_SEPARATOR, (string) get_include_path()), static fn (string $p): bool => $p !== '' && $p[0] === '/')));
+    // Log files: log_dir belongs to the web server user, who could replace a log file with a symbolic
+    // link to any file - root would write through it. Roundcube's logs go to syslog instead (the
+    // variable is read by every rcube_config::get(), from the first log line on) ...
+    putenv('ROUNDCUBE_LOG_DRIVER=syslog');
 }
 define('INSTALL_PATH', $root . '/');
 require_once INSTALL_PATH . 'program/include/clisetup.php';
+if ($galbridgeRoot) {
+    // ... and so do PHP's own messages, which rcube_config pointed at log_dir/errors.log
+    ini_set('error_log', 'syslog');
+}
 
 $tool = new GalBridge\Cli\Tool(rcube::get_instance(), realpath(__DIR__ . '/..') ?: __DIR__ . '/..');
 exit($tool->run($args));

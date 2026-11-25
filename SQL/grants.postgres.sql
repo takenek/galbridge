@@ -119,6 +119,9 @@ CREATE OR REPLACE VIEW galbridge_forwardings WITH (security_barrier = true) AS
     SELECT address, forwarding, domain, is_alias, is_list, is_maillist, active
       FROM forwardings
      WHERE is_alias = 1 OR is_list = 1 OR is_maillist = 1;
+-- CREATE OR REPLACE keeps the owner of a view that existed before: the administrator running this
+-- becomes the owner, so a role that created a view of this name earlier cannot change it later
+ALTER VIEW galbridge_forwardings OWNER TO CURRENT_USER;
 REVOKE ALL ON galbridge_forwardings FROM PUBLIC;
 -- the grants of GAL Bridge 1.0.0 gave the role the table itself: taken away (nothing happens for
 -- a role that never had it)

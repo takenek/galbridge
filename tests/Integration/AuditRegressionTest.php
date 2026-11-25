@@ -230,6 +230,115 @@ final class AuditRegressionTest extends TestCase
     }
 
     /**
+     * STAGE 6 (U-04, closing): core fills a contactlist_name_template one placeholder after the other
+     * (rcube_addressbook::compose_search_name(), str_replace()), so a "{department}" INSIDE the name
+     * was replaced by the department as well - two texts that pass every check one by one were joined
+     * into an encoded-word. And department and phones reach recipient names through such a template,
+     * so the rule "a name never looks like an address" covers them too.
+     */
+    #[DataProviderExternal(Env::class, 'engines')]
+    public function testFieldsCannotBeJoinedOrPoseAsAnAddressThroughTheNameTemplate(string $dsn): void
+    {
+        $tail = '?UTF-8?B?Y2VvQGJhbmsuZXhhbXBsZQ==?';
+        Fixture::alter(
+            $dsn,
+            ['INSERT INTO mailbox (username, name, first_name, last_name, domain, department, telephone, mobile, maildir) VALUES'
+                . " ('braces1@example.com', '={department}=', '', '', 'example.com', '{$tail}', '', '', 'example.com/b/r/a/braces1'),"
+                . " ('braces2@example.com', 'Jan {telephone}{mobile}', '', '', 'example.com', 'ceo@bank.example', '+48 ceo@bank', 'x', 'example.com/b/r/a/braces2'),"
+                . " ('braces3@example.com', 'x=', '', '', 'example.com', '?UTF-8?B?Y2VvQGJhbmsuZXhhbXBsZQ?', '=1', '', 'example.com/b/r/a/braces3')"],
+            ["DELETE FROM mailbox WHERE username LIKE 'braces_@example.com'"],
+        );
+        $book = self::book($dsn, ['galbridge_fields' => ['name', 'email', 'department', 'phone', 'mobile']]);
+        foreach (['braces1@example.com', 'braces2@example.com', 'braces3@example.com'] as $address) {
+            $record = self::record($book, $address);
+            self::assertIsArray($record, $address);
+            foreach (['name', 'department'] as $field) {
+                self::assertDoesNotMatchRegularExpression('/[{}]/', (string) ($record[$field] ?? ''), "{$address} {$field}");
+            }
+            foreach (['{name} ({department})', '{name} {department}', '{name}{department}', '{department} {name}', '{name} {phone}', '{name}{department}{phone}'] as $template) {
+                // exactly what core composes for the list name, the autocomplete entry and the
+                // recipient taken from it
+                $composed = \rcube_addressbook::compose_search_name($record, null, (string) $record['name'], $template);
+                $label = "{$address} / {$template}: {$composed}";
+                self::assertStringNotContainsString('=?', $composed, $label);
+                self::assertStringNotContainsString('?=', $composed, $label);
+                self::assertSame($composed, \rcube_mime::decode_header($composed, 'UTF-8'), $label);
+                self::assertFalse(Normalizer::containsAt($composed), $label);
+                self::assertSame(1, substr_count(format_email_recipient($address, $composed), '@'), $label);
+            }
+        }
+        // the department keeps what stands before the at-sign; the curly brackets stay readable
+        self::assertSame('ceo', self::record($book, 'braces2@example.com')['department'] ?? null);
+        self::assertSame("\u{FF1D}{$this->fullwidth('{department}')}\u{FF1D}", self::record($book, 'braces1@example.com')['name'] ?? null);
+        self::assertSame(['+48 ceo'], self::record($book, 'braces2@example.com')['phone:work'] ?? null);
+    }
+
+    /**
+     * STAGE 6 (I-15, closing): the export of a search whose stored criteria this configuration can no
+     * longer apply (another fingerprint, another node) is refused - not a file without the entries
+     * of the book. Other actions simply show nothing; a new search works again.
+     */
+    #[DataProviderExternal(Env::class, 'engines')]
+    public function testAnExportOfAStaleSearchIsRefused(string $dsn): void
+    {
+        $notices = [];
+        $book = self::book($dsn, [], self::JAN, '', $notices);
+        $book->search('*', 'Kowalski');
+        $stored = $book->get_search_set();
+        self::assertIsArray($stored);
+        $stale = ['fp' => 'another-configuration'] + $stored;
+
+        $notices = [];
+        $export = self::book($dsn, [], self::JAN, 'export', $notices);
+        $export->set_search_set($stored);
+        $export->set_pagesize(99999);
+        self::assertContains(self::JAN, self::emails($export->list_records()), 'a valid stored search is exported');
+        self::assertSame([], $notices);
+
+        $export->set_search_set($stale);
+        self::assertSame([], self::emails($export->list_records()));
+        self::assertSame(['incomplete'], array_column($notices, 0), 'refused: the hook answers 204, no file');
+
+        // another action: nothing, without a refusal; a fresh search in the same book works again
+        $notices = [];
+        $list = self::book($dsn, [], self::JAN, 'list', $notices);
+        $list->set_search_set($stale);
+        self::assertSame([], self::emails($list->list_records()));
+        self::assertSame([], $notices);
+        $export->search('*', 'Kowalski');
+        self::assertContains(self::JAN, self::emails($export->list_records()));
+    }
+
+    /**
+     * STAGE 6 (R-001, closing): PostgreSQL and SQLite compare text case-sensitively. A row written
+     * with capitals escaped the hidden lists in SQL - dropped later in PHP, but still counted and
+     * matched by a search (an oracle for a hidden entry). The deny-lists compare in lower case.
+     */
+    #[DataProviderExternal(Env::class, 'engines')]
+    public function testHiddenListsAlsoMatchRowsWrittenWithCapitals(string $dsn): void
+    {
+        Fixture::alter(
+            $dsn,
+            ["INSERT INTO mailbox (username, name, first_name, last_name, domain, department, maildir) VALUES ('Hidden.Capitals@example.com', 'Capitalshidden', '', '', 'example.com', '', 'example.com/h/i/d/hidden')"],
+            ["DELETE FROM mailbox WHERE username = 'Hidden.Capitals@example.com'"],
+        );
+        $count = static fn (AddressBook $book): int => $book->search('*', 'Capitalshidden', 0, false)->count;
+        // the control: without a list the entry is found
+        self::assertSame(1, $count(self::book($dsn)));
+        foreach (['galbridge_hidden_addresses' => ['hidden.capitals@example.com'], 'galbridge_hidden_localparts' => ['hidden.capitals']] as $option => $list) {
+            $book = self::book($dsn, [$option => $list]);
+            self::assertSame(0, $count($book), $option . ': not counted');
+            self::assertSame([], self::emails($book->search('*', 'Capitalshidden')), $option);
+            self::assertSame([], self::emails($book->search('email', 'hidden.capitals', 2)), $option . ': not matched by its address');
+        }
+    }
+
+    private function fullwidth(string $text): string
+    {
+        return str_replace(['{', '}'], [Normalizer::LEFT_BRACE, Normalizer::RIGHT_BRACE], $text);
+    }
+
+    /**
      * The "(domain)" marker of a foreign entry in the global book comes first: a recipient field
      * shortens long names with an ellipsis at the END, which could hide a marker placed there.
      */

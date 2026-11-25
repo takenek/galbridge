@@ -136,6 +136,12 @@ final class ViewerResolver
             // per-host configuration files are chosen by the Host header of the request
             return 'include_host_config is enabled, so imap_host can depend on the requested host name';
         }
+        if (getenv('ROUNDCUBE_INCLUDE_HOST_CONFIG') !== false) {
+            // Roundcube reads include_host_config from its files WITHOUT the environment override,
+            // while the configuration as read here applies it: with the variable set, what the core
+            // does with the option cannot be told from here - so nothing is derived (fail closed)
+            return 'ROUNDCUBE_INCLUDE_HOST_CONFIG is set, and Roundcube itself ignores that variable: whether imap_host depends on the requested host name cannot be told';
+        }
         $imapHost = $config->adminCore('imap_host', $config->adminCore('default_host'));
         if (is_array($imapHost)) {
             return 'imap_host is an array (the user chooses the server)';
@@ -149,6 +155,10 @@ final class ViewerResolver
         return null;
     }
 
+    /**
+     * A host of the ADMINISTRATOR's configuration (imap_host) in the notation of the binding. Never
+     * for the values of a session or of the users table: those are checked with canonicalHost().
+     */
     public static function normaliseHost(string $host): string
     {
         $unix = Config::unixEndpoint(trim($host));
@@ -158,6 +168,44 @@ final class ViewerResolver
         $parsed = \rcube_utils::parse_host_uri(trim($host), 143, 993);
         $h = is_array($parsed) ? (string) $parsed[0] : trim($host);
         return strtolower(\rcube_utils::idn_to_ascii(trim($h, '[]')));
+    }
+
+    /**
+     * The IMAP host of the SESSION ($_SESSION['storage_host']) or of the user record (users.mail_host)
+     * in the notation of the binding - or null when the raw value is not in the one form Roundcube
+     * writes after a regular login: a host name (letters, digits, '.', '-', '_'), an IPv4 address, an
+     * IPv6 address in brackets, or a local socket "unix:///path". The value is NEVER trimmed or parsed
+     * again: PHP's socket layer connects to "host:port" taking the host up to the FIRST colon, so a
+     * value that a second parse reads differently (a blank, a scheme, a user part, a colon, a path)
+     * can name the allowed server for this check while the session was authenticated elsewhere. Such
+     * values reach the session where the user types the server and Roundcube does not check its form
+     * (1.7.0 - 1.7.5), or through an imap_host template and an unusual Host header.
+     *
+     * users.mail_host of an older Roundcube may hold the configured URI ("ssl://host:993"); with
+     * $storedUri that exact form is accepted as well (scheme ssl, tls, imap or imaps, the host as
+     * above, an optional port, which the stored host is compared without).
+     */
+    public static function canonicalHost(string $raw, bool $storedUri = false): ?string
+    {
+        $unix = Config::unixEndpoint($raw);
+        if ($unix !== null) {
+            return $unix; // whitespace and placeholders are refused by unixEndpoint(); no trim()
+        }
+        if ($storedUri && preg_match('~^(?:ssl|tls|imaps?)://(\[[0-9A-Fa-f:.]{2,45}\]|[A-Za-z0-9_.-]{1,253})(?::[0-9]{1,5})?$~Di', $raw, $m) === 1) {
+            $raw = $m[1];
+        }
+        if (preg_match('/^\[([0-9A-Fa-f:.]{2,45})\]$/D', $raw, $m) === 1) {
+            return filter_var($m[1], FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false ? strtolower($m[1]) : null;
+        }
+        if (filter_var($raw, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false) {
+            return $raw;
+        }
+        // a host name: no colon (an IPv6 address without brackets cannot be connected to either),
+        // no blank, no scheme, no user part, no path; never starting or ending with '.' or '-'
+        if (preg_match('/^[A-Za-z0-9_](?:[A-Za-z0-9_.-]{0,251}[A-Za-z0-9_])?$/D', $raw) === 1) {
+            return strtolower($raw);
+        }
+        return null;
     }
 
     /**
@@ -193,15 +241,37 @@ final class ViewerResolver
                 }
                 continue;
             }
-            if ($entry === $host || ($port !== null && $entry === self::endpoint($host, $port))) {
-                return true;
+            [$entryHost, $entryPort] = self::splitEntry($entry);
+            if ($entryHost !== $host) {
+                continue;
             }
-            // a host without a known port (the stored mail_host): the host part decides
-            if ($port === null && str_starts_with($entry, (str_contains($host, ':') ? '[' . $host . ']' : $host) . ':')) {
+            // an entry without a port covers every port; a host without a known port (the stored
+            // mail_host) is decided by the host part; otherwise the port has to be the entry's
+            if ($entryPort === null || $port === null || $entryPort === $port) {
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * Host and port of a TCP entry of the allowed list ("host", "host:port", "[v6]:port" or a bare
+     * IPv6 address - whose colons are not a port separator).
+     *
+     * @return array{0: string, 1: null|int}
+     */
+    private static function splitEntry(string $entry): array
+    {
+        if (preg_match('/^\[([^\]]+)\](?::([0-9]{1,5}))?$/D', $entry, $m) === 1) {
+            return [$m[1], isset($m[2]) ? (int) $m[2] : null];
+        }
+        if (filter_var($entry, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false) {
+            return [$entry, null];
+        }
+        if (preg_match('/^([^:]+):([0-9]{1,5})$/D', $entry, $m) === 1) {
+            return [$m[1], (int) $m[2]];
+        }
+        return [$entry, null];
     }
 
     /**
@@ -225,13 +295,16 @@ final class ViewerResolver
             Log::once('warning', 'viewer', 'plugin disabled', (self::bindingProblem($this->config) ?? 'no usable imap_host') . ': set galbridge_imap_hosts');
             return $this->memo = null;
         }
-        $storage = self::normaliseHost($this->storageHost);
-        $mailHost = self::normaliseHost($this->mailHost);
-        if (!self::covers($allowed, $storage, $this->storagePort) || !self::covers($allowed, $mailHost)) {
+        // the RAW values, checked for their canonical form - never trimmed or parsed again
+        $storage = self::canonicalHost($this->storageHost);
+        $mailHost = self::canonicalHost($this->mailHost, true);
+        if ($storage === null || $mailHost === null || !self::covers($allowed, $storage, $this->storagePort) || !self::covers($allowed, $mailHost)) {
             $this->status = 'host_mismatch';
-            // server names, not personal data: what the administrator needs for galbridge_imap_hosts
+            // server names, not personal data: what the administrator needs for galbridge_imap_hosts.
+            // A value that is not canonical is not written to the log (it could carry anything).
             Log::once('warning', 'viewer', 'host_mismatch', 'session IMAP host is not an allowed directory host', [
-                'host' => $storage === '' ? '' : self::endpoint($storage, $this->storagePort), 'mail_host' => $mailHost, 'allowed' => implode(' ', $allowed),
+                'host' => $storage === null ? ($this->storageHost === '' ? '' : 'not-canonical') : self::endpoint($storage, $this->storagePort),
+                'mail_host' => $mailHost ?? ($this->mailHost === '' ? '' : 'not-canonical'), 'allowed' => implode(' ', $allowed),
             ]);
             return $this->memo = null;
         }

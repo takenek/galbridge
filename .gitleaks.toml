@@ -2,9 +2,11 @@
 #
 # The default rules of the pinned gitleaks release apply to the whole repository and its history.
 # The only exceptions are the TEST-ONLY files that have to carry credentials of throw-away test
-# environments - the same narrow, named exceptions as in .gitguardian.yaml. Everything else,
-# including the rest of tests/, is scanned. A new harness file with other throw-away credentials
-# must be named here explicitly.
+# environments - the same exceptions as in .gitguardian.yaml: the whole fixture directory
+# tests/fixtures/vmail/ (upstream schema, seed with canary values, load.sh) and three named E2E
+# files - plus git-ignored run directories. Every path is anchored at the top of the repository
+# (a directory of that name elsewhere is scanned). Everything else, including the rest of tests/,
+# is scanned. A new harness file with other throw-away credentials must be named here explicitly.
 
 title = "GAL Bridge"
 
@@ -18,17 +20,17 @@ useDefault = true
 [[allowlists]]
 description = "TEST-ONLY vmail fixture and E2E harness credentials"
 paths = [
-    '''(^|/)tests/fixtures/vmail/''',
-    '''(^|/)tests/e2e/(setup\.sh|dovecot\.sh|rc\.py)$''',
+    '''^(?:\./)?tests/fixtures/vmail/''',
+    '''^(?:\./)?tests/e2e/(setup\.sh|dovecot\.sh|rc\.py)$''',
 ]
 
 # Local run directories and tool caches (git-ignored; never part of a checkout).
 [[allowlists]]
 description = "git-ignored run directories and caches"
 paths = [
-    '''(^|/)tests/e2e/run/''',
-    '''(^|/)tmp/phpstan/''',
-    '''(^|/)vendor/''',
+    '''^(?:\./)?tests/e2e/run/''',
+    '''^(?:\./)?tmp/phpstan/''',
+    '''^(?:\./)?vendor/''',
 ]
 
 # The throw-away values of the CI and local test environments, ignored by value only: the files

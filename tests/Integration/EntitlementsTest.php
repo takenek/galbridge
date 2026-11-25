@@ -475,7 +475,8 @@ final class EntitlementsTest extends TestCase
      */
     public function testVisibilityColumnHidesFlaggedPersons(): void
     {
-        $this->privateDb = sys_get_temp_dir() . '/galbridge-visibility-' . getmypid() . '.sqlite';
+        // an unpredictable name (STAGE 6, I-06): nobody can plant a file or a link there beforehand
+        $this->privateDb = sys_get_temp_dir() . '/galbridge-visibility-' . getmypid() . '-' . bin2hex(random_bytes(8)) . '.sqlite';
         @unlink($this->privateDb);
         $pdo = new \PDO('sqlite:' . $this->privateDb);
         $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);

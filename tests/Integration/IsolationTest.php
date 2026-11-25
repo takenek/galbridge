@@ -12,6 +12,7 @@ use GalBridge\DeniedBook;
 use GalBridge\Directory\BookDefinition;
 use GalBridge\Directory\IdCodec;
 use GalBridge\Directory\ViewerResolver;
+use GalBridge\Exception\GalBridgeException;
 use GalBridge\Factory;
 use GalBridge\Log;
 use GalBridge\Tests\Support\Env;
@@ -501,6 +502,55 @@ final class IsolationTest extends TestCase
         self::assertNull($resolver->resolve());
         self::assertSame('no_mailbox', $resolver->status());
         self::assertSame(0, $connects);
+    }
+
+    /**
+     * STAGE 6 (U-08, closing): with the connection limit of the role active by default on both
+     * engines, a refusal because that limit is reached must not be memoised like an outage - one
+     * user who holds the connections would otherwise keep the directory away from everybody who hits
+     * the limit for OUTAGE_SECONDS more. The request itself fails closed ("directory unavailable").
+     */
+    public function testAConnectionLimitRefusalIsNotMemoisedAsAnOutage(): void
+    {
+        foreach ([
+            'MariaDB, account limit' => ["SQLSTATE[HY000] [1226] User 'galbridge' has exceeded the 'max_user_connections' resource (current value: 25)", false],
+            'MySQL, server variable' => ["SQLSTATE[HY000] [1203] User galbridge already has more than 'max_user_connections' active connections", false],
+            'server full' => ['SQLSTATE[HY000] [1040] Too many connections', false],
+            'PostgreSQL, role limit' => ['SQLSTATE[08006] [7] FATAL:  too many connections for role "galbridge"', false],
+            'a dead server' => ['SQLSTATE[HY000] [2002] Connection refused', true],
+        ] as $case => [$message, $memoised]) {
+            $_SESSION = [];
+            $GLOBALS['galbridge_test_log'] = [];
+            $config = Env::config(Env::sqliteDsn());
+            $failing = static fn (string $dsn): \rcube_db => new class ($dsn, $message) extends \rcube_db {
+                public function __construct(string $dsn, private readonly string $message)
+                {
+                    parent::__construct($dsn);
+                }
+
+                public function db_connect($mode, $force = false)
+                {
+                    $this->db_error = true;
+                    $this->db_error_msg = $this->message;
+                }
+            };
+            $connection = new Connection(new Dsn(Env::sqliteDsn(), $config), 3, $failing);
+            try {
+                $connection->select('SELECT 1');
+                self::fail($case . ': connected');
+            } catch (GalBridgeException $e) {
+                self::assertSame('db_down', $e->getReason(), $case);
+            }
+            self::assertSame($memoised, isset($_SESSION['galbridge_down_until']), $case);
+            self::assertStringContainsString($memoised ? 'db_down' : 'db_busy', implode("\n", $GLOBALS['galbridge_test_log']), $case);
+            // the same request does not try again
+            try {
+                $connection->select('SELECT 1');
+                self::fail($case . ': retried in the same request');
+            } catch (GalBridgeException $e) {
+                self::assertSame('db_down', $e->getReason());
+            }
+        }
     }
 
     #[DataProvider('engines')]

@@ -5,6 +5,69 @@ semantic versioning.
 
 ## [Unreleased]
 
+Verification of the remediation in 1.0.1 against the audit report (2026-11-25, Anthropic's Claude
+Opus 5.5): the fixes were checked in the code and by the suites on all three engines; where a fix
+was incomplete or brought a new risk, it is completed here. No configuration or database step is
+needed for the upgrade.
+
+### Security
+- U-11 (completed): the IMAP binding compared the session's `storage_host` and the user's
+  `mail_host` after trimming and parsing them again, while PHP connects with the raw value (host up
+  to the first colon). On Roundcube 1.7.0 – 1.7.5, whose login form does not check a typed server,
+  and with an `imap_host` template plus an unusual `Host` header, a session authenticated by another
+  IMAP server could pass the binding. The raw values must now be a host name, an IPv4 address, an
+  IPv6 address in brackets or a local socket (the stored `mail_host` may also be the configured URI
+  of an older Roundcube); anything else is `host_mismatch`, and such a value is never written to
+  the log or printed by `diag` (which counts those users). A `ROUNDCUBE_INCLUDE_HOST_CONFIG`
+  variable - which Roundcube itself ignores - no longer lets the binding be derived from
+  `imap_host`; a bare IPv6 entry of `galbridge_imap_hosts` is no prefix of a host.
+- U-04 (completed): Roundcube fills a `contactlist_name_template` placeholder by placeholder, so a
+  `{department}` inside a name was filled as well and two texts could form an encoded-word; curly
+  brackets become their full-width forms, and a text never starts or ends with `=` or `?` (fields
+  placed next to each other by a template). Department and phone numbers, which a template can put
+  into recipient names, and department group labels follow the rule "never looks like an address"
+  (cut at the at-sign).
+- U-06 (completed): the documentation claimed that nobody could read forwarding targets even with
+  the role's credentials; the view limits what the role may select, not inference through
+  conditions evaluated on the rows behind it (MariaDB/MySQL merge views, PostgreSQL leakproof
+  operators) - corrected. The PostgreSQL grant set makes the administrator who runs it the owner of
+  the view; `diag` checks that the view holds no other rows than alias, alias-member and list rows.
+- U-08 (completed): with the account's connection limit active on both engines, a refusal because
+  that limit is reached was memoised like an outage (no directory for 30 s in that session); it now
+  fails only the request (log `db_busy`). The documentation no longer calls the role's statement
+  time a hard limit: it is the role's default, which every session (the plugin's too) may change.
+- U-10/U-09 (completed): for a non-local account host the `REQUIRE SSL` statement follows the
+  account statements instead of ending the script, so a later statement that fails (an optional
+  `GRANT` of a column an older schema lacks) cannot leave the account without it.
+- I-01 (completed): a DSN host `localhost` in another spelling (mysqlnd then uses its built-in
+  socket path, not `pdo_mysql.default_socket`) and the old `driver(syntax)://` notation (which ends
+  the PHP process in Roundcube's database factory) are refused.
+- I-02 (completed): `diag` warns when `des_key` - the key of the configuration fingerprint kept in
+  sessions - is Roundcube's published default or empty.
+- I-03 (completed): `diag` ends with "OK with N warning(s)" when there are WARN lines, gives no
+  `[ OK ]` line for a `--url` that did not answer like the webmail, and ends an unexpected error with
+  exit code 2.
+- I-05 (completed): with `--allow-root`, the configuration directories of `RCUBE_CONFIG_PATH` (and
+  `ROUNDCUBE_CONFIG_DIR` read as Roundcube reads it) are checked, a symbolic link to a path that does
+  not exist is refused, the working directory is taken off `include_path`, and the logs of a root
+  process go to syslog instead of `log_dir` (which the web server user owns and could point at any
+  file). README 2.2: generate the grant set from code the web server cannot change and read it
+  before the database administrator runs it.
+- I-06 (completed): no fixed temporary file name in a test and in the release procedure.
+- I-07 (completed in the repository): Composer's blocking of releases with advisories is switched
+  off for the PHPUnit job only; the 1.7.0 legs and the coding-style job audit their dependencies as
+  well (the 1.7.0 legs all but that core); the release job also requires the tagged commit to be
+  part of `main`; the exceptions of the secret scanner are anchored at the top of the repository.
+  The signed release tag and pinning the release key remain a step of the maintainers.
+- I-10 (completed): the documentation and `diag` said that only a NEW own alias waits for
+  `galbridge_scope_ttl`; a removed one does too (restricted lists stay visible until then) - only the
+  mailbox itself is confirmed on every reading request.
+- I-15 (completed): the export of a search whose stored criteria this configuration can no longer
+  apply is refused (`incomplete`, no file) instead of delivering a file without the book's entries.
+- R-001 (completed): on PostgreSQL (and SQLite) a row written with capitals escaped the hidden lists
+  and the excluded domains in SQL - dropped later, but counted and matched by searches. The
+  deny-lists compare in lower case on every engine.
+
 ## [1.0.1] – 2026-11-24
 
 Remediation of the security audit of 1.0.0 (full source review with Anthropic's Mythos 5.2; it

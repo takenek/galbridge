@@ -260,9 +260,19 @@ ports) with different user databases, or a per-host configuration selected by th
 `galbridge_imap_hosts` – entries `host`, `host:port` or a local socket `unix:///path` – or, only
 when that list is empty, host and port of the administrator's `imap_host` (read from a fresh
 configuration, never a user preference) when it is a single string without `%`; `parse_host()` is
-never called. With `include_host_config` nothing is derived: the list must be explicit. Both the
+never called. With `include_host_config` - or a `ROUNDCUBE_INCLUDE_HOST_CONFIG` variable, which
+Roundcube itself ignores for that option - nothing is derived: the list must be explicit. Both the
 session's IMAP server (`$_SESSION['storage_host']` **and** `storage_port`) and the user's stored
-`mail_host` must be covered; the cached Viewer is bound to host and port. Otherwise the plugin
+`mail_host` must be covered, compared in the RAW form Roundcube wrote them
+(`ViewerResolver::canonicalHost()`): a host name, an IPv4 address, an IPv6 address in brackets or a
+socket URI – the stored `mail_host` may also be the configured URI of an older Roundcube – and
+nothing is trimmed or parsed a second time. PHP connects with the raw value (the host up to the
+first colon), so a value that a second parse would read differently (a blank, a scheme, a user
+part, a colon, a path) could name an allowed server here while the session was authenticated by
+another one; Roundcube 1.7.0 – 1.7.5 put a typed server into the session unchecked, and an
+`imap_host` template with an unusual `Host` header can do so as well. Such a value is
+`host_mismatch`, it is never logged, and `diag` counts the users that have one. The cached Viewer is
+bound to host and port. Otherwise the plugin
 stays disabled for the session. A local socket (Roundcube opens it with port -1) has neither host
 name nor port: it is covered by the entry of that very socket – the path as written – and by
 nothing else; the rule that lets a host entry cover a host without a known port never applies to
@@ -276,7 +286,9 @@ books.
 `testSessionAndStoredImapHostMustBothMatch`, `testExplicitImapHostsMayNameAPort`,
 `testTheImapPortOfTheSessionIsPartOfTheBinding`, `testCachedViewerIsBoundToTheImapPort`,
 `testHostDependentConfigurationNeedsAnExplicitHostList`, `testALocalSocketIsAnEndpointOfItsOwn`,
-`testASessionOnALocalSocketIsBoundToThatSocket`),
+`testASessionOnALocalSocketIsBoundToThatSocket`, `testIncludeHostConfigInTheEnvironmentNeedsAnExplicitHostList`,
+`testTheSessionHostIsComparedInTheFormRoundcubeWroteIt`, `testCanonicalHostAcceptsOnlyWhatALoginWrites`,
+`testABareIpv6EntryIsNoPrefixOfAHost`),
 `IsolationTest::testLoginsWithoutAVisibleMailboxGetNoBooks`,
 `IsolationTest::testCachedViewerIsBoundToTheImapHost`,
 `AuditRegressionTest::testADisabledMailboxLosesTheDirectoryWithItsNextRequest` (the row whose
@@ -322,8 +334,9 @@ content is never cached: every list and search re-applies all visibility predica
 `testAViewerWithoutAddressesMatchesNoRestrictedList`), E2E case 34 (through Roundcube's own session
 handler).
 
-*Residual risk.* A new own alias of the viewer (it can make a restricted list visible) and a
-changed column grant apply after the TTL.
+*Residual risk.* A new or removed own alias of the viewer (it can make a restricted list visible,
+or keep it visible after the alias was taken away) and a changed column grant apply after the TTL;
+only the mailbox itself is confirmed on every reading request.
 
 ### GB-13 Global-book over-exposure in multi-tenant hosting
 
@@ -357,7 +370,14 @@ are shown only to viewers who may post to them under iRedAPD's `accesspolicy` (`
 compared with the iRedAPD sources, ARCHITECTURE 6); unknown policy values are hidden (fail closed).
 The plugin does not read the `forwardings` table at all: every statement names the view
 `galbridge_forwardings`, which holds the alias, alias-member and list rows only, and the role has no
-grant on the table – forwarding targets are out of reach of the role, not merely unselected.
+grant on the table – the role cannot select a row of a private forwarding, not merely does not.
+This bounds what the role may READ; it is no barrier against inference by someone who holds the
+role's credentials: conditions of their own queries are evaluated on the rows behind the view
+(MariaDB/MySQL merge the view into the query; PostgreSQL's `security_barrier` lets leakproof
+operators and `EXPLAIN ANALYZE` counts through), which reveals single facts about those rows. The
+credentials therefore stay a secret (GB-23), and `diag` checks that the view holds no other
+rows; the PostgreSQL grant set makes the administrator who runs it the owner of the view, so a
+view of that name created earlier by another role is not taken over with its owner.
 Catch-all rows and external list members are never selected. Per-user aliases are shown only with
 `galbridge_user_aliases`, and then **shown and matched under one predicate**
 (`QueryBuilder::userAliasRoot`): the alias row belongs to a domain in the book's scope that is
@@ -465,7 +485,13 @@ the text on both sides of it, so what Roundcube deletes is deleted before the sp
 every empty bracket pair (`()`, `[]`, with the whitespace before it) from the composed name –
 `=()?` would be `=?` again. Empty pairs are therefore removed until none is left, and a text never
 starts with a closing or ends with an opening bracket (it would form such a pair with a bracket of
-the template, `{name} ({department})`). An entry without any name gets the local part of its
+the template, `{name} ({department})`). The template is filled placeholder by placeholder
+(`str_replace()`), so a `{department}` INSIDE a name would be filled as well and join two texts
+that pass every check one by one: curly brackets become U+FF5B / U+FF5D. A template may also put
+two fields next to each other without a blank (`{name}{department}`), so a text never starts or
+ends with `=` or `?` (they become U+FF1D / U+FF1F there): no delimiter can be formed at a boundary.
+Department and telephone numbers reach recipient names through such a template too: they are cut
+at the at-sign like the names, and so are the labels of department groups. An entry without any name gets the local part of its
 address as the name; an address may hold `&`, `#`, `=` and `?`, so that fallback is treated like
 every other text. Addresses are canonical lower-case ASCII (A-labels, no homographs) and must pass
 `rcube_utils::check_email()`; rows that fail are dropped (`row_invalid`, or `row_out_of_scope` for
@@ -485,7 +511,10 @@ no `{name}`, foreign entries do not carry that field (department, telephone numb
 `compose_list_name()` composes them, for the four listing modes and nine templates, each in a
 process of its own; `testTextThatATemplateShowsBeforeTheNameIsFound`),
 `AuditRegressionTest` (`testNamesCannotBecomeAnAddressWhenDecodedLater`,
-`testTheForeignDomainMarkerCannotBePushedOutOfSight`), `CliToolTest`
+`testTheForeignDomainMarkerCannotBePushedOutOfSight`,
+`testFieldsCannotBeJoinedOrPoseAsAnAddressThroughTheNameTemplate` – core's own
+`compose_search_name()` for six templates), `NormalizerTest`
+(`testCurlyBracketsCannotFormAPlaceholderOfTheNameTemplate`, `testCutAtSignKeepsWhatStandsBeforeIt`), `CliToolTest`
 (`testDiagTellsWhichFieldsTheNameTemplateTakesFromForeignEntries`,
 `testDiagTellsThatMarkedEntriesAreSuggestedFirst`), E2E case 35, browser case U8 (the recipient
 widget and the suggestion list of the Elastic skin in Chromium).
@@ -494,8 +523,8 @@ widget and the suggestion list of the Elastic skin in Chromium).
 collation) and pre-selects the first one; a name that starts with the marker sorts before letters
 and digits, so entries of other domains are suggested **before** unmarked names (SECURITY.md
 register GB-19; `galbridge_global_autocomplete = false` keeps the global book out of
-autocomplete). Texts are treated field by field: a name template that joins two fields with
-nothing between them is outside what that can cover.
+autocomplete). Texts are treated field by field; what a template joins is covered by the rules
+for brackets, placeholders and the edges of a text above, not by a check of the composed name.
 
 ### GB-20 Over-exposure of personal data
 
@@ -672,14 +701,20 @@ one engine and expose it on the other.
 (trim, NFC, lower case, split at the last `@`, IDNA to ASCII – failing without `intl` for non-ASCII
 input – trailing dot removed, validated). An invalid allow-list entry is dropped; an invalid
 deny-list disables what it protects. SQL binds normalised values; the PHP re-check compares
-normalised row domains with the scope, which absorbs collation variants. Department groups use
-`LOWER(TRIM())` on both engines. `diag` reports mailboxes with upper-case letters.
+normalised row domains with the scope, which absorbs collation variants. The deny-lists - hidden
+addresses and excluded domains - compare `LOWER()` of the column in SQL on every engine, so a row
+written with capitals is neither counted nor matched by a search on PostgreSQL either (the PHP
+re-check alone would drop it only after the count); allow-lists compare the plain column (a row in
+another spelling is left out - fail closed). Department groups use `LOWER(TRIM())` on both engines.
+`diag` reports mailboxes with upper-case letters.
 
 *Tests.* `NormalizerTest`, `NormalizerWithoutIntlTest::testAsciiWorksAndIdnFailsClosedWithoutIntl`,
 `IsolationTest::testIdnTenantIsIsolated`, `EntitlementsTest` (`testMalformedViewerDenyListDisablesTheBook`,
-`testMalformedHiddenListDisablesEveryBook`, `testOverlappingOrganizationsFallBackToTheOwnDomain`).
+`testMalformedHiddenListDisablesEveryBook`, `testOverlappingOrganizationsFallBackToTheOwnDomain`),
+`AuditRegressionTest::testHiddenListsAlsoMatchRowsWrittenWithCapitals`.
 
-*Residual risk.* Accent folding still differs (README 10).
+*Residual risk.* Accent folding still differs (README 10). A domain column that holds a U-label
+(iRedMail stores the ASCII form) is not excluded in SQL; the PHP re-check drops such rows.
 
 ### GB-28 Bulk export or printing, and processing before authentication
 
@@ -737,8 +772,16 @@ to its general, binary and – when they qualify – slow query logs).
 everything it then loads belongs to root and is not writable by group or others – the plugin and,
 below the Roundcube directory, every directory and PHP file of `program/`, `plugins/` (Roundcube's
 start loads every enabled plugin; the tool reads the configuration of the password plugin),
-`vendor/` and the configuration directory, symbolic links followed, with the directories above
-them. The user of the process is taken from the posix extension or, where PHP has none, from
+`vendor/` and every configuration directory as Roundcube finds them (`ROUNDCUBE_CONFIG_DIR`, read
+like the core does, and each entry of `RCUBE_CONFIG_PATH`; one that does not exist is refused),
+symbolic links followed, with the directories above them; a symbolic link to a path that does not
+exist is refused (its target could be created later). Such a root process keeps only absolute
+`include_path` entries (never the working directory) and logs to syslog: `log_dir` belongs to the
+web server user, who could otherwise point a log file at any file root would then write to. The
+SQL of `grants` is executed with database administrator rights, so README 2.2 has it generated
+only from code the web server cannot change (root-owned plugin files, or the verified release
+archive, which `grants` needs nothing else of) and read before it is applied.
+The user of the process is taken from the posix extension or, where PHP has none, from
 `/proc`; a user that cannot be determined counts as root, so a missing extension never switches
 the refusal off. Arguments are strict: an option without its value (`--role acme`), an unknown
 option and a stray word are usage errors, so a typing mistake cannot leave the default role in the
@@ -829,6 +872,6 @@ whose signature GitHub does not verify or whose version differs from the code an
 * Request floods beyond the result caps and timeouts, without a reverse-proxy limit.
 * An IMAP server that the administrator lists as a directory server although it authenticates
   against another user database.
-* A new own alias of a viewer, or a changed column grant, within `galbridge_scope_ttl`.
+* A new or removed own alias of a viewer, or a changed column grant, within `galbridge_scope_ttl`.
 * Engine-specific accent folding (MariaDB folds, PostgreSQL does not).
 * Users of the OpenLDAP edition of iRedMail (not supported).

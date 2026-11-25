@@ -31,7 +31,7 @@ use GalBridge\Normalizer;
  *
  * "forwardings" is never the iRedMail table itself but the restricted view Schema::FORWARDINGS
  * (created by the grant templates): it has no row of a private mailbox forwarding, so the role
- * cannot read forwarding targets at all.
+ * cannot select forwarding targets (README 2.2: a limit on reading, not on inference).
  *
  * Search input is turned into predicates here (never into SQL text): words are normalised,
  * LIKE-escaped and bound.
@@ -218,16 +218,24 @@ final class QueryBuilder
         return Sql::and(...$parts);
     }
 
+    /**
+     * A DENY-list compares in lower case on every engine (the configured values are normalised to
+     * lower case): PostgreSQL and SQLite compare text case-sensitively, so a row written with
+     * capitals would otherwise escape an exclusion or a hidden list in SQL - dropped only later in
+     * PHP, but counted and matched by searches. An ALLOW-list keeps the plain column: a row in
+     * another spelling is left out there (fail closed) and the index on the column stays usable.
+     */
     private function scope(string $t): Sql
     {
         return $this->book->allDomains
-            ? Sql::notIn($t . '.`domain`', $this->book->excludeDomains)
+            ? Sql::notIn('LOWER(' . $t . '.`domain`)', $this->book->excludeDomains)
             : Sql::in($t . '.`domain`', $this->book->domains);
     }
 
     private function hidden(string $addressColumn): Sql
     {
-        $parts = [Sql::notIn($addressColumn, $this->hiddenAddresses)];
+        // (LIKE is ILIKE on PostgreSQL, see Sql::like(), and case-insensitive on MariaDB/MySQL)
+        $parts = [Sql::notIn('LOWER(' . $addressColumn . ')', $this->hiddenAddresses)];
         foreach ($this->hiddenLocalparts as $lp) {
             $parts[] = Sql::not(Sql::like($this->driver, $addressColumn, Sql::escapeLike($lp) . '@%'));
         }

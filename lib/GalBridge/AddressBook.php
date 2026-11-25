@@ -49,6 +49,9 @@ final class AddressBook extends \rcube_addressbook
 
     private ?SearchSpec $filter = null;
 
+    /** set_search_set() got a stored search that cannot be applied any more (see listRecords()) */
+    private bool $staleSearchSet = false;
+
     /** @var null|false|array{kind: string, key: string} null = no group, false = match nothing */
     private null|false|array $groupKey = null;
 
@@ -106,8 +109,10 @@ final class AddressBook extends \rcube_addressbook
     #[\Override]
     public function set_search_set($filter): void
     {
-        $this->filter = SearchSpec::fromArray($filter, $this->book->id, $this->fingerprint)
-            ?? SearchSpec::none($this->book->id, $this->fingerprint);
+        $spec = SearchSpec::fromArray($filter, $this->book->id, $this->fingerprint);
+        // a search stored with another configuration (fingerprint) or by another version
+        $this->staleSearchSet = $spec === null && $filter !== null && $filter !== [];
+        $this->filter = $spec ?? SearchSpec::none($this->book->id, $this->fingerprint);
         $this->result = null;
     }
 
@@ -121,6 +126,7 @@ final class AddressBook extends \rcube_addressbook
     public function reset(): void
     {
         $this->filter = null;
+        $this->staleSearchSet = false;
         $this->result = null;
     }
 
@@ -154,6 +160,7 @@ final class AddressBook extends \rcube_addressbook
     public function search($fields, $value, $mode = 0, $select = true, $nocount = false, $required = [])
     {
         try {
+            $this->staleSearchSet = false;
             $this->filter = $this->buildSpec($fields, $value, (int) $mode, $required);
             if (!$this->queries->canMatch($this->filter)) {
                 return $this->result = new \rcube_result_set(0, 0);
@@ -320,9 +327,9 @@ final class AddressBook extends \rcube_addressbook
             }
             foreach ($this->repository->groups() as $g) {
                 // A department key is the value as SQL computed it (LOWER(TRIM(department))), the
-                // record carries display text ('&' as U+FF06, collapsed whitespace ...): the key is
-                // compared in that notation, case-insensitively in PHP as well
-                if ($domainGrouping ? $g['key'] === $key : mb_strtolower(Normalizer::displayText($g['key'])) === $key) {
+                // record carries display text ('&' as U+FF06, collapsed whitespace, cut at an
+                // at-sign ...): the key is compared in that notation, case-insensitively in PHP as well
+                if ($domainGrouping ? $g['key'] === $key : mb_strtolower(Normalizer::cutAtSign(Normalizer::displayText($g['key']))) === $key) {
                     return [$g['id'] => $g['label']];
                 }
             }
@@ -337,6 +344,12 @@ final class AddressBook extends \rcube_addressbook
     private function listRecords(int $subset, bool $nocount): \rcube_result_set
     {
         $first = ($this->list_page - 1) * $this->page_size;
+        if ($this->staleSearchSet && $this->action === 'export') {
+            // the export of a search whose stored criteria cannot be applied any more (configuration
+            // changed since, another node): a file without the entries of this book would look
+            // complete - refused like every other incomplete export
+            return $this->refuse('incomplete', [], 'search_set_stale');
+        }
         if ($this->groupKey === false || ($this->filter !== null && !$this->queries->canMatch($this->filter))) {
             return new \rcube_result_set(0, $first);
         }

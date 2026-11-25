@@ -420,7 +420,7 @@ final class ConfigTest extends TestCase
     {
         $config = self::merged(['galbridge_db_dsn' => $dsn, 'imap_host' => 'tls://127.0.0.1:143', 'galbridge_imap_hosts' => ['127.0.0.1', 'mail.example.com']], []);
         foreach ([1, 2] as $request) {
-            self::assertSame([], self::factory($config, self::JAN, 'tls://127.0.0.1:143', 'ssl://IMAP.Evil.example:993')->books());
+            self::assertSame([], self::factory($config, self::JAN, 'tls://127.0.0.1:143', 'IMAP.Evil.example')->books());
         }
         $lines = array_values(preg_grep('/host_mismatch/', $GLOBALS['galbridge_test_log']) ?: []);
         self::assertSame(['WARN viewer: host_mismatch: session IMAP host is not an allowed directory host host=imap.evil.example:143 mail_host=127.0.0.1 allowed=127.0.0.1 mail.example.com'], $lines, 'once per request');
@@ -819,6 +819,130 @@ final class ConfigTest extends TestCase
             self::merged(['galbridge_db_dsn' => $dsn, 'include_host_config' => true], [])->fingerprint(),
             self::merged(['galbridge_db_dsn' => $dsn, 'include_host_config' => false], [])->fingerprint(),
         );
+    }
+
+    /**
+     * Roundcube reads include_host_config from its files WITHOUT the ROUNDCUBE_INCLUDE_HOST_CONFIG
+     * override, the configuration of the plugin with it: a variable that says "off" must not make
+     * the plugin derive the binding while the core still picks files by the Host header (STAGE 6).
+     */
+    #[DataProvider('engines')]
+    public function testIncludeHostConfigInTheEnvironmentNeedsAnExplicitHostList(string $dsn): void
+    {
+        foreach (['0', 'false', '', '1'] as $value) {
+            putenv('ROUNDCUBE_INCLUDE_HOST_CONFIG=' . $value);
+            try {
+                $config = self::merged(['galbridge_db_dsn' => $dsn, 'imap_host' => 'tls://127.0.0.1:143', 'include_host_config' => false], []);
+                self::assertNull(ViewerResolver::allowedImapHosts($config), $value);
+                self::assertStringContainsString('ROUNDCUBE_INCLUDE_HOST_CONFIG', (string) ViewerResolver::bindingProblem($config));
+                $connects = 0;
+                self::assertSame([], self::factory($config, self::JAN, '127.0.0.1', '127.0.0.1', $connects)->books());
+                self::assertSame(0, $connects);
+                // an explicit list does not depend on it
+                $config = self::merged(['galbridge_db_dsn' => $dsn, 'imap_host' => 'tls://127.0.0.1:143', 'galbridge_imap_hosts' => ['127.0.0.1:143']], []);
+                self::assertSame([BookDefinition::DOMAIN], array_keys(self::factory($config, self::JAN, '127.0.0.1', '127.0.0.1')->books()));
+            } finally {
+                putenv('ROUNDCUBE_INCLUDE_HOST_CONFIG');
+            }
+        }
+        self::assertSame(['127.0.0.1:143'], ViewerResolver::allowedImapHosts(self::merged(['imap_host' => 'tls://127.0.0.1:143'], [])));
+    }
+
+    /**
+     * The binding compares the values Roundcube wrote at login exactly as written: the host of the
+     * session and of the user record must be a host name, an IPv4 address, an IPv6 address in
+     * brackets or a local socket. Anything else - a blank around it, a scheme, a user part, a colon,
+     * a path - could be read as the allowed server here while PHP connected the login elsewhere
+     * (the socket layer takes the host up to the first colon), so it is refused before the database
+     * is asked (STAGE 6; reachable where the user types the server on Roundcube 1.7.0 - 1.7.5).
+     *
+     * @return array<string, array{string, string, string, int, string}>
+     */
+    public static function rawSessionHosts(): array
+    {
+        $out = [];
+        foreach (Env::engines() as $engine => [$dsn]) {
+            foreach ([
+                'canonical' => ['127.0.0.1', '127.0.0.1', 143, 'ok'],
+                'host name in upper case' => ['MAIL.example.com', 'mail.example.com', 143, 'ok'],
+                'stored host as the configured URI' => ['tls://mail.example.com:143', 'mail.example.com', 143, 'ok'],
+                'stored URI, scheme in upper case' => ['SSL://mail.example.com', 'mail.example.com', 143, 'ok'],
+                'session host with a leading blank' => ['mail.example.com', ' mail.example.com', 143, 'host_mismatch'],
+                'session host with a trailing line break' => ['mail.example.com', "mail.example.com\n", 143, 'host_mismatch'],
+                'session host with a scheme' => ['mail.example.com', 'tls://mail.example.com', 143, 'host_mismatch'],
+                'session host with a port' => ['mail.example.com', 'mail.example.com:10143', 143, 'host_mismatch'],
+                'session host with a second host' => ['mail.example.com', 'imap.evil.example:143//mail.example.com', 143, 'host_mismatch'],
+                'session host with a user part' => ['mail.example.com', 'x@mail.example.com', 143, 'host_mismatch'],
+                'session host with a path' => ['mail.example.com', 'imap.evil.example/mail.example.com', 143, 'host_mismatch'],
+                'session host ending in a dot' => ['mail.example.com', 'mail.example.com.', 143, 'host_mismatch'],
+                'stored host with a blank' => [' mail.example.com', 'mail.example.com', 143, 'host_mismatch'],
+                'stored URI with a path' => ['tls://imap.evil.example/x//mail.example.com', 'mail.example.com', 143, 'host_mismatch'],
+                'stored URI with a user part' => ['ssl://x@mail.example.com:993', 'mail.example.com', 143, 'host_mismatch'],
+                'stored URI with another scheme' => ['http://mail.example.com', 'mail.example.com', 143, 'host_mismatch'],
+                'IPv6 in brackets' => ['[::1]', '[::1]', 143, 'ok'],
+                'IPv6 without brackets' => ['::1', '::1', 143, 'host_mismatch'],
+            ] as $case => [$mailHost, $storageHost, $port, $status]) {
+                $out[$engine . ': ' . $case] = [$dsn, $mailHost, $storageHost, $port, $status];
+            }
+        }
+        return $out;
+    }
+
+    #[DataProvider('rawSessionHosts')]
+    public function testTheSessionHostIsComparedInTheFormRoundcubeWroteIt(string $dsn, string $mailHost, string $storageHost, int $port, string $status): void
+    {
+        $config = self::merged(['galbridge_db_dsn' => $dsn, 'imap_host' => 'ssl://imap.%d', 'galbridge_imap_hosts' => ['127.0.0.1', 'mail.example.com:143', '[::1]', '::1']], []);
+        $connects = 0;
+        $factory = self::factory($config, self::JAN, $mailHost, $storageHost, $connects, $port);
+        $books = $factory->books();
+        self::assertSame($status, $factory->resolver()->status());
+        if ($status === 'ok') {
+            self::assertSame([BookDefinition::DOMAIN], array_keys($books));
+            return;
+        }
+        self::assertSame([], $books);
+        self::assertSame(0, $connects, 'refused before the database is asked');
+        self::assertArrayNotHasKey('galbridge', $_SESSION);
+        // a value that is not canonical never reaches the log line: a marker stands in for it
+        $log = implode("\n", $GLOBALS['galbridge_test_log']);
+        self::assertStringContainsString('not-canonical', $log);
+        self::assertStringNotContainsString('evil', $log);
+        self::assertStringNotContainsString('x@', $log);
+    }
+
+    public function testCanonicalHostAcceptsOnlyWhatALoginWrites(): void
+    {
+        foreach (['mail.example.com' => 'mail.example.com', 'IMAP.Example.COM' => 'imap.example.com', 'localhost' => 'localhost', '127.0.0.1' => '127.0.0.1',
+            '[2001:DB8::7]' => '2001:db8::7', 'xn--bcher-kva.example' => 'xn--bcher-kva.example', 'unix:///run/dovecot/imap.sock' => 'unix:///run/dovecot/imap.sock'] as $raw => $canonical) {
+            self::assertSame($canonical, ViewerResolver::canonicalHost($raw), $raw);
+        }
+        foreach (['', ' ', 'mail.example.com ', "\tmail.example.com", 'mail.example.com:143', 'ssl://mail.example.com', 'a@mail.example.com', 'mail.example.com/x',
+            '.mail.example.com', 'mail.example.com.', '-mail.example.com', '::1', '[::1', '[mail.example.com]', '[::1]:143', ' unix:///run/dovecot/imap.sock',
+            'unix:///run/dovecot/imap.sock ', 'mail.example.com%00', 'bücher.example', str_repeat('a', 254)] as $raw) {
+            self::assertNull(ViewerResolver::canonicalHost($raw), var_export($raw, true));
+        }
+        // the stored mail_host of an older Roundcube may be the configured URI - that exact form only
+        self::assertSame('mail.example.com', ViewerResolver::canonicalHost('imaps://mail.example.com:993', true));
+        self::assertSame('::1', ViewerResolver::canonicalHost('tls://[::1]:143', true));
+        self::assertNull(ViewerResolver::canonicalHost('imaps://mail.example.com:993'), 'never for the session host');
+        self::assertNull(ViewerResolver::canonicalHost('imaps://mail.example.com:993:143', true));
+        self::assertNull(ViewerResolver::canonicalHost('imaps:// mail.example.com', true));
+    }
+
+    /**
+     * A bare IPv6 entry of galbridge_imap_hosts has colons that are not a port separator: its first
+     * group is no host of it (STAGE 6).
+     */
+    public function testABareIpv6EntryIsNoPrefixOfAHost(): void
+    {
+        $allowed = ['2001:db8::7', 'mail.example.com:993'];
+        self::assertTrue(ViewerResolver::covers($allowed, '2001:db8::7'));
+        self::assertTrue(ViewerResolver::covers($allowed, '2001:db8::7', 143));
+        self::assertFalse(ViewerResolver::covers($allowed, '2001'));
+        self::assertFalse(ViewerResolver::covers($allowed, '2001', 143));
+        self::assertFalse(ViewerResolver::covers($allowed, '2001:db8'));
+        self::assertTrue(ViewerResolver::covers($allowed, 'mail.example.com'));
+        self::assertFalse(ViewerResolver::covers($allowed, 'mail.example.com', 143));
     }
 
     // ------------------------------------------------------------------ switches (audit U-03)

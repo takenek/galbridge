@@ -18,7 +18,9 @@ is for development only.
    records the dependency versions it resolved in its job summary: keep the run of the release
    commit (its URL goes into the release notes).
 2. **Local verification on the exact release commit**, recorded in `docs/TESTING.md` (versions,
-   commands, results). Do not tag while any of them is recorded as not run:
+   commands, results). Do not tag while any of them is recorded as not run. Run the PHPUnit suite
+   **as root** as well: the refusal of `bin/galbridge.sh` to run as root and the checks of
+   `--allow-root` are tested only then (CI runs as an unprivileged user and skips those tests):
    * the full PHPUnit suite on **all three engines** – reload the throw-away databases first, then
      check that no test was skipped for a missing engine:
 
@@ -91,8 +93,9 @@ is for development only.
    (`export-ignore` in `.gitattributes`):
 
    ```sh
-   git archive --format=tar HEAD | tar -t | sort > /tmp/galbridge-archive.txt
-   grep -E '^(tests/|\.github/|\.gitattributes|\.gitignore|\.gitguardian\.yaml|\.gitleaks\.toml|\.php-cs-fixer\.dist\.php|phpstan\.neon\.dist|phpunit\.xml\.dist|config\.inc\.php$|composer\.lock|vendor/|tmp/|STAGE_|FINAL_SECURITY_REPORT|DOSTARCZONE)' /tmp/galbridge-archive.txt && echo 'UNEXPECTED FILES'
+   list="$(mktemp)"     # a private file, never a fixed name in /tmp
+   git archive --format=tar HEAD | tar -t | sort > "$list"
+   grep -E '^(tests/|\.github/|\.gitattributes|\.gitignore|\.gitguardian\.yaml|\.gitleaks\.toml|\.php-cs-fixer\.dist\.php|phpstan\.neon\.dist|phpunit\.xml\.dist|config\.inc\.php$|composer\.lock|vendor/|tmp/|STAGE_|FINAL_SECURITY_REPORT|DOSTARCZONE)' "$list" && echo 'UNEXPECTED FILES'
    ```
 
    The archive must contain `galbridge.php`, `lib/`, `bin/galbridge.sh`, `SQL/grants.mysql.sql`,
@@ -115,8 +118,11 @@ is for development only.
    Never use a lightweight or unsigned tag for a release. The public part of the signing key
    must be registered in the maintainer's GitHub account: the CI job `release` runs for every
    pushed `v*` tag and fails unless the tag is annotated, GitHub reports its signature as verified,
-   its version equals `galbridge::info()` and a CHANGELOG section, and the archive of the tag holds
-   the plugin without development or audit files. README section 2.1 tells administrators to
+   the tagged commit is already part of `main`, its version equals `galbridge::info()` and a
+   CHANGELOG section, and the archive of the tag holds the plugin without development or audit
+   files. "Verified" means that SOME GitHub account's key signed the tag: the job does not know
+   which keys may sign releases - check `git tag -v` against the maintainers' published keys
+   (step 7, section 3), and pin the release key in the job once the maintainers have published it. README section 2.1 tells administrators to
    install only from a tag whose signature they verified – publish the installation instructions
    of a version only once its tag exists.
 7. **Verify** before publishing: `git tag -v vX.Y.Z` (for SSH signatures configure
