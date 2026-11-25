@@ -106,13 +106,16 @@ Debian and Ubuntu, `nginx` on the RHEL family, `www` on FreeBSD and OpenBSD.
 **Release archive** (from the signed tag)
 
 ```sh
-v=1.0.2   # the release to install: https://github.com/takenek/galbridge/releases (only the latest is supported)
+v=1.0.3   # the release to install: https://github.com/takenek/galbridge/releases (only the latest is supported)
 git clone --branch "v$v" https://github.com/takenek/galbridge.git /root/galbridge-src   # NOT below the web root
 git -C /root/galbridge-src -c gpg.ssh.allowedSignersFile=/root/galbridge-src/.github/release-signers verify-tag "v$v"
 git -C /root/galbridge-src -c tar.umask=0022 archive --prefix=galbridge/ "v$v" | tar -x -C /opt/www/roundcubemail/plugins
 rm -rf /root/galbridge-src
 ```
 
+The commands need `git` 2.34 or later and `ssh-keygen`, which git runs to check the SSH signature
+(Debian/Ubuntu: `apt install git openssh-client`; a minimal server may have neither – without
+`ssh-keygen` `verify-tag` fails with `cannot run ssh-keygen`).
 `verify-tag` must succeed and print
 `Good "git" signature for galbridge-release with RSA key SHA256:Dh488r7YcvACwpsZov0/TASb3v3FRjz4//bwoQCyPwU`.
 The allowed-signers file comes from the same clone as the tag, so it proves nothing by itself:
@@ -141,8 +144,22 @@ install -o root -g www-data -m 0640 /dev/null config/galbridge.inc.php   # fill 
 composer require --prefer-dist "takenek/galbridge:^1.0"    # a tagged release; never dev-main in production
 ```
 
-The package is available once it is listed on Packagist (docs/RELEASING.md section 0). Production
-installations take a tagged release by version constraint – but
+**iRedMail (MariaDB/MySQL and PostgreSQL editions):** this `composer require` stops with
+`pear/net_ldap2 ... requires ext-ldap * -> it is missing from your system` and changes nothing.
+Roundcube's own `composer.lock` holds its LDAP libraries (`kolab/net_ldap3`, `pear/net_ldap2`),
+which declare the PHP `ldap` extension, and iRedMail installs that extension only for its OpenLDAP
+edition. Exempt that one requirement – the LDAP libraries are not touched, and nothing of GAL Bridge
+needs `ldap` – with `--ignore-platform-req=ext-ldap` (never `--ignore-platform-reqs`, which drops
+every requirement, the PHP version included), on `composer require` and on every later
+`composer update`; installing the extension (`apt install php-ldap`) works as well:
+
+```sh
+composer require --prefer-dist --ignore-platform-req=ext-ldap "takenek/galbridge:^1.0"
+```
+
+The package is listed on Packagist ([takenek/galbridge](https://packagist.org/packages/takenek/galbridge),
+updated from GitHub at every push). Production installations take a tagged release by version
+constraint – but
 **Composer does not verify tag signatures**: check what it installed against a verified clone (the
 first three commands of the release archive above, without the archive step). `composer show
 takenek/galbridge` must name the source `https://github.com/takenek/galbridge` and, as its source
@@ -540,6 +557,15 @@ Remove `sql_global_addressbooks` from the list if it is still there
 at runtime (only for compose, Redirect-dialog and autocomplete requests); you do not need to list
 `galbridge_domain` or `galbridge_global` there yourself.
 
+**iRedMail installs `config/config.inc.php` as the PHP user** (`www-data:www-data`, mode `0600`).
+That file can set every option – `galbridge_*` options, `des_key`, the plugin list – so the web
+application could rewrite the directory policy; `diag` warns (`core config file ... owned by uid
+33`). Roundcube only reads it. Give it to root and let the PHP group read it:
+
+```sh
+chown root:www-data config/config.inc.php && chmod 0640 config/config.inc.php
+```
+
 ### 2.5 Recommended Roundcube settings
 
 ```php
@@ -602,11 +628,22 @@ GAL Bridge serves nothing over HTTP; Roundcube reads it from disk. Nothing under
   curl -s -o /dev/null -w '%{http_code}\n' https://mail.example.com/mail/plugins/galbridge/lib/autoload.php
   ```
 
+  With the self-signed certificate that iRedMail installs (`/etc/ssl/certs/iRedMail.crt`, issued
+  for the server's host name, until a trusted certificate replaces it) `curl` prints `000`: add
+  `--cacert /etc/ssl/certs/iRedMail.crt` and use that host name in the address.
+
 * `diag --url=` makes the same check from the server side for the usual paths (section 2.7):
 
   ```sh
   sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --url=https://mail.example.com/mail/
+  # iRedMail's self-signed certificate: name it, the certificate is still verified
+  sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --url=https://mail.example.com/mail/ --cafile=/etc/ssl/certs/iRedMail.crt
   ```
+
+  `--cafile=` (an absolute path, `https://` addresses only) names the PEM certificate(s) the
+  certificate of the web server is verified against instead of PHP's default CAs; verification is
+  never switched off. A certificate this PHP does not trust is a `[WARN] web access TLS
+  certificate not trusted` line (every request then has "no answer").
 
   A `[FAIL] web access ... is SERVED` line means that the rule above is missing or not effective.
   It also asks for the **configuration file in use** – `plugins/galbridge/config.inc.php`, or
@@ -625,7 +662,7 @@ GAL Bridge serves nothing over HTTP; Roundcube reads it from disk. Nothing under
 ```sh
 sudo -u www-data plugins/galbridge/bin/galbridge.sh diag
 sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --user=jan.kowalski@example.com
-sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --url=https://mail.example.com/mail/
+sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --url=https://mail.example.com/mail/   # self-signed certificate: add --cafile=/etc/ssl/certs/iRedMail.crt (2.6)
 sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --strict      # automated checks: WARN = exit code 2
 ```
 
@@ -1542,7 +1579,8 @@ setting – keep the general query log off or restricted. `diag` shows what appl
 (section 2.1: verify the tag against the release key and compare its fingerprint, then
 `git archive ... | tar -x`; a configuration in `config/galbridge.inc.php` is not touched – one in
 `plugins/galbridge/config.inc.php` must be kept, or better moved there first, section 2.3) or run
-`composer update --prefer-dist takenek/galbridge` (and compare the commit it installed with the
+`composer update --prefer-dist takenek/galbridge` (iRedMail's SQL editions: add
+`--ignore-platform-req=ext-ldap`, section 2.1; and compare the commit it installed with the
 verified tag, section 2.1: Composer does not check signatures). Read [CHANGELOG.md](CHANGELOG.md), then run
 `bin/galbridge.sh diag`. After a Composer update `diag` is not optional: the installer re-creates a
 `plugins/galbridge/config.inc.php` with the owner and umask of the user who ran Composer – restore
@@ -1550,6 +1588,10 @@ verified tag, section 2.1: Composer does not check signatures). Read [CHANGELOG.
 `config/galbridge.inc.php` and delete the plugin-directory file – and a failed update leaves a
 `plugins/galbridge-<20 digits>` copy with the password in it (delete it; section 2.1). There are no plugin tables, so there is no schema update; options added by
 a new release have built-in defaults.
+
+**From 1.0.2 to 1.0.3** – no configuration or database step. `diag` has the option `--cafile=`
+for a web server with a self-signed certificate (2.6), and a Composer installation on iRedMail's
+SQL editions needs `--ignore-platform-req=ext-ldap` (2.1).
 
 **From 1.0.1 to 1.0.2** – what behaves differently (run `diag` after the upgrade):
 

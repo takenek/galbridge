@@ -236,7 +236,7 @@ final class CliToolTest extends TestCase
                 [$code, $out, $err] = $this->runDiag($dir, $args);
                 self::assertSame(1, $code, $out);
                 // (after the messages of Roundcube's start, which loads the configured plugins)
-                self::assertStringContainsString("Usage: galbridge.sh diag [--user=EMAIL] [--url=URL] [--strict]\n{$problem}", $err);
+                self::assertStringContainsString("Usage: galbridge.sh diag [--user=EMAIL] [--url=URL] [--cafile=FILE] [--strict]\n{$problem}", $err);
                 self::assertStringNotContainsString('== Versions', $out, 'nothing is checked with half of the request');
             }
         }
@@ -2008,6 +2008,163 @@ final class CliToolTest extends TestCase
         self::assertLine($out, 'WARN', 'web access', 'plugins/galbridge/composer.json: no answer (');
         self::assertLine($out, 'WARN', 'web access', 'http://127.0.0.1:1/ does not answer like the Roundcube webmail (no answer: ');
         self::assertStringNotContainsString('[ OK ] web access', $out);
+        // (the reason without PHP's "fopen(<url>): Failed to open stream:" prefix)
+        self::assertStringNotContainsString('Failed to open stream', $out);
+    }
+
+    /**
+     * 1.0.3 (real iRedMail installation): iRedMail serves the webmail with a self-signed certificate
+     * until a trusted one replaces it. diag --url said "no answer (... operation failed)" for every
+     * request; it now names the certificate as the reason, says once what to do, and --cafile=
+     * verifies the server against the given certificate - verification itself stays on.
+     */
+    public function testDiagUrlNamesAnUntrustedCertificateAndVerifiesAgainstACafile(): void
+    {
+        if (!extension_loaded('openssl')) {
+            self::markTestSkipped('needs the openssl extension');
+        }
+        $dsn = $this->anyServerDsn();
+        $dir = $this->base() . '/tls';
+        mkdir($dir, 0o700);
+        // like iRedMail's certificate: self-signed, issued for the host name (CN, no subjectAltName)
+        [$cert, $key] = self::selfSigned($dir, 'server', 'localhost');
+        [$other] = self::selfSigned($dir, 'other', 'localhost');
+        [$server, $port] = self::tlsServer($dir, $cert, $key);
+        try {
+            $url = 'https://localhost:' . $port . '/';
+
+            // PHP's default CAs do not know the certificate
+            [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn], [], ['--url=' . $url]);
+            self::assertSame(0, $code, $out);
+            self::assertLine($out, 'WARN', 'web access', $url . ' does not answer like the Roundcube webmail (no answer: TLS: the certificate of the web server was not verified (certificate verify failed))');
+            self::assertLine($out, 'WARN', 'web access', 'plugins/galbridge/composer.json: no answer (TLS: the certificate of the web server was not verified');
+            self::assertLine($out, 'WARN', 'web access', 'TLS certificate not trusted by this PHP: for a self-signed certificate - iRedMail installs one, /etc/ssl/certs/iRedMail.crt');
+            self::assertSame(1, substr_count($out, 'TLS certificate not trusted'), 'the remedy is said once');
+            self::assertStringNotContainsString('[ OK ] web access', $out);
+            self::assertStringNotContainsString('operation failed', $out);
+
+            // --cafile: the same server, verified against its certificate
+            [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn], [], ['--url=' . $url, '--cafile=' . $cert]);
+            self::assertSame(0, $code, $out);
+            self::assertLine($out, 'OK', 'web access', $url . ' is the webmail');
+            self::assertLine($out, 'INFO', 'web access', 'the certificate of the web server was verified against --cafile=' . $cert);
+            self::assertLine($out, 'OK', 'web access', 'static.php/plugins/galbridge/lib/autoload.php is not served (HTTP 404)');
+            self::assertSame(5, substr_count($out, '[ OK ] web access'), 'the webmail and four paths that are not served');
+            self::assertStringNotContainsString('TLS certificate not', $out);
+
+            // a certificate that does not sign the server's: still not verified
+            [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn], [], ['--url=' . $url, '--cafile=' . $other]);
+            self::assertSame(0, $code, $out);
+            self::assertLine($out, 'WARN', 'web access', 'TLS certificate not verified against --cafile=' . $other . ': the web server presents a certificate that the file does not hold or sign');
+            self::assertStringNotContainsString('[ OK ] web access', $out);
+
+            // the right certificate, but the address does not use its host name
+            [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn], [], ['--url=https://127.0.0.1:' . $port . '/', '--cafile=' . $cert]);
+            self::assertSame(0, $code, $out);
+            self::assertLine($out, 'WARN', 'web access', 'no answer (TLS: the certificate of the web server was not verified (Peer certificate CN=');
+            self::assertStringContainsString('did not match expected CN=', $out);
+            self::assertStringNotContainsString('[ OK ] web access', $out);
+        } finally {
+            proc_terminate($server);
+            proc_close($server);
+        }
+
+        // usage errors: nothing is checked with half of the request
+        file_put_contents($dir . '/key-and-cert.pem', (string) file_get_contents($key) . (string) file_get_contents($cert));
+        file_put_contents($dir . '/not-a-certificate.txt', 'hello');
+        $config = $this->writeConfig(['galbridge_db_dsn' => $dsn]);
+        foreach ([
+            [['--cafile=' . $cert], '--cafile needs --url=https://...'],
+            [['--url=http://mail.example.com/mail/', '--cafile=' . $cert], '--cafile applies to an https:// address only'],
+            [['--url=https://mail.example.com/mail/', '--cafile=tls/server.crt'], '--cafile must be an absolute path'],
+            [['--url=https://mail.example.com/mail/', '--cafile=' . $dir . '/missing.crt'], '--cafile: no readable file ' . $dir . '/missing.crt'],
+            [['--url=https://mail.example.com/mail/', '--cafile=' . $dir . '/key-and-cert.pem'], 'holds a private key - give the certificate only'],
+            [['--url=https://mail.example.com/mail/', '--cafile=' . $dir . '/not-a-certificate.txt'], 'holds no PEM certificate'],
+            [['--url=https://mail.example.com/mail/', '--cafile'], '--cafile needs a value: --cafile=...'],
+        ] as [$args, $problem]) {
+            [$code, $out, $err] = $this->runDiag($config, $args);
+            self::assertSame(1, $code, $out . $err);
+            self::assertStringContainsString("Usage: galbridge.sh diag [--user=EMAIL] [--url=URL] [--cafile=FILE] [--strict]\n", $err);
+            self::assertStringContainsString($problem, $err);
+            self::assertStringNotContainsString('== Versions', $out, 'nothing is checked with half of the request');
+        }
+    }
+
+    /**
+     * A self-signed certificate for $cn without subjectAltName - the form of iRedMail's
+     * /etc/ssl/certs/iRedMail.crt - and its key, as PEM files below $dir.
+     *
+     * @return array{0: string, 1: string} certificate file, key file
+     */
+    private static function selfSigned(string $dir, string $name, string $cn): array
+    {
+        $config = ['digest_alg' => 'sha256', 'private_key_type' => OPENSSL_KEYTYPE_RSA, 'private_key_bits' => 2048];
+        $key = openssl_pkey_new($config);
+        self::assertNotFalse($key, 'openssl_pkey_new');
+        $csr = openssl_csr_new(['commonName' => $cn, 'organizationName' => 'GAL Bridge test'], $key, $config);
+        self::assertNotFalse($csr, 'openssl_csr_new');
+        $x509 = openssl_csr_sign($csr, null, $key, 2, $config, random_int(1, PHP_INT_MAX));
+        self::assertNotFalse($x509, 'openssl_csr_sign');
+        self::assertTrue(openssl_x509_export_to_file($x509, $dir . '/' . $name . '.crt'));
+        self::assertTrue(openssl_pkey_export_to_file($key, $dir . '/' . $name . '.key'));
+        return [$dir . '/' . $name . '.crt', $dir . '/' . $name . '.key'];
+    }
+
+    /**
+     * A local HTTPS server (PHP's built-in web server has no TLS): "/" answers like the Roundcube
+     * webmail, everything else 404. A client that refuses the certificate ends its handshake; the
+     * server goes on with the next connection.
+     *
+     * @return array{0: resource, 1: int} the process and its port
+     */
+    private static function tlsServer(string $dir, string $cert, string $key): array
+    {
+        $script = $dir . '/tls-server.php';
+        file_put_contents($script, <<<'PHP'
+            <?php
+            [, $port, $cert, $key] = $argv;
+            $ctx = stream_context_create(['ssl' => ['local_cert' => $cert, 'local_pk' => $key, 'verify_peer' => false]]);
+            $server = @stream_socket_server('tls://127.0.0.1:' . $port, $errno, $errstr, STREAM_SERVER_BIND | STREAM_SERVER_LISTEN, $ctx);
+            if ($server === false) {
+                exit(1);
+            }
+            while (true) {
+                $c = @stream_socket_accept($server, 30);
+                if ($c === false) {
+                    continue;
+                }
+                $request = (string) fgets($c);
+                while (($line = fgets($c)) !== false && trim($line) !== '') {
+                }
+                $path = explode(' ', $request)[1] ?? '/';
+                [$status, $body] = $path === '/'
+                    ? ['200 OK', '<html><head><script>var rcmail = new rcube_webmail();</script></head><body></body></html>']
+                    : ['404 Not Found', 'not found'];
+                fwrite($c, "HTTP/1.1 {$status}\r\nContent-Type: text/html\r\nContent-Length: " . strlen($body) . "\r\nConnection: close\r\n\r\n" . $body);
+                fclose($c);
+            }
+            PHP);
+        for ($attempt = 0; $attempt < 10; $attempt++) {
+            $port = random_int(20000, 45000);
+            $proc = proc_open([PHP_BINARY, $script, (string) $port, $cert, $key], [0 => ['file', '/dev/null', 'r'], 1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
+            if (!is_resource($proc)) {
+                continue;
+            }
+            for ($i = 0; $i < 50; $i++) {
+                $socket = @fsockopen('127.0.0.1', $port, $errno, $errstr, 0.2);
+                if (is_resource($socket)) {
+                    fclose($socket);
+                    return [$proc, $port];
+                }
+                usleep(100000);
+                if (!(proc_get_status($proc)['running'] ?? false)) {
+                    break;
+                }
+            }
+            proc_terminate($proc);
+            proc_close($proc);
+        }
+        self::markTestSkipped('cannot start a local TLS server');
     }
 
     /**

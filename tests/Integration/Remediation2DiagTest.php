@@ -296,7 +296,7 @@ final class Remediation2DiagTest extends TestCase
         [$code, $out, $err] = CliRun::diag($config, ['--strict=yes']);
         self::assertSame(1, $code);
         self::assertSame('', $out);
-        self::assertStringContainsString("Usage: galbridge.sh diag [--user=EMAIL] [--url=URL] [--strict]\n--strict takes no value", $err);
+        self::assertStringContainsString("Usage: galbridge.sh diag [--user=EMAIL] [--url=URL] [--cafile=FILE] [--strict]\n--strict takes no value", $err);
     }
 
     public function testAnUncheckedRoundcubeDatabaseIsAWarning(): void

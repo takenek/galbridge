@@ -37,11 +37,13 @@ use GalBridge\Normalizer;
 /**
  * Administrator command line tool (bin/galbridge.sh).
  *
- *  diag [--user=EMAIL] [--url=URL] [--strict]
+ *  diag [--user=EMAIL] [--url=URL] [--cafile=FILE] [--strict]
  *                        check the installation, the configuration and the vmail database; with
  *                        --user report (as counts only) what that user would see; with --url ask the
- *                        web server whether it serves the plugin directory; with --strict a WARN line
- *                        counts as a problem (exit code 2) - for automated checks
+ *                        web server whether it serves the plugin directory (--cafile: verify the
+ *                        certificate of an https:// address against the PEM certificates in FILE,
+ *                        e.g. the self-signed certificate iRedMail installs); with --strict a WARN
+ *                        line counts as a problem (exit code 2) - for automated checks
  *  grants --driver=mysql|pgsql [--host=...] [--port=N] [--account-host=... (mysql)] [--db=vmail]
  *         [--role=galbridge] [--connection-limit=25] [--reset-password | --grants-only]
  *         [--clear-text-password (mysql)]
@@ -117,7 +119,7 @@ final class Tool
 
     /** the options of each command: true = takes a value (--name=value), false = a flag */
     private const OPTIONS = [
-        'diag' => ['user' => true, 'url' => true, 'strict' => false, 'allow-root' => false],
+        'diag' => ['user' => true, 'url' => true, 'cafile' => true, 'strict' => false, 'allow-root' => false],
         'grants' => [
             'driver' => true, 'host' => true, 'port' => true, 'account-host' => true, 'db' => true, 'role' => true, 'connection-limit' => true,
             'reset-password' => false, 'grants-only' => false, 'clear-text-password' => false, 'allow-root' => false,
@@ -125,7 +127,7 @@ final class Tool
     ];
 
     private const USAGE = [
-        'diag' => 'Usage: galbridge.sh diag [--user=EMAIL] [--url=URL] [--strict]',
+        'diag' => 'Usage: galbridge.sh diag [--user=EMAIL] [--url=URL] [--cafile=FILE] [--strict]',
         'grants' => 'Usage: galbridge.sh grants --driver=mysql|pgsql [--host=H] [--port=N] [--account-host=A (mysql only)] [--db=vmail] [--role=galbridge] [--connection-limit=25] [--reset-password | --grants-only] [--clear-text-password (mysql only)]',
     ];
 
@@ -210,6 +212,9 @@ final class Tool
 
     /** diag ran without --url: the summary says that the web access was not checked */
     private bool $webUnchecked = false;
+
+    /** diag --cafile: the PEM file the certificate of an https:// --url is verified against (null = PHP's default CAs) */
+    private ?string $cafile = null;
 
     /** @var array<string, true> directories of the plugin with more than TREE_LIMIT entries */
     private array $truncated = [];
@@ -305,7 +310,16 @@ final class Tool
                     return 1;
                 }
                 $this->strict = ($args['strict'] ?? false) === true;
-                return $this->diag(is_string($args['user'] ?? null) ? $args['user'] : '', is_string($args['url'] ?? null) ? $args['url'] : '');
+                $url = is_string($args['url'] ?? null) ? $args['url'] : '';
+                if (is_string($args['cafile'] ?? null)) {
+                    $problem = self::cafileProblem($args['cafile'], $url);
+                    if ($problem !== null) {
+                        $this->err(self::USAGE[$cmd] . "\n" . $problem . "\n");
+                        return 1;
+                    }
+                    $this->cafile = $args['cafile'];
+                }
+                return $this->diag(is_string($args['user'] ?? null) ? $args['user'] : '', $url);
             case 'grants':
                 return $this->grants($args);
             default:
@@ -315,6 +329,9 @@ final class Tool
                     . "                               --user reports, as counts, what that user would see)\n"
                     . "       [--url=URL]             also ask the web server at URL (the webmail address) whether it\n"
                     . "                               serves files of the plugin directory - it must not\n"
+                    . "       [--cafile=FILE]         with an https:// --url: verify the certificate of the web server against\n"
+                    . "                               the PEM certificate(s) in FILE (absolute path), e.g. the self-signed\n"
+                    . "                               certificate of iRedMail, /etc/ssl/certs/iRedMail.crt\n"
                     . "       [--strict]              count WARN lines as problems as well (exit code 2)\n"
                     . "  grants --driver=mysql|pgsql  print the read-only role statements with a fresh password (standard\n"
                     . "                               output) and the matching DSN line (standard error; nothing is written\n"
@@ -372,6 +389,38 @@ final class Tool
             if (!self::OPTIONS[$cmd][$name] && $value !== true) {
                 return "--{$name} takes no value";
             }
+        }
+        return null;
+    }
+
+    /**
+     * diag --cafile=FILE: the certificate(s) an https:// --url is verified against - for a web server
+     * with a self-signed certificate (iRedMail installs one, /etc/ssl/certs/iRedMail.crt, until a
+     * trusted certificate replaces it). Verification itself stays on: the file only says whom to
+     * trust. An absolute path (as root the tool works in Roundcube's program/ directory, so a relative
+     * name would mean something else than it says), a readable file with at least one PEM
+     * certificate and no private key.
+     */
+    private static function cafileProblem(string $file, string $url): ?string
+    {
+        if ($url === '') {
+            return '--cafile needs --url=https://...: it names the certificate(s) that the certificate of the web server is verified against';
+        }
+        if (!str_starts_with($url, 'https://')) {
+            return '--cafile applies to an https:// address only (--url is not one)';
+        }
+        if (!str_starts_with($file, '/') || strlen($file) > 4096 || preg_match('/[\x00-\x1F\x7F]/', $file) === 1) {
+            return '--cafile must be an absolute path, e.g. --cafile=/etc/ssl/certs/iRedMail.crt';
+        }
+        $pem = is_file($file) && is_readable($file) ? @file_get_contents($file, false, null, 0, 1048576) : false;
+        if (!is_string($pem)) {
+            return '--cafile: no readable file ' . Log::sanitize($file);
+        }
+        if (str_contains($pem, 'PRIVATE KEY-----')) {
+            return '--cafile: ' . Log::sanitize($file) . ' holds a private key - give the certificate only (iRedMail: /etc/ssl/certs/iRedMail.crt)';
+        }
+        if (!str_contains($pem, '-----BEGIN CERTIFICATE-----')) {
+            return '--cafile: ' . Log::sanitize($file) . ' holds no PEM certificate (-----BEGIN CERTIFICATE-----)';
         }
         return null;
     }
@@ -1309,20 +1358,29 @@ final class Tool
         // A control first: "not served" says something only when the address IS this webmail - a
         // wrong prefix (iRedMail installs with and without /mail/) or another virtual host answers
         // 404 for everything. Every page of Roundcube creates its JavaScript object.
-        [$status, $error, $body] = self::httpStatus($base, 131072);
+        [$status, $error, $body, $tls] = self::httpStatus($base, 131072, $this->cafile);
         $conclusive = $status === 200 && str_contains($body, 'new rcube_webmail()');
         if ($conclusive) {
             $this->ok('web access', $base . ' is the webmail');
+            if ($this->cafile !== null) {
+                $this->info('web access', 'the certificate of the web server was verified against --cafile=' . Log::sanitize($this->cafile));
+            }
         } else {
             $this->check(false, 'web access', $base . ' does not answer like the Roundcube webmail (' . ($status === null ? 'no answer: ' . $error : 'HTTP ' . $status)
                 . '): check the address - for another address the lines below say nothing about this installation', true);
+        }
+        if ($tls) {
+            // said once, not with every path below: the requests fail before anything is asked
+            $this->check(false, 'web access', $this->cafile === null
+                ? 'TLS certificate not trusted by this PHP: for a self-signed certificate - iRedMail installs one, /etc/ssl/certs/iRedMail.crt, until a trusted certificate replaces it - run diag with --cafile=<that certificate>; a name mismatch means that --url does not use the host name of the certificate (README 2.6)'
+                : 'TLS certificate not verified against --cafile=' . Log::sanitize($this->cafile) . ': the web server presents a certificate that the file does not hold or sign, or one issued for another host name than that of --url (README 2.6)', true);
         }
         // The web path is fixed by the NAME of the plugin (Roundcube loads plugins/<name>/<name>.php),
         // whatever the directory is called on disk: the target of a symlink or a checkout may have
         // another name, and asking for that name would report "not served" for files that are.
         $dir = self::PLUGIN_NAME;
         foreach (["plugins/{$dir}/composer.json", "static.php/plugins/{$dir}/composer.json", "plugins/{$dir}/SQL/grants.mysql.sql", "static.php/plugins/{$dir}/lib/autoload.php"] as $path) {
-            [$status, $error] = self::httpStatus($base . $path);
+            [$status, $error] = self::httpStatus($base . $path, 0, $this->cafile);
             if ($status === null) {
                 $this->check(false, 'web access', $path . ': no answer (' . $error . ')', true);
             } elseif ($status >= 200 && $status < 300) {
@@ -1370,7 +1428,7 @@ final class Tool
                 continue;
             }
             foreach ($paths as $path) {
-                [$status, $error, $body] = self::httpStatus($base . $path, 65536);
+                [$status, $error, $body] = self::httpStatus($base . $path, 65536, $this->cafile);
                 if ($status === null) {
                     $this->check(false, 'config over HTTP', $path . ': no answer (' . $error . ')', true);
                 } elseif ($status >= 200 && $status < 300) {
@@ -1391,18 +1449,29 @@ final class Tool
 
     /**
      * @param int $bytes how much of the body to read (0 = none)
+     * @param null|string $cafile PEM certificate(s) to verify an https:// server against (diag --cafile)
      *
-     * @return array{0: null|int, 1: string, 2: string} HTTP status (null = no answer), the reason, the start of the body
+     * @return array{0: null|int, 1: string, 2: string, 3: bool} HTTP status (null = no answer), the reason,
+     *                                                            the start of the body, whether the answer
+     *                                                            failed because the server certificate was not verified
      */
-    private static function httpStatus(string $url, int $bytes = 0): array
+    private static function httpStatus(string $url, int $bytes = 0, ?string $cafile = null): array
     {
+        // certificate verification is never switched off; --cafile only names whom to trust
+        $ssl = ['verify_peer' => true, 'verify_peer_name' => true];
+        if ($cafile !== null) {
+            $ssl['cafile'] = $cafile;
+        }
         $context = stream_context_create([
             'http' => ['method' => 'GET', 'timeout' => 5, 'follow_location' => 0, 'max_redirects' => 0, 'ignore_errors' => true, 'user_agent' => 'galbridge-diag'],
-            'ssl' => ['verify_peer' => true, 'verify_peer_name' => true],
+            'ssl' => $ssl,
         ]);
-        $error = '';
-        set_error_handler(static function (int $no, string $message) use (&$error): bool {
-            $error = $message;
+        // PHP reports a failed TLS handshake in several warnings - "SSL operation failed ... certificate
+        // verify failed", "Failed to enable crypto", "Failed to open stream: operation failed" -, of which
+        // the last says nothing: keep them all
+        $errors = [];
+        set_error_handler(static function (int $no, string $message) use (&$errors): bool {
+            $errors[] = $message;
             return true;
         });
         try {
@@ -1411,17 +1480,22 @@ final class Tool
             restore_error_handler();
         }
         if ($stream === false) {
-            return [null, Log::sanitize((string) preg_replace('~^.*?failed to open stream: ~', '', $error)), ''];
+            foreach ($errors as $message) {
+                if (preg_match('~certificate verify failed|Peer certificate CN=.*did not match expected CN=.*~', $message, $m) === 1) {
+                    return [null, 'TLS: the certificate of the web server was not verified (' . Log::sanitize($m[0]) . ')', '', true];
+                }
+            }
+            return [null, Log::sanitize((string) preg_replace('~^.*?failed to open stream: ~i', '', (string) end($errors))), '', false];
         }
         $meta = stream_get_meta_data($stream);
         $body = $bytes > 0 ? (string) stream_get_contents($stream, $bytes) : '';
         fclose($stream);
         foreach ((array) ($meta['wrapper_data'] ?? []) as $header) {
             if (is_string($header) && preg_match('~^HTTP/\S+ (\d{3})~', $header, $m) === 1) {
-                return [(int) $m[1], '', $body];
+                return [(int) $m[1], '', $body, false];
             }
         }
-        return [null, 'no HTTP status line', ''];
+        return [null, 'no HTTP status line', '', false];
     }
 
     private function imapHosts(Config $cfg, \rcube $rc): void
@@ -1740,7 +1814,7 @@ final class Tool
                     continue;
                 }
                 if ($stat['uid'] !== 0) {
-                    $this->check(false, 'core config file', Log::sanitize($file) . ' is owned by uid ' . $stat['uid'] . ($stat['uid'] === $self ? ' (the user running this tool, i.e. the PHP user)' : '') . ': that account can change every option - galbridge_* options, des_key, plugins - expected root', true);
+                    $this->check(false, 'core config file', Log::sanitize($file) . ' is owned by uid ' . $stat['uid'] . ($stat['uid'] === $self ? ' (the user running this tool, i.e. the PHP user)' : '') . ': that account can change every option - galbridge_* options, des_key, plugins - expected root: chown root:<PHP group> <file> && chmod 0640 <file> (iRedMail installs config.inc.php as the PHP user with mode 0600, README 2.4)', true);
                 }
                 if (($stat['mode'] & 0o022) !== 0) {
                     $this->check(false, 'core config file', Log::sanitize($file) . ' is writable by group/others (mode ' . sprintf('%04o', $stat['mode'] & 0o7777) . ')', true);

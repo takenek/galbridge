@@ -5,6 +5,43 @@ semantic versioning.
 
 ## [Unreleased]
 
+## [1.0.3] – 2026-11-25
+
+The plugin was installed on real iRedMail 1.8.11 servers – Debian 13, Roundcube 1.7.7, PHP 8.4
+PHP-FPM, nginx, Dovecot, the MariaDB edition and the PostgreSQL edition – by following README
+section 2 command by command, once from the signed tag and once with Composer from Packagist, and
+then used through the real webmail (docs/TESTING.md section 6, "Real installation"). The books, the
+groups, search, autocomplete, group expansion, the tenant isolation, the global book and the role
+checks worked on both editions as documented. What did not work as the documentation said is fixed
+here; no configuration or database step is needed for the upgrade.
+
+### Fixed
+- `composer require takenek/galbridge` stopped on iRedMail's MariaDB/MySQL and PostgreSQL editions
+  with `pear/net_ldap2 v2.3.0 requires ext-ldap`: Roundcube's own `composer.lock` holds its LDAP
+  libraries, and iRedMail installs the PHP `ldap` extension only for its OpenLDAP edition. README
+  2.1 and 5 give the command with `--ignore-platform-req=ext-ldap` (that one requirement only) or
+  the extension as the alternative.
+- `diag --url` against the self-signed certificate that iRedMail installs answered every request
+  with "no answer (... Failed to open stream: operation failed)" – PHP's last message, which does not
+  name the cause – and offered no way to check such a server. The reason now says that the
+  certificate was not verified (`certificate verify failed`, or the name mismatch), one WARN line
+  explains what to do, and the new option **`--cafile=FILE`** (absolute path, `https://` only, a
+  PEM certificate and no private key) verifies the server against that certificate, e.g.
+  `--cafile=/etc/ssl/certs/iRedMail.crt` – verification itself is never switched off. A failed
+  request without a TLS cause no longer repeats PHP's `fopen(...)` prefix.
+- The `core config file` WARN for a Roundcube `config.inc.php` that the PHP user owns – iRedMail
+  installs it as `www-data`, mode `0600` – now gives the remedy (`chown root:<PHP group>`, `chmod
+  0640`); README 2.4 says so as well.
+
+### Documentation
+- README 2.1: the release-archive commands need `git` 2.34+ and `ssh-keygen` (Debian/Ubuntu:
+  `openssh-client`), without which `verify-tag` fails with `cannot run ssh-keygen`; the package is
+  listed on Packagist.
+- README 2.6: `curl --cacert /etc/ssl/certs/iRedMail.crt` and `diag --url ... --cafile=` for
+  iRedMail's self-signed certificate; the deny rule was confirmed on the live templates (without it
+  `static.php/plugins/galbridge/lib/autoload.php` and the SQL templates answered `200`).
+- docs/TESTING.md: the real-installation run and its results.
+
 ## [1.0.2] – 2026-11-25
 
 Verification of the remediation in 1.0.1 against the audit report (2026-11-25, Anthropic's Claude

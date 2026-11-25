@@ -118,7 +118,7 @@ class galbridge extends rcube_plugin
         return [
             'name' => 'GAL Bridge',
             'vendor' => 'TaKeN.PL Usługi Informatyczne Marek Królikowski',
-            'version' => '1.0.2',
+            'version' => '1.0.3',
             'license' => 'GPL-3.0-or-later',
             'uri' => 'https://github.com/takenek/galbridge',
         ];

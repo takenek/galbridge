@@ -252,6 +252,8 @@ mode `0640`):
 composer require --prefer-dist "takenek/galbridge:^X.Y"
 ```
 
+(iRedMail's MariaDB/MySQL and PostgreSQL editions lack the PHP `ldap` extension that Roundcube's
+own lock file declares: add `--ignore-platform-req=ext-ldap` there, README 2.1.)
 `composer update` then stays within the major version; review CHANGELOG.md before upgrading and run
 `bin/galbridge.sh diag` after **every** update. Composer does not verify tag signatures: README 2.1
 compares the commit it installed (`composer show takenek/galbridge`, source reference) with the one

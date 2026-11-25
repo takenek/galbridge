@@ -449,6 +449,63 @@ the plugin; each was fixed in the test harness or the workflow and the next run 
 | 2, 3 | the root step of the PHP 8.4 legs: `--allow-root` refused the copy below `/opt` (mode 0777 on the runners), then the entry `/usr/share/php/<version>` (0777) of the runner's `include_path` | the copy lies below `/srv`, and an extra ini file of the step keeps only `.` in `include_path` - the refusals show that the checks work |
 | 4 (commit `126a58e`) | – | **every job green**: PHPUnit on PHP 8.1 – 8.5 (newest 1.7.x and 1.7.0) with the root step, the seven server pairs of job `databases`, job `e2e` (four legs, unprivileged, PostgreSQL access scoped to the test database), PHPStan, PHP-CS-Fixer, the secret scan with its controls |
 
+### Real installation: Debian 13 + iRedMail 1.8.11 (2026-11-25, changelog 1.0.3)
+
+Two disposable Debian 13 (trixie) systems (systemd-nspawn containers on a private network, no
+inbound access), each set up with the unattended installer of **iRedMail 1.8.11**: the **MariaDB
+edition** and the **PostgreSQL edition**, both with Roundcube **1.7.7** (`/opt/www/roundcubemail`),
+PHP **8.4.28** (PHP-FPM), nginx, Dovecot, Postfix, MariaDB 11.8 or PostgreSQL 17, Amavisd,
+iRedAPD and iRedAdmin 2.8.1, exactly as iRedMail configures them. The fictional directory of
+`tests/fixtures/vmail/seed.sql` was loaded into the real `vmail` database (rows iRedMail had
+created – the first domain, `postmaster` – kept), one user was added with iRedMail's own
+`tools/create_mail_user_SQL.sh`, and the login users got passwords with `doveadm pw`. The plugin was
+then installed by following README section 2 command by command:
+
+| Step | MariaDB edition | PostgreSQL edition |
+|---|---|---|
+| 2.1 install | release archive of the signed tag `v1.0.2`: `verify-tag` printed the documented "Good" line and fingerprint; every file root's, nothing group/other-writable | `composer require` from **Packagist**: `takenek/galbridge` v1.0.2, source reference = the tag commit; installer enabled the plugin |
+| 2.2 role | `grants --allow-root --driver=mysql`, the three review steps, `mysql --binary-mode` | `grants --allow-root --driver=pgsql`, `psql -X -v ON_ERROR_STOP=1`; the three `pg_hba.conf` lines inserted before iRedMail's catch-all `host all all 0.0.0.0/0 md5` – a connection of `galbridge` to `roundcubemail` is rejected |
+| 2.6 nginx | before the rule `static.php/plugins/galbridge/lib/autoload.php` and `static.php/plugins/galbridge/SQL/grants.mysql.sql` answered **200** (PHP source and SQL template downloadable); after it 403, the webmail and core assets unchanged | the same |
+| 2.7 `diag` | OK; one WARN `core config file` (iRedMail's `www-data`, 0600), OK after `chown root:www-data` + `chmod 0640`; `--user` (jan): 8 persons, 5 alias accounts, 1 mailing list, 4 department groups; `--strict` OK | OK without warnings, same counts |
+| browser, headless Chromium through the real nginx / PHP-FPM / Dovecot (login, read-only directory with its groups, contact frame, group members, quick search, autocomplete, group expansion in compose, tenant B, IDN tenant, no JavaScript error) | 10 of 10 | 10 of 10 |
+| the same with the global book (`['*']` viewers, two data domains) and `galbridge_user_aliases` | 10 of 10, foreign entry shown as `(example.org) Bob Smith` | 10 of 10 |
+| vCard export of both books and autocomplete over HTTPS, searched for the fixture canaries (hashes, recovery address, private forwarding targets, `allow_nets`) | 14 vCards (global export off: 204), no canary | the same |
+| logs | Roundcube (syslog): logins only, no message of the plugin or of PHP | the same |
+
+What the run found – none of it in the directory code; fixed in 1.0.3:
+
+* `composer require` stops on both SQL editions with `pear/net_ldap2 v2.3.0 requires ext-ldap`
+  (Roundcube's `composer.lock`; iRedMail installs `php-ldap` for its OpenLDAP edition only):
+  README 2.1 and 5 add `--ignore-platform-req=ext-ldap`, which was then used for the run above;
+* `verify-tag` needs `ssh-keygen` (`openssh-client`), which a minimal Debian lacks: README 2.1;
+* `diag --url` against iRedMail's self-signed certificate reported "no answer (... operation
+  failed)" for every request: a TLS reason, one WARN with the remedy and `--cafile=`; with
+  `--cafile=/etc/ssl/certs/iRedMail.crt` PHP verifies the certificate (issued for the host name);
+* the `core config file` WARN for iRedMail's `config.inc.php` now gives the remedy (README 2.4).
+
+The host of the run boots with `ipv6.disable=1`; there Debian's `dovecot-core` and `nginx`
+packages fail in their maintainer scripts (they start the services with their default `::`
+listeners) before iRedMail configures them. That is a property of the host, not of iRedMail or the
+plugin: the run installed the packages with service starts held back (`policy-rc.d`) and booted the
+systems afterwards, as the installer asks.
+
+### Release verification of 1.0.3 (2026-11-25)
+
+The tree of the 1.0.3 commit, in a **disposable Debian 13 container** (systemd-nspawn, no signing
+key, no SSH agent, no GitHub or Packagist credentials; docs/RELEASING.md step 2), as the
+unprivileged user `tester` unless noted: PHP 8.4.28, Roundcube 1.7.0 and 1.7.7 (release tarballs,
+SHA-256 as in CI), MariaDB 11.8.9, PostgreSQL 17.12, Dovecot 2.4.1, Chromium 156, PHPUnit 13.4.8,
+PHPStan 2.3, PHP-CS-Fixer 3.95. The development dependencies were resolved afresh in the container
+(the CI run of the commit is recorded in the next section); PHP 8.1 – 8.3 and 8.5 are covered by CI.
+
+| Run | Result |
+|---|---|
+| PHPUnit, SQLite + MariaDB + PostgreSQL, `--fail-on-skipped --exclude-group root`: 1.7.7 and 1.7.0 | **2999 tests, OK**, each, no skip (the tree of 1.0.2 lists 2998 in the same environment: the new test of `diag --cafile`) |
+| PHPUnit `--group root-aware` as root, from a root-owned copy over a root-owned 1.7.7 tree | **367 tests, OK** – after `Remediation2ConfigTest` also drops the inheritable DAC capabilities: systemd-nspawn gives root a full inheritable set, which `setpriv --bounding-set` alone left in effect at `exec` (a property of the container, not of the plugin; the test failed there before) |
+| PHPStan level 8 (1.7.7 tree), PHP-CS-Fixer, `php -l`, `composer validate --strict`, `composer audit` | clean |
+| `tests/e2e/test_e2e.py` and `tests/ui/test_ui.py`: Roundcube 1.7.0 and 1.7.7 × MariaDB and PostgreSQL | E2E **37 passed, 0 failed, 0 skipped**, UI **9/9**, each of the four |
+| the changed `diag --url` on the real iRedMail server above (MariaDB edition) | without `--cafile`: the TLS reason and one WARN with the remedy; with `--cafile=/etc/ssl/certs/iRedMail.crt`: the webmail recognised and every path `not served (HTTP 403)`, `Result: OK`; with iRedMail's original nginx template (no deny rule): `[FAIL] web access static.php/plugins/galbridge/composer.json is SERVED (HTTP 200)` and the same for `lib/autoload.php` |
+
 ## 7. Not available / not tested
 
 * Database servers outside the matrix of section 6: MariaDB 10.2 – 10.4, MySQL 8.0 before 8.0.19
@@ -480,9 +537,9 @@ the plugin; each was fixed in the test harness or the workflow and the next run 
   with its SHA-256, the Roundcube tarball SHA-256s) - section 6, "CI runs of 1.0.2".
 * A `pdo_mysql` that is not built on `mysqlnd`: host-name verification with `verify_server_cert=1`
   was verified for `mysqlnd` only (`diag` warns for other builds).
-* A live iRedMail nginx configuration (the `static.php` deny rule in README 2.6 comes from the
-  iRedMail 1.8.11 templates; `diag --url` and the `curl` check of the README verify an
-  installation).
+* iRedMail on platforms other than Debian 13 (the RHEL family, Ubuntu, FreeBSD, OpenBSD): the
+  real installation of section 6 ran on Debian 13 only (the nginx templates and the `static.php`
+  deny rule are the same on Linux); the OpenLDAP edition is out of scope (README section 1).
 * PostgreSQL clusters with `C`/`POSIX` ctype (non-ASCII case folding; diag warns).
 * pgaudit and auto_explain are not installed in the test cluster: `diag`'s warning is tested with
   `pgaudit.log` and `auto_explain.log_min_duration` set for a throw-away role as the placeholders they

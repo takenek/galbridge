@@ -186,7 +186,9 @@ final class Remediation2ConfigTest extends TestCase
         chmod($dir . '/config.inc.php', 0o000);
         if (CliRun::isRoot()) {
             // root reads every file: the same check in a child process of root without the
-            // capabilities that override file permissions (util-linux setpriv)
+            // capabilities that override file permissions (util-linux setpriv) - dropped from the
+            // bounding set and from the inheritable set, which a container manager such as
+            // systemd-nspawn fills (root regains an inheritable capability at exec)
             if (!is_executable('/usr/bin/setpriv')) {
                 self::markTestSkipped('root reads every file, and setpriv is not available');
             }
@@ -194,7 +196,7 @@ final class Remediation2ConfigTest extends TestCase
             file_put_contents($script, "<?php\nrequire " . var_export(CliRun::pluginDir() . '/tests/bootstrap.php', true) . ";\n"
                 . "\$c = new GalBridge\\Config(new rcube_config(), [], null, \$argv[1]);\n"
                 . "echo json_encode(['disabled' => \$c->booksDisabled(), 'problems' => \$c->problems()]);\n");
-            [$code, $out, $err] = CliRun::exec(['/usr/bin/setpriv', '--bounding-set=-dac_override,-dac_read_search', PHP_BINARY, $script, $dir]);
+            [$code, $out, $err] = CliRun::exec(['/usr/bin/setpriv', '--inh-caps=-dac_override,-dac_read_search', '--bounding-set=-dac_override,-dac_read_search', PHP_BINARY, $script, $dir]);
             self::assertSame(0, $code, $out . $err);
             // valid JSON alone: no PHP warning was printed (the file is not handed to rcube_config)
             $result = json_decode($out, true);
