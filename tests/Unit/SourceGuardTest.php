@@ -36,12 +36,20 @@ final class SourceGuardTest extends TestCase
         'call_user_func' => [], 'call_user_func_array' => [], 'forward_static_call' => [], 'forward_static_call_array' => [],
         'func_get_args' => [], 'get_defined_vars' => [], 'compact' => [],
         // runtime environment
-        // (bin/galbridge.sh --allow-root: logs of a root process go to syslog, never into log_dir, and
-        // the working directory is taken off include_path)
-        'putenv' => [self::SCRIPT], 'ini_set' => [self::SCRIPT], 'ini_alter' => [], 'set_include_path' => [self::SCRIPT], 'dl' => [], 'mail' => [], 'mb_send_mail' => [],
-        // (diag --url turns the warning of a failed request into its own WARN line)
-        'set_error_handler' => [self::CLI], 'restore_error_handler' => [self::CLI],
-        'set_exception_handler' => [], 'register_shutdown_function' => [], 'spl_autoload_register' => ['lib/autoload.php'],
+        // (bin/galbridge.sh --allow-root: Roundcube's logs of a root process go to syslog, PHP's error
+        // log is checked, Roundcube gets the checked configuration path and include_path, and the
+        // process works in Roundcube's verified program/ directory instead of the caller's)
+        // (Db/Connection.php: mysqlnd.net_read_timeout of the plugin's own MariaDB/MySQL connection,
+        // restored right after connecting)
+        'putenv' => [self::SCRIPT], 'ini_set' => [self::SCRIPT, 'lib/GalBridge/Db/Connection.php'], 'ini_alter' => [], 'set_include_path' => [self::SCRIPT], 'chdir' => [self::SCRIPT],
+        'dl' => [], 'mail' => [], 'mb_send_mail' => [],
+        // (diag --url turns the warning of a failed request into its own WARN line; the script writes
+        // PHP's messages itself - sanitised - and ends a fatal error or an exit() of other code with
+        // "Result: aborted" and exit code 2)
+        'set_error_handler' => [self::CLI, self::SCRIPT], 'restore_error_handler' => [self::CLI],
+        'set_exception_handler' => [], 'register_shutdown_function' => [self::SCRIPT], 'spl_autoload_register' => ['lib/autoload.php'],
+        // (the script neutralises what other code writes to standard error while diag runs)
+        'stream_filter_register' => [self::SCRIPT], 'stream_filter_append' => [self::SCRIPT], 'stream_filter_prepend' => [],
         'getenv' => ['lib/GalBridge/Config.php', 'lib/GalBridge/Db/Dsn.php', 'lib/GalBridge/Directory/ViewerResolver.php', self::SCRIPT],
         'define' => [self::SCRIPT],
         // network: only "diag --url" (an address given by the operator on the command line)
@@ -59,7 +67,7 @@ final class SourceGuardTest extends TestCase
         'show_source' => [], 'fpassthru' => [],
         // output and diagnostics
         'header' => [], 'setcookie' => [], 'setrawcookie' => [], 'var_dump' => [], 'print_r' => [], 'var_export' => [], 'debug_zval_refcount' => [],
-        'debug_print_backtrace' => [], 'phpinfo' => [], 'error_log' => ['lib/GalBridge/Log.php'], 'trigger_error' => [],
+        'debug_print_backtrace' => [], 'phpinfo' => [], 'error_log' => ['lib/GalBridge/Log.php', self::SCRIPT], 'trigger_error' => [],
         // weak randomness and hashes (the generator of "grants" uses random_bytes / random_int)
         // (sha1: the mysql_native_password verifier that "grants" prints instead of the password)
         'rand' => [], 'mt_rand' => [], 'srand' => [], 'mt_srand' => [], 'uniqid' => [], 'lcg_value' => [], 'md5' => [], 'sha1' => [self::CLI], 'crc32' => [],

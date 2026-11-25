@@ -9,11 +9,19 @@ it into its members, that a display name stays text in the recipient widget of t
 (which inserts names as HTML), and that no page raises a JavaScript error.
 
 Usage: python3 tests/ui/test_ui.py [--rc /opt/rcrun/1.7.7] [--php php8.4] [--db mysql] [--port 8195]
-Requires: chromium, chromium-driver, python3-selenium, the Dovecot test server (tests/e2e/dovecot.sh)
-and the vmail test database (tests/fixtures/vmail/load.sh). The environment is created with
-tests/e2e/setup.sh and the PHP web server is stopped at the end. Case U9 adds rows to the fixture
-through the administrator access of load.sh (tests/e2e/fixture_admin.py) and removes them again; it is
-skipped without that access.
+                                  [--keep] [--allow-skips]
+Requires: chromium, chromium-driver (found on PATH, or CHROMEDRIVER=/path; a driver is never
+downloaded), python3-selenium, the Dovecot test server (tests/e2e/dovecot.sh) and the vmail test
+database (tests/fixtures/vmail/load.sh). The environment is created with tests/e2e/setup.sh; at the
+end the PHP web server of the run is stopped - only that process - and the plugin link is put back
+(tests/e2e/harness.py). Case U8 adds rows to the fixture through the administrator access of
+load.sh or the least-privilege access of docs/TESTING.md (tests/e2e/fixture_admin.py) and removes
+them again; without that access it is skipped - and a skipped case fails the run unless
+--allow-skips is given.
+
+Run it as an unprivileged user: it refuses root with exit code 2 (GALBRIDGE_E2E_ALLOW_ROOT=1 in a
+disposable container only). Chromium keeps its sandbox; it is switched off (with a warning) only for
+root or when GALBRIDGE_UI_NO_SANDBOX=1 says so - in a container whose seccomp profile blocks it.
 
 @license GPL-3.0-or-later
 """
@@ -21,22 +29,28 @@ import argparse
 import contextlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
 import traceback
 
-import requests
-from selenium import webdriver
-from selenium.common.exceptions import TimeoutException
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
-
 HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(PLUGIN, 'tests', 'e2e'))
+
+import harness  # noqa: E402
+
+if __name__ == '__main__':
+    harness.refuse_root()       # before anything else is loaded or started
+
+import requests  # noqa: E402
+from selenium import webdriver  # noqa: E402
+from selenium.common.exceptions import TimeoutException  # noqa: E402
+from selenium.webdriver.chrome.service import Service  # noqa: E402
+from selenium.webdriver.common.by import By  # noqa: E402
+from selenium.webdriver.common.keys import Keys  # noqa: E402
+from selenium.webdriver.support.ui import WebDriverWait  # noqa: E402
 
 import fixture_admin  # noqa: E402
 
@@ -69,17 +83,38 @@ class Ctx:
 C = Ctx()
 
 
-def driver():
+def browser_and_driver():
+    """The installed Chromium and chromedriver; exit code 2 when one is missing (never a download)."""
+    browser = next((p for p in (shutil.which(n) for n in ('chromium', 'chromium-browser', 'google-chrome')) if p), None)
+    drv = os.environ.get('CHROMEDRIVER') or shutil.which('chromedriver')
+    if not browser:
+        sys.exit(_missing('Chromium (install chromium)'))
+    if not drv or not os.access(drv, os.X_OK):
+        sys.exit(_missing('chromedriver (install chromium-driver, or set CHROMEDRIVER=/path/to/chromedriver)'))
+    return browser, drv
+
+
+def _missing(what):
+    print('UI: no %s - a driver is never downloaded' % what, file=sys.stderr)
+    return 2
+
+
+def driver(browser, drv):
     o = webdriver.ChromeOptions()
-    for a in ('--headless=new', '--no-sandbox', '--disable-dev-shm-usage', '--window-size=1500,1000', '--lang=en-US'):
+    args = ['--headless=new', '--disable-dev-shm-usage', '--window-size=1500,1000', '--lang=en-US']
+    if os.geteuid() == 0 or os.environ.get('GALBRIDGE_UI_NO_SANDBOX') == '1':
+        # Chromium refuses to run as root with its sandbox, and Docker's default seccomp profile
+        # blocks it: only then, and said aloud
+        print('UI: WARNING - Chromium runs WITHOUT its sandbox (%s)'
+              % ('root' if os.geteuid() == 0 else 'GALBRIDGE_UI_NO_SANDBOX=1'))
+        args.append('--no-sandbox')
+    for a in args:
         o.add_argument(a)
     o.set_capability('goog:loggingPrefs', {'browser': 'ALL'})
-    for b in ('/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome'):
-        if os.path.exists(b):
-            o.binary_location = b
-            break
-    drv = '/usr/bin/chromedriver' if os.path.exists('/usr/bin/chromedriver') else None
-    d = webdriver.Chrome(options=o, service=Service(executable_path=drv) if drv else None)
+    o.binary_location = browser
+    # Selenium Manager must not fetch anything: the driver and the browser are given
+    os.environ['SE_OFFLINE'] = 'true'
+    d = webdriver.Chrome(options=o, service=Service(executable_path=drv))
     d.set_page_load_timeout(30)
     return d
 
@@ -330,26 +365,26 @@ def prepare():
     raise SystemExit('Roundcube did not come up on %s' % C.base)
 
 
-def stop_server():
-    pidfile = os.path.join(C.run, 'php-server.pid')
-    if os.path.exists(pidfile):
-        with contextlib.suppress(Exception), open(pidfile) as f:
-            os.kill(int(f.read().strip()), 15)
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--rc', default='/opt/rcrun/1.7.7')
     ap.add_argument('--php', default='php8.4')
     ap.add_argument('--db', default='mysql', choices=['mysql', 'pgsql'])
     ap.add_argument('--port', type=int, default=8195)
-    ap.add_argument('--keep', action='store_true', help='leave the PHP web server running')
+    ap.add_argument('--keep', action='store_true', help='leave the PHP web server running and the plugin link in place')
+    ap.add_argument('--allow-skips', action='store_true', help='a skipped case does not fail the run (partial local runs only)')
     C.args = ap.parse_args()
+    harness.refuse_root()
+    browser, drv = browser_and_driver()
     t0 = time.time()
-    prepare()
-    ok = bad = 0
-    d = driver()
+    # the run directory setup.sh uses (known before it runs: a setup that fails half-way is cleaned up too)
+    C.run = os.path.join(PLUGIN, 'tests', 'e2e', 'run', '%s-%s-%s' % (
+        os.path.basename(os.path.realpath(C.args.rc)), os.path.basename(C.args.php), C.args.db))
+    ok = bad = skipped = 0
+    d = None
     try:
+        prepare()
+        d = driver(browser, drv)
         for name, fn in RESULTS:
             t = time.time()
             try:
@@ -357,6 +392,7 @@ def main():
                 ok += 1
                 print('PASS %s (%.1fs)' % (name, time.time() - t))
             except Skip as e:
+                skipped += 1
                 print('SKIP %s: %s' % (name, e))
             except Exception as e:  # noqa: BLE001
                 bad += 1
@@ -365,11 +401,14 @@ def main():
                     traceback.print_exc()
             sys.stdout.flush()
     finally:
-        d.quit()
+        if d is not None:
+            d.quit()
         if not C.args.keep:
-            stop_server()
-    print('UI (%s): %d passed, %d failed (%.0fs)' % (C.args.db, ok, bad, time.time() - t0))
-    sys.exit(1 if bad else 0)
+            harness.cleanup(C.run, C.args.rc, C.args.port)
+    if skipped and not C.args.allow_skips:
+        print('UI: %d case(s) skipped - a skipped case proves nothing, so the run fails (--allow-skips for a partial local run)' % skipped)
+    print('UI (%s): %d passed, %d failed, %d skipped (%.0fs)' % (C.args.db, ok, bad, skipped, time.time() - t0))
+    sys.exit(1 if bad or (skipped and not C.args.allow_skips) else 0)
 
 
 if __name__ == '__main__':

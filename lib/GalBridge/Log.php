@@ -19,15 +19,27 @@ namespace GalBridge;
 /**
  * Central, redacting logger.
  *
- * Writes to the Roundcube log "galbridge" (rcube::write_log). Every message and context value is
- * sanitised: control and bidi characters (log injection, display spoofing) are replaced, invalid UTF-8
- * is redacted and values are truncated. Normal levels are meant for reason codes, numeric ids and
- * counts; search terms, addresses and names belong in debug() only. Callers must never pass secrets
- * (DSNs, passwords) on purpose; the sanitising is a safety net, not a licence.
+ * Writes to the Roundcube log "galbridge" (rcube::write_log), one line per entry:
+ * "LEVEL operation: message key=value ..."; an ERROR or WARN line that Roundcube refuses to write
+ * there goes to its "errors" log instead (write()). Every message and context value is sanitised (sanitize(),
+ * in this order): invalid UTF-8 redacts the whole value; control characters (C0, C1) and every format
+ * character (Unicode Cf: bidi, zero-width, soft hyphen, tag characters ...) and the line separators
+ * are replaced by a blank (log injection, display spoofing); passwords are masked (maskCredentials():
+ * scheme://user:password@host - also with blanks in the password, a '/' in the user name and the old
+ * scheme(syntax):// notation - and password=... / PGPASSWORD=... forms); the value is cut to 300
+ * characters. A context value that contains a blank, '=', '"' or '\' is written in double quotes
+ * (backslash and quote escaped), so a log parser cannot read a part of it as another key=value pair.
+ * Normal levels are meant for reason codes, numeric ids and counts; search terms, addresses and names
+ * belong in debug() only. Callers must never pass secrets (DSNs, passwords) on purpose; the sanitising
+ * is a safety net, not a licence - parameters that carry one are marked #[\SensitiveParameter], so
+ * they do not appear in a stack trace either.
  */
 final class Log
 {
     private const MAX_VALUE = 300;
+
+    /** a URL scheme, also in the old notation "driver(syntax)" that rcube_db::parse_dsn() reads */
+    private const SCHEME = '[a-z][a-z0-9+.\-]*(?:\([^)\s]*\))?://';
 
     /** @var null|callable(string): void */
     private static $sink;
@@ -104,8 +116,10 @@ final class Log
     private static array $once = [];
 
     /**
-     * Log a reason code at most once per request (crafted requests or per-row conditions must not be
-     * able to flood the mail log). $level: error | warning | info.
+     * Log a reason code at most once per request: per-row conditions and repeated attempts inside one
+     * request write one line, not one per row. A loop of requests still adds up to one line per
+     * reason code per request - bounded by the request rate, which the plugin does not limit (a
+     * reverse-proxy limit does, SECURITY.md). $level: error | warning | info.
      *
      * @param array<string, mixed> $context
      */
@@ -140,9 +154,35 @@ final class Log
     }
 
     /**
-     * Sanitise a single value for the log.
+     * The text with every password replaced by ***. Used by sanitize() and by the filter
+     * bin/galbridge.sh puts on standard error, so both mask the same:
+     *  - a URL / DSN scheme://user:password@host - the user may contain '/', the password anything
+     *    (blanks, '@', '/', ':') up to the LAST '@' before the next scheme:// on the line, as
+     *    rcube_db::parse_dsn() reads the password up to the last '@'; also scheme(syntax)://;
+     *  - name=value pairs named pass, password, passwd or pwd - also with a prefix ending in '_' and
+     *    PostgreSQL's PG (password=, PGPASSWORD=, db_pass= ...) - with a bare, a single- or a
+     *    double-quoted value, and "password": "value".
+     * It masks rather too much than too little (an '@' later on the line ends the masked part there).
+     * A text the patterns cannot be applied to (PCRE limits) is replaced as a whole.
      */
-    public static function sanitize(mixed $value): string
+    public static function maskCredentials(#[\SensitiveParameter] string $s): string
+    {
+        $masked = preg_replace(
+            [
+                '~(' . self::SCHEME . '[^:@\s]*):(?:(?!' . self::SCHEME . ').)*@~i',
+                '~\b((?:[a-z0-9]+_)*(?:pg)?(?:pass(?:word|wd)?|pwd))(\s*=\s*)(?:"(?:[^"\\\\]|\\\\.)*"|\'(?:[^\'\\\\]|\\\\.)*\'|[^\s;&,\'"]*)~i',
+                '~(["\'])((?:[a-z0-9]+_)*(?:pg)?(?:pass(?:word|wd)?|pwd))\1(\s*:\s*)(?:"(?:[^"\\\\]|\\\\.)*"|\'(?:[^\'\\\\]|\\\\.)*\')~i',
+            ],
+            ['$1:***@', '$1$2***', '$1$2$1$3"***"'],
+            $s,
+        );
+        return is_string($masked) ? $masked : '[REDACTED]';
+    }
+
+    /**
+     * Sanitise a single value for the log (see the class comment for the order of the steps).
+     */
+    public static function sanitize(#[\SensitiveParameter] mixed $value): string
     {
         if (is_bool($value)) {
             return $value ? 'true' : 'false';
@@ -166,22 +206,37 @@ final class Log
         }
 
         $s = (string) $value;
-        // DSN credentials (scheme://user:password@host) - never log a password, even by accident;
-        // rcube_db::parse_dsn() reads the password up to the LAST '@', so redact greedily
-        $s = (string) preg_replace('~([a-z][a-z0-9+.-]*://[^:@/\s]*):\S*@~i', '$1:***@', $s);
-        // invalid UTF-8 / binary
+        // invalid UTF-8 / binary: nothing of the value survives
         if (!preg_match('//u', $s)) {
-            $s = '[BINARY-REDACTED]';
+            return '[BINARY-REDACTED]';
         }
-        // control characters (CR/LF/TAB/ESC ...), NEL, line/paragraph separators, bidi and zero-width
-        // characters -> log injection and display spoofing protection
-        $s = (string) preg_replace('/[\x00-\x1F\x7F]|[\x{0080}-\x{009F}]|' . Normalizer::INVISIBLE . '/u', ' ', $s);
+        // control characters (CR/LF/TAB/ESC ..., C1, NEL), every format character (bidi, zero-width,
+        // soft hyphen, tag characters ...), line/paragraph separators -> log injection and display
+        // spoofing protection. Before the masks: a tab or a line break inside a password is a blank
+        // for them, never the end of what they mask.
+        $s = (string) preg_replace('/\p{Cc}|\p{Cf}|' . Normalizer::INVISIBLE . '/u', ' ', $s);
+        $s = self::maskCredentials($s);
 
         if (mb_strlen($s) > self::MAX_VALUE) {
             $s = mb_substr($s, 0, self::MAX_VALUE) . '...';
         }
 
         return $s;
+    }
+
+    /**
+     * One context pair: the key (a code constant; any character outside [A-Za-z0-9_.-] becomes '_')
+     * and the sanitised value, in double quotes when it contains a blank, '=', '"' or '\' (backslash
+     * and quote escaped with a backslash), so that it cannot be read as further pairs.
+     */
+    private static function pair(string $key, mixed $value): string
+    {
+        $key = (string) preg_replace('/[^A-Za-z0-9_.\-]/', '_', self::sanitize($key));
+        $value = self::sanitize($value);
+        if (preg_match('/[\s\p{Z}="\\\\]/u', $value) === 1) {
+            $value = '"' . addcslashes($value, '"\\') . '"';
+        }
+        return $key . '=' . $value;
     }
 
     /**
@@ -199,7 +254,7 @@ final class Log
         }
 
         foreach ($context as $key => $value) {
-            $line .= ' ' . self::sanitize((string) $key) . '=' . self::sanitize($value);
+            $line .= ' ' . self::pair((string) $key, $value);
         }
 
         if (self::$sink !== null) {
@@ -207,9 +262,19 @@ final class Log
             return;
         }
 
-        if (class_exists('rcube', false)) {
-            \rcube::write_log('galbridge', $line);
-        } else {
+        if (!class_exists('rcube', false)) {
+            error_log('galbridge: ' . $line);
+            return;
+        }
+        if (\rcube::write_log('galbridge', $line) !== false || ($level !== 'ERROR' && $level !== 'WARN')) {
+            return;
+        }
+        // Roundcube refused the line: per_user_logging without a log directory of this user (or
+        // without a user), an unwritable file, a failing syslog. An ERROR or WARN line - a refused
+        // role, an invalid configuration, a row out of scope - must not disappear without a trace:
+        // Roundcube's errors log (which per_user_logging still writes to the main log directory),
+        // and PHP's error log as the last resort. INFO and DEBUG lines follow Roundcube's decision.
+        if (\rcube::write_log('errors', 'galbridge: ' . $line) === false) {
             error_log('galbridge: ' . $line);
         }
     }

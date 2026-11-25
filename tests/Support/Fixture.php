@@ -70,21 +70,24 @@ final class Fixture
     }
 
     /**
-     * N throw-away mailboxes bulkNNN@$domain (deliverable, with a self forwarding row as iRedAdmin
-     * creates it) and the statements that remove them.
+     * N throw-away mailboxes bulkNNN@$domain (three digits, four from 1000 on; deliverable) and the
+     * statements that remove them.
      *
      * @return array{0: list<string>, 1: list<string>} [apply, revert]
      */
     public static function bulkMailboxes(int $count, string $domain = 'example.com', string $department = 'Bulk', string $prefix = 'bulk'): array
     {
+        // numbered with at least three digits - more for 1000 and up, so that the pattern of the
+        // revert statement matches every row it added
+        $width = max(3, strlen((string) $count));
         $rows = [];
         for ($i = 1; $i <= $count; $i++) {
-            $user = sprintf('%s%03d@%s', $prefix, $i, $domain);
-            $rows[] = sprintf("('%s', 'Bulk User %03d', '%s', '%s', '%s/b/u/l/%s%03d')", $user, $i, $domain, $department, $domain, $prefix, $i);
+            $n = str_pad((string) $i, $width, '0', STR_PAD_LEFT);
+            $rows[] = sprintf("('%s%s@%s', 'Bulk User %s', '%s', '%s', '%s/b/u/l/%s%s')", $prefix, $n, $domain, $n, $domain, $department, $domain, $prefix, $n);
         }
         return [
             ['INSERT INTO mailbox (username, name, domain, department, maildir) VALUES ' . implode(', ', $rows)],
-            ["DELETE FROM mailbox WHERE username LIKE '{$prefix}___@{$domain}'"],
+            ["DELETE FROM mailbox WHERE username LIKE '{$prefix}" . str_repeat('_', $width) . "@{$domain}'"],
         ];
     }
 
@@ -106,8 +109,12 @@ final class Fixture
             $pdo = null;
             return;
         }
+        if ($dsn === '') {
+            // the engine of the test is not configured in this run (e.g. a MySQL-only run)
+            Assert::markTestSkipped('needs GALBRIDGE_TEST_MYSQL_DSN / GALBRIDGE_TEST_PGSQL_DSN');
+        }
         $parsed = \rcube_db::parse_dsn($dsn);
-        $engine = (string) $parsed['phptype'] === 'pgsql' ? 'pgsql' : 'mysql';
+        $engine = (string) ($parsed['phptype'] ?? '') === 'pgsql' ? 'pgsql' : 'mysql';
         $db = (string) ($parsed['database'] ?? '');
         if (!preg_match('/^[a-z][a-z0-9_]*test[a-z0-9_]*$/D', $db) || !Dsn::isLoopback($parsed)) {
             Assert::markTestSkipped('refusing to change anything but a local *test* database: ' . $db);

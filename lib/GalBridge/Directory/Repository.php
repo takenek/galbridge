@@ -34,8 +34,13 @@ final class Repository
     /** per-user alias addresses shown for one person ("other" e-mail addresses) */
     public const ALIASES_PER_PERSON = 20;
 
-    /** statements spent on the per-user aliases of one page (see userAliases()) */
-    public const ALIAS_PASSES = 4;
+    /**
+     * Addresses per details / alias statement: a full set (an export, a group expansion) of up to
+     * galbridge_max_export or galbridge_max_group_members entries is read in statements of this many
+     * addresses, so no statement carries an unbounded list of parameters - rcube_db inlines them one
+     * after the other, at a cost that grows with the square of their number.
+     */
+    public const DETAIL_BATCH = 500;
 
     /** @var null|list<array{id: string, kind: string, key: string, label: string, count: int}> */
     private ?array $groups = null;
@@ -141,6 +146,10 @@ final class Repository
             Log::once('warning', 'groups', 'too_many_groups', 'more groups than galbridge_max_groups: groups disabled for this book', ['book' => $this->queries->book()->id]);
             return $this->groups = [];
         }
+        $book = $this->queries->book();
+        // the global book groups departments per domain (QueryBuilder::groupsQuery()): the key is
+        // "domain:department", the label carries the domain first
+        $perDomain = $kind === IdCodec::GROUP_DEPARTMENT && $book->id === BookDefinition::GLOBAL;
         $groups = [];
         foreach ($rows as $row) {
             // the department key is used exactly as SQL computed it (LOWER(TRIM(department))), so the
@@ -148,14 +157,31 @@ final class Repository
             $key = $kind === IdCodec::GROUP_DOMAIN ? Normalizer::domain($row['gkey'] ?? null) : (string) ($row['gkey'] ?? '');
             // a label is display text of the directory like a department value of a record
             $label = Normalizer::cutAtSign(Normalizer::displayText($row['label'] ?? '', 64));
+            if ($perDomain && $key !== null && $key !== '' && $label !== '') {
+                $domain = Normalizer::domain($row['gdomain'] ?? null);
+                if ($domain === null || !$book->inScope($domain)) {
+                    continue;
+                }
+                $key = $domain . ':' . $key;
+                $label = '(' . $domain . ') ' . $label;
+            }
             if ($key === null || $key === '' || $label === '' || strlen($key) > IdCodec::MAX_KEY_BYTES) {
+                if ($key !== null && strlen($key) > IdCodec::MAX_KEY_BYTES) {
+                    Log::debug('groups', 'a department group key is too long to be offered', ['book' => $book->id]);
+                }
                 continue;
             }
-            if ($kind === IdCodec::GROUP_DOMAIN && !$this->queries->book()->inScope($key)) {
+            if (!IdCodec::usableGroupKey($key)) {
+                // its key would be bound into the member statement (see IdCodec::usableGroupKey());
+                // the members stay in the book, they are only not offered as this group
+                Log::once('warning', 'groups', 'group_key_unusable', 'a department with a control character or a backslash is not offered as a group', ['book' => $book->id]);
+                continue;
+            }
+            if ($kind === IdCodec::GROUP_DOMAIN && !$book->inScope($key)) {
                 continue;
             }
             $groups[] = [
-                'id' => IdCodec::groupId($this->queries->book()->tag, $kind, $key),
+                'id' => IdCodec::groupId($book->tag, $kind, $key),
                 'kind' => $kind,
                 'key' => $key,
                 'label' => $label,
@@ -195,16 +221,13 @@ final class Repository
     }
 
     /**
-     * The per-user aliases shown for the persons of a page: at most ALIASES_PER_PERSON per person
-     * (the first ones in address order), read with bounded statements.
+     * The per-user aliases shown for the given persons (at most DETAIL_BATCH): at most
+     * ALIASES_PER_PERSON per person, the first ones in address order, read by ONE statement whose
+     * bound is per owner (QueryBuilder::userAliasesQuery(): ROW_NUMBER() per owner), so a person
+     * with thousands of aliases can take nobody else's aliases away. The statement returns one row
+     * more than is shown for an owner who has more; that row only tells that the list is cut.
      *
-     * A statement returns the rows ordered by owner and address and at most ALIASES_PER_PERSON rows
-     * per owner asked for (plus one). When that limit cuts the result - somebody has far more aliases
-     * than are shown - the owners it did not reach are asked for again, so one person with thousands
-     * of aliases cannot take the aliases of everybody else on the page away. Every statement settles
-     * at least one owner; after ALIAS_PASSES statements the rest is shown without aliases.
-     *
-     * @param list<string> $owners mailbox addresses of the page
+     * @param list<string> $owners mailbox addresses
      *
      * @return array<string, list<string>> owner => alias addresses
      *
@@ -213,51 +236,29 @@ final class Repository
     private function userAliases(array $owners): array
     {
         $book = $this->queries->book();
+        $owners = array_values(array_unique($owners));
+        if ($owners === []) {
+            return [];
+        }
+        [$sql, $params] = $this->queries->userAliasesQuery($owners, self::ALIASES_PER_PERSON + 1);
+        $rows = $this->connection->select($sql, $params, 0, (self::ALIASES_PER_PERSON + 1) * count($owners));
         $aliases = [];
+        $seen = [];
         $capped = false;
-        $pending = array_values(array_unique($owners));
-        for ($pass = 0; $pending !== []; $pass++) {
-            if ($pass === self::ALIAS_PASSES) {
-                Log::once('warning', 'records', 'aliases_skipped', 'per-user aliases are not shown for some entries of this page (too many aliases)', ['book' => $book->id]);
-                break;
+        foreach ($rows as $r) {
+            $owner = (string) $r['forwarding'];
+            $seen[$owner] = ($seen[$owner] ?? 0) + 1;
+            if ($seen[$owner] > self::ALIASES_PER_PERSON) {
+                $capped = true;
+                continue;
             }
-            $limit = self::ALIASES_PER_PERSON * count($pending);
-            [$sql, $params] = $this->queries->userAliasesQuery($pending);
-            $rows = $this->connection->select($sql, $params, 0, $limit + 1);
-            $seen = [];
-            $last = null;
-            foreach ($rows as $r) {
-                $owner = (string) $r['forwarding'];
-                $seen[$owner] = ($seen[$owner] ?? 0) + 1;
-                $last = $owner;
-                if ($seen[$owner] > self::ALIASES_PER_PERSON) {
-                    $capped = true;
-                    continue;
-                }
-                // re-check of the row's domain against the book (defence in depth, as for records)
-                $domain = Normalizer::domain($r['domain'] ?? null);
-                if ($domain === null || !$book->inScope($domain)) {
-                    Log::once('error', 'scope', 'row_out_of_scope', 'row outside the book scope dropped (please report)', ['book' => $book->id]);
-                    continue;
-                }
-                $aliases[$owner][] = (string) $r['address'];
+            // re-check of the row's domain against the book (defence in depth, as for records)
+            $domain = Normalizer::domain($r['domain'] ?? null);
+            if ($domain === null || !$book->inScope($domain)) {
+                Log::once('error', 'scope', 'row_out_of_scope', 'row outside the book scope or on a hidden list dropped (please report)', ['book' => $book->id, 'row' => Log::tag((string) $r['address'])]);
+                continue;
             }
-            if (count($rows) <= $limit) {
-                break; // every row of the owners asked for was read
-            }
-            // cut by the limit: an owner without a row may only have been pushed out of the result,
-            // and the owner of the last row may lack rows
-            $capped = true;
-            $next = [];
-            foreach ($pending as $owner) {
-                if (!isset($seen[$owner])) {
-                    $next[] = $owner;
-                } elseif ($owner === $last && $seen[$owner] < self::ALIASES_PER_PERSON) {
-                    unset($aliases[$owner]);
-                    $next[] = $owner;
-                }
-            }
-            $pending = $next;
+            $aliases[$owner][] = (string) $r['address'];
         }
         if ($capped) {
             Log::once('warning', 'records', 'aliases_capped', 'more per-user aliases than shown', ['book' => $book->id, 'max' => self::ALIASES_PER_PERSON]);
@@ -266,7 +267,8 @@ final class Repository
     }
 
     /**
-     * Map (kind, address) rows to full records, preserving their order.
+     * Map (kind, address) rows to full records, preserving their order. The details (and the
+     * per-user aliases) are read in statements of at most DETAIL_BATCH addresses each.
      *
      * @param list<array<string, ?string>> $rows
      *
@@ -286,8 +288,7 @@ final class Repository
         }
 
         $details = [];
-        if (!empty($byKind[QueryBuilder::KIND_PERSON])) {
-            $addresses = $byKind[QueryBuilder::KIND_PERSON];
+        foreach (array_chunk($byKind[QueryBuilder::KIND_PERSON] ?? [], self::DETAIL_BATCH) as $addresses) {
             $aliases = $this->fields->userAliases() ? $this->userAliases($addresses) : [];
             [$sql, $params] = $this->queries->personDetailsQuery($addresses);
             foreach ($this->connection->select($sql, $params) as $r) {
@@ -299,8 +300,8 @@ final class Repository
             }
         }
         foreach ([QueryBuilder::KIND_ALIAS, QueryBuilder::KIND_LIST] as $kind) {
-            if (!empty($byKind[$kind])) {
-                [$sql, $params] = $this->queries->listDetailsQuery($kind, $byKind[$kind]);
+            foreach (array_chunk($byKind[$kind] ?? [], self::DETAIL_BATCH) as $addresses) {
+                [$sql, $params] = $this->queries->listDetailsQuery($kind, $addresses);
                 foreach ($this->connection->select($sql, $params) as $r) {
                     $rec = $this->mapper->mailList($kind, $r);
                     if ($rec !== null) {

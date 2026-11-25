@@ -24,17 +24,32 @@ use GalBridge\Normalizer;
 /**
  * The ONLY producer of directory SQL.
  *
- * Every statement's WHERE clause is And(scope, visibility, hidden, filter), rendered fully
- * parenthesised (Sql). There is no API to build a query without the scope. Rows from
+ * Every statement's WHERE clause is And(scope, visibility, canonical address, hidden, filter),
+ * rendered fully parenthesised (Sql). There is no API to build a query without the scope. The
+ * canonical-address predicate (canonicalAddressSql()) is the address rule of the PHP re-check
+ * (Normalizer::CANONICAL_ADDRESS) in the engine's SQL, so SQL never offers a row that PHP drops:
+ * counts, matches, groups and full sets are made of the rows that are delivered. Rows from
  * forwardings / moderators / maillist_owners are only ever used in semi-joins (EXISTS / IN), so
  * result rows are unique by primary key and counts and paging are exact.
  *
  * "forwardings" is never the iRedMail table itself but the restricted view Schema::FORWARDINGS
- * (created by the grant templates): it has no row of a private mailbox forwarding, so the role
- * cannot select forwarding targets (README 2.2: a limit on reading, not on inference).
+ * (created by the grant templates): it has no row of a private mailbox forwarding, and the server
+ * builds its rows before it applies any condition of a statement (MariaDB/MySQL ALGORITHM =
+ * TEMPTABLE with a LIMIT fence, PostgreSQL security_barrier with an OFFSET 0 fence; README 2.2), so
+ * no condition of the role ever sees a private row. Because the view is built as a whole, the
+ * statements refer to it only in UNCORRELATED semi-joins (Sql::inSelect(): computed once per
+ * statement, also inside the OR branches of the list policies) and in the joins of the per-user
+ * alias rows; never in a correlated EXISTS, which could build it again for every outer row.
  *
  * Search input is turned into predicates here (never into SQL text): words are normalised,
- * LIKE-escaped and bound.
+ * LIKE-escaped and bound. rcube_db inlines bound values into the statement text and PDO scans that
+ * text again, so no value with a control character or a backslash is ever bound (words(), group
+ * keys: IdCodec::usableGroupKey(); Connection::select() refuses a NUL byte or a backslash).
+ *
+ * Expiry (galbridge_hide_expired) is judged by the database server's clock in its session time zone
+ * AND by UTC, whichever comes first (unexpired()): the vmail "expired" columns are timestamps without
+ * a time zone, and an entry must not stay visible after its expiry whichever of the two conventions
+ * wrote it.
  */
 final class QueryBuilder
 {
@@ -48,8 +63,35 @@ final class QueryBuilder
     private const USER_ALIAS_FROM = '`' . Schema::FORWARDINGS . '` f JOIN `domain` fd ON fd.`domain` = f.`domain`';
 
     /**
+     * Normalizer::CANONICAL_ADDRESS as a POSIX extended regular expression that MariaDB (PCRE),
+     * MySQL 8 (ICU) and PostgreSQL (ARE) read alike: no backslash ("[.]" for a dot), no '?'
+     * (rcube_db takes every '?' of a statement for a placeholder: "{0,1}" instead), no lazy or
+     * possessive forms. The 64-byte local part and the 254-byte total are separate conditions.
+     */
+    public const ADDRESS_ERE = '^[a-z0-9_+=-]+([.][a-z0-9_+=-]+)*@' . self::HOST_ERE . '$';
+
+    /** Normalizer::CANONICAL_DOMAIN in the same notation as ADDRESS_ERE */
+    public const DOMAIN_ERE = '^' . self::HOST_ERE . '$';
+
+    private const HOST_ERE = '([a-z0-9]([a-z0-9-]{0,61}[a-z0-9]){0,1}[.])+([a-z][a-z0-9]{0,62}|xn--[a-z0-9]([a-z0-9-]{0,57}[a-z0-9]){0,1})';
+
+    /** a character outside the canonical alphabet of an address / of a host name */
+    public const ADDRESS_OTHER_CHAR = '[^a-z0-9._+=@-]';
+
+    public const DOMAIN_OTHER_CHAR = '[^a-z0-9.-]';
+
+    /** the characters a host name label may end with (SQLite rendering, rtrim()) */
+    private const LABEL_CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789-';
+
+    /** person columns of a field that a foreign entry may not carry (RecordMapper::foreignWithheld()) */
+    private const WITHHELD_COLUMNS = ['m.first_name' => 'firstname', 'm.last_name' => 'surname', 'm.department' => 'department', 'm.telephone' => 'phone', 'm.mobile' => 'mobile'];
+
+    /**
      * @param list<string> $hiddenAddresses
      * @param list<string> $hiddenLocalparts
+     * @param list<string> $foreignWithheld  fields an entry outside the viewer's home domains does not
+     *                                       carry in this book (RecordMapper::foreignWithheld(); empty
+     *                                       when the book does not mark foreign entries)
      */
     public function __construct(
         private readonly string $driver,
@@ -66,6 +108,7 @@ final class QueryBuilder
         private readonly string $listPolicy,
         private readonly int $minLength,
         private readonly int $maxLength,
+        private readonly array $foreignWithheld = [],
     ) {
     }
 
@@ -73,9 +116,14 @@ final class QueryBuilder
      * The one way to build the query builder of a book from the configuration. Malformed deny-lists
      * or visibility column are refused (they must disable the books, never mean "no restriction").
      *
+     * @param null|list<string> $foreignWithheld RecordMapper::foreignWithheld() (Factory passes the
+     *                                           list it gives the mapper); null = computed from
+     *                                           Roundcube's name template when the book marks
+     *                                           foreign entries
+     *
      * @throws GalBridgeException 'config_invalid'
      */
-    public static function forBook(Config $config, string $driver, BookDefinition $book, Viewer $viewer, FieldMap $fields): self
+    public static function forBook(Config $config, string $driver, BookDefinition $book, Viewer $viewer, FieldMap $fields, ?array $foreignWithheld = null): self
     {
         $hidden = $config->hiddenAddresses();
         $localparts = $config->hiddenLocalparts();
@@ -101,6 +149,7 @@ final class QueryBuilder
             listPolicy: $config->choice('galbridge_list_policy', Config::LIST_POLICIES),
             minLength: $config->int('galbridge_min_search_length', 1, 10),
             maxLength: $config->int('galbridge_max_search_length', 16, 255),
+            foreignWithheld: $book->markForeign ? ($foreignWithheld ?? RecordMapper::foreignWithheld(RecordMapper::nameTemplate())) : [],
         );
     }
 
@@ -172,9 +221,10 @@ final class QueryBuilder
         $parts = [
             $this->scope('m'),
             Sql::raw('m.active = 1 AND m.enabledeliver = 1 AND d.active = 1 AND d.backupmx = 0'),
+            self::canonicalAddressSql($this->driver, 'm.username', 'm.`domain`'),
         ];
         if ($this->hideExpired) {
-            $parts[] = Sql::raw('m.expired > ? AND d.expired > ?', [$this->now, $this->now]);
+            $parts[] = self::unexpired($this->driver, $this->now, 'm.expired', 'd.expired');
         }
         if ($this->visibilityColumn !== '') {
             // configured but not readable: fail closed
@@ -191,12 +241,13 @@ final class QueryBuilder
         $parts = [
             $this->scope('a'),
             Sql::raw('a.active = 1 AND d.active = 1 AND d.backupmx = 0'),
+            self::canonicalAddressSql($this->driver, 'a.address', 'a.`domain`'),
         ];
         if ($this->hideExpired) {
             // kinds() lists alias accounts only when a.expired is readable
-            $parts[] = Sql::raw('a.expired > ? AND d.expired > ?', [$this->now, $this->now]);
+            $parts[] = self::unexpired($this->driver, $this->now, 'a.expired', 'd.expired');
         }
-        $parts[] = Sql::exists('SELECT 1 FROM `' . Schema::FORWARDINGS . '` f WHERE f.address = a.address AND f.is_list = 1 AND f.active = 1');
+        $parts[] = Sql::inSelect('a.address', 'SELECT f.address FROM `' . Schema::FORWARDINGS . '` f WHERE f.is_list = 1 AND f.active = 1');
         $parts[] = (new AccessPolicy($this->listPolicy, $this->viewer))->alias();
         $parts[] = $this->hidden('a.address');
         return Sql::and(...$parts);
@@ -207,14 +258,181 @@ final class QueryBuilder
         $parts = [
             $this->scope('ml'),
             Sql::raw('ml.active = 1 AND d.active = 1 AND d.backupmx = 0'),
+            self::canonicalAddressSql($this->driver, 'ml.address', 'ml.`domain`'),
         ];
         if ($this->hideExpired) {
             // kinds() lists mailing lists only when ml.expired is readable
-            $parts[] = Sql::raw('ml.expired > ? AND d.expired > ?', [$this->now, $this->now]);
+            $parts[] = self::unexpired($this->driver, $this->now, 'ml.expired', 'd.expired');
         }
-        $parts[] = Sql::exists('SELECT 1 FROM `' . Schema::FORWARDINGS . '` f WHERE f.address = ml.address AND f.is_maillist = 1 AND f.active = 1');
+        $parts[] = Sql::inSelect('ml.address', 'SELECT f.address FROM `' . Schema::FORWARDINGS . '` f WHERE f.is_maillist = 1 AND f.active = 1');
         $parts[] = (new AccessPolicy($this->listPolicy, $this->viewer))->mailingList();
         $parts[] = $this->hidden('ml.address');
+        return Sql::and(...$parts);
+    }
+
+    /**
+     * The canonical-row rule (Normalizer::CANONICAL_ADDRESS) for an address column, rendered for the
+     * engine; with $domainColumn also "the address belongs to its domain column" (the suffix test of
+     * RecordMapper). A row this predicate keeps passes the PHP re-check (canonicalAddress(), the
+     * domain and suffix test), so SQL and PHP decide alike: a row that does not follow the rule is
+     * neither listed, counted, matched, grouped nor part of a full set - instead of being counted by
+     * SQL and dropped by PHP (an existence oracle for hidden entries, and a refused full set).
+     *
+     *  - PostgreSQL: ASCII only (octet_length = char_length), no character outside the alphabet
+     *    (unanchored, so a trailing newline is caught as well), the ERE, the lengths; case-sensitive
+     *    like the engine - an address written with capitals is not offered (its ID would not find
+     *    the row either);
+     *  - MariaDB/MySQL: the same with REGEXP; the ASCII test comes first in meaning - it keeps
+     *    Unicode case folding (U+212A KELVIN SIGN, U+017F LONG S onto k / s) out of the class. Under
+     *    iRedMail's case-insensitive collation ASCII capitals pass: PHP lower-cases them, and the
+     *    ID lookups of the same collation find the row;
+     *  - SQLite (the test mirror; no REGEXP): GLOB patterns, case-sensitive.
+     *
+     * Every pattern is bound; the constant SQL holds no '?' and no backslash. A NULL column makes the
+     * predicate NULL, i.e. the row is not offered.
+     */
+    public static function canonicalAddressSql(string $driver, string $column, ?string $domainColumn = null): Sql
+    {
+        $c = $column;
+        if ($driver === 'pgsql') {
+            $parts = [
+                Sql::raw("octet_length({$c}) = char_length({$c})"),
+                Sql::raw("{$c} !~ ?", [self::ADDRESS_OTHER_CHAR]),
+                Sql::raw("{$c} ~ ?", [self::ADDRESS_ERE]),
+                Sql::raw("length({$c}) <= 254 AND strpos({$c}, '@') <= 65"),
+            ];
+            if ($domainColumn !== null) {
+                $d = $domainColumn;
+                $parts[] = Sql::raw("substr({$c}, strpos({$c}, '@') + 1) = {$d} AND octet_length({$d}) = char_length({$d})");
+            }
+            return Sql::and(...$parts);
+        }
+        if ($driver === 'mysql') {
+            $parts = [
+                Sql::raw("LENGTH({$c}) = CHAR_LENGTH({$c})"),
+                Sql::raw("{$c} NOT REGEXP ?", [self::ADDRESS_OTHER_CHAR]),
+                Sql::raw("{$c} REGEXP ?", [self::ADDRESS_ERE]),
+                Sql::raw("LENGTH({$c}) <= 254 AND LOCATE('@', {$c}) <= 65"),
+            ];
+            if ($domainColumn !== null) {
+                $d = $domainColumn;
+                $parts[] = Sql::raw("SUBSTRING_INDEX({$c}, '@', -1) = {$d} AND LENGTH({$d}) = CHAR_LENGTH({$d})");
+            }
+            return Sql::and(...$parts);
+        }
+        // SQLite: the rule as GLOB patterns (each a necessary condition; together exactly the rule)
+        $host = "substr({$c}, instr({$c}, '@') + 1)";
+        $parts = [
+            Sql::raw("length(CAST({$c} AS BLOB)) = length({$c}) AND length({$c}) <= 254 AND instr({$c}, '@') <= 65"),
+            self::globs($c, [
+                '*' . self::ADDRESS_OTHER_CHAR . '*' => false,
+                '*@*' => true,
+                '@*' => false,          // an empty local part
+                '*@' => false,          // an empty host
+                '*@*@*' => false,
+                '.*' => false,          // dots of the local part: not first, not last, never two
+                '*.@*' => false,
+                '*..*' => false,
+                '*@.*' => false,        // labels of the host: never empty ...
+                '*.' => false,
+                '*@-*' => false,        // ... never starting or ending with a hyphen
+                '*@*.-*' => false,
+                '*@*-.*' => false,
+                '*-' => false,
+                '*@*' . str_repeat('[a-z0-9-]', 64) . '*' => false, // ... at most 63 characters
+            ]),
+            self::globs($host, ['*' . self::DOMAIN_OTHER_CHAR . '*' => false, '*.*' => true]),
+            self::sqliteTopLabel($host),
+        ];
+        if ($domainColumn !== null) {
+            $d = $domainColumn;
+            $parts[] = Sql::raw("{$host} = {$d} AND length(CAST({$d} AS BLOB)) = length({$d})");
+        }
+        return Sql::and(...$parts);
+    }
+
+    /**
+     * The host name rule (Normalizer::CANONICAL_DOMAIN) for a domain column, rendered for the engine
+     * like canonicalAddressSql().
+     */
+    public static function canonicalDomainSql(string $driver, string $column): Sql
+    {
+        $c = $column;
+        if ($driver === 'pgsql') {
+            return Sql::and(
+                Sql::raw("octet_length({$c}) = char_length({$c})"),
+                Sql::raw("{$c} !~ ?", [self::DOMAIN_OTHER_CHAR]),
+                Sql::raw("{$c} ~ ?", [self::DOMAIN_ERE]),
+                Sql::raw("length({$c}) <= 253"),
+            );
+        }
+        if ($driver === 'mysql') {
+            return Sql::and(
+                Sql::raw("LENGTH({$c}) = CHAR_LENGTH({$c})"),
+                Sql::raw("{$c} NOT REGEXP ?", [self::DOMAIN_OTHER_CHAR]),
+                Sql::raw("{$c} REGEXP ?", [self::DOMAIN_ERE]),
+                Sql::raw("LENGTH({$c}) <= 253"),
+            );
+        }
+        return Sql::and(
+            Sql::raw("length(CAST({$c} AS BLOB)) = length({$c}) AND length({$c}) <= 253"),
+            self::globs($c, [
+                '*' . self::DOMAIN_OTHER_CHAR . '*' => false,
+                '*.*' => true,
+                '.*' => false,
+                '*.' => false,
+                '*..*' => false,
+                '-*' => false,
+                '*.-*' => false,
+                '*-.*' => false,
+                '*-' => false,
+                '*' . str_repeat('[a-z0-9-]', 64) . '*' => false,
+            ]),
+            self::sqliteTopLabel($c),
+        );
+    }
+
+    /**
+     * SQLite: "$expr GLOB p" (true) / "$expr NOT GLOB p" (false) for every pattern, bound.
+     *
+     * @param array<string, bool> $patterns
+     */
+    private static function globs(string $expr, array $patterns): Sql
+    {
+        $parts = [];
+        foreach ($patterns as $pattern => $match) {
+            $parts[] = Sql::raw($expr . ($match ? ' GLOB ?' : ' NOT GLOB ?'), [(string) $pattern]);
+        }
+        return Sql::and(...$parts);
+    }
+
+    /**
+     * SQLite: the last label of a host name starts with a letter and has letters and digits only,
+     * or is an A-label (xn--). rtrim() with the label characters leaves the host up to its last
+     * dot, so the substring behind that is the last label.
+     */
+    private static function sqliteTopLabel(string $host): Sql
+    {
+        $top = "substr({$host}, length(rtrim({$host}, ?)) + 1)";
+        return Sql::raw(
+            "(({$top} GLOB ? AND {$top} NOT GLOB ?) OR {$top} GLOB ?)",
+            [self::LABEL_CHARS, '[a-z]*', self::LABEL_CHARS, '*[^a-z0-9]*', self::LABEL_CHARS, 'xn--[a-z0-9]*'],
+        );
+    }
+
+    /**
+     * "Not expired" for each column: later than $utcNow (UTC, bound) AND later than the database
+     * server's clock in its session time zone (LOCALTIMESTAMP; SQLite, tests only: the local time of
+     * the process). A timestamp written in UTC or in the server's local time is hidden from its
+     * moment on, whichever comes first. Both comparisons can use an index on the column.
+     */
+    public static function unexpired(string $driver, string $utcNow, string ...$columns): Sql
+    {
+        $clock = $driver === 'sqlite' ? "datetime('now', 'localtime')" : 'LOCALTIMESTAMP';
+        $parts = [];
+        foreach ($columns as $column) {
+            $parts[] = Sql::raw($column . ' > ? AND ' . $column . ' > ' . $clock, [$utcNow]);
+        }
         return Sql::and(...$parts);
     }
 
@@ -251,13 +469,18 @@ final class QueryBuilder
      *
      * "Belongs to" is forwardings.domain: iRedAdmin stores the owner's primary domain there, also
      * for an address in an alias domain (jan@example.net of example.com), which has no row in the
-     * domain table of its own.
+     * domain table of its own - so the alias address follows the canonical rule without the suffix
+     * test, and forwardings.domain the host name rule.
      */
     private function userAliasRoot(): Sql
     {
-        $parts = [Sql::raw('f.is_alias = 1 AND f.active = 1 AND fd.active = 1 AND fd.backupmx = 0')];
+        $parts = [
+            Sql::raw('f.is_alias = 1 AND f.active = 1 AND fd.active = 1 AND fd.backupmx = 0'),
+            self::canonicalAddressSql($this->driver, 'f.address'),
+            self::canonicalDomainSql($this->driver, 'f.`domain`'),
+        ];
         if ($this->hideExpired) {
-            $parts[] = Sql::raw('fd.expired > ?', [$this->now]);
+            $parts[] = self::unexpired($this->driver, $this->now, 'fd.expired');
         }
         $parts[] = $this->scope('f');
         $parts[] = $this->hidden('f.address');
@@ -332,7 +555,17 @@ final class QueryBuilder
             if ($col === '') {
                 continue;
             }
-            $parts[] = $kind === self::KIND_PERSON ? Sql::raw("m.{$col} <> ''") : Sql::false();
+            if ($kind !== self::KIND_PERSON) {
+                $parts[] = Sql::false();
+            } elseif ($col === 'birthday') {
+                // a DATE (iRedMail: NOT NULL DEFAULT '0001-01-01'): year 0001 means "no birthday"
+                // (RecordMapper), and a date is never compared with text (PostgreSQL refuses that)
+                $parts[] = Sql::raw("m.birthday >= '0002-01-01'");
+            } else {
+                // a text column: shown only when something is left after trimming - and only for an
+                // entry that carries the field (foreignGuard())
+                $parts[] = $this->foreignGuard($f, false, Sql::raw("TRIM(m.{$col}) <> ''"));
+            }
         }
         return Sql::and(...$parts);
     }
@@ -419,13 +652,23 @@ final class QueryBuilder
 
     /**
      * Normalised search words with their effective match mode, or null when the input must not be
-     * searched (empty, too long, too short).
+     * searched (empty, too long, too short, invalid UTF-8, or with a control character or a
+     * backslash). Whitespace (tab, newline) is collapsed into a blank first; any other control
+     * character (C0, DEL, C1) or a backslash can never match the text a book shows
+     * (Normalizer::displayText() removes them), and bound into the statement it would make PDO's
+     * scanner and the server see different literals (a backslash) or let libpq cut the pattern
+     * short (a NUL byte).
      *
      * @return null|list<array{0: string, 1: int}>
      */
     public function words(string $value, int $mode): ?array
     {
-        $value = mb_strtolower(trim((string) preg_replace('/\s+/u', ' ', Normalizer::nfc($value))));
+        $value = (string) preg_replace('/\s+/u', ' ', Normalizer::nfc($value));
+        // checked before trim(), which would drop a NUL byte at either end without a word
+        if (preg_match('/[\x00-\x1F\x7F\x{0080}-\x{009F}\\\\]/u', $value) === 1) {
+            return null;
+        }
+        $value = mb_strtolower(trim($value));
         if ($value === '' || mb_strlen($value) > $this->maxLength || !preg_match('//u', $value)) {
             return null;
         }
@@ -463,16 +706,51 @@ final class QueryBuilder
             return $this->emailMatch($word, $mode, $kind);
         }
         if ($kind === self::KIND_PERSON) {
-            $cols = $this->fields->personSearchColumns($field);
-        } else {
-            $t = $kind === self::KIND_ALIAS ? 'a' : 'ml';
-            $cols = $field === 'name' ? [$t . '.name'] : [];
+            $any = [];
+            foreach ($this->fields->personSearchColumns($field) as $col) {
+                $withheld = self::WITHHELD_COLUMNS[$col] ?? null;
+                $match = $this->textMatch($col, $word, $mode);
+                // first and last name under 'name' are the shown name of an entry without a display name
+                $any[] = $withheld === null ? $match : $this->foreignGuard($withheld, $field === 'name', $match);
+            }
+            return Sql::or(...$any);
         }
-        $any = [];
-        foreach ($cols as $col) {
-            $any[] = $this->textMatch($col, $word, $mode);
+        $t = $kind === self::KIND_ALIAS ? 'a' : 'ml';
+        return $field === 'name' ? $this->textMatch($t . '.name', $word, $mode) : Sql::false();
+    }
+
+    /**
+     * A predicate on a field that an entry of another domain does not carry in this book
+     * (foreignWithheld): it applies to the entries of the viewer's home domains only - a field that
+     * is not shown is no search criterion either, so a search cannot tell its value. With
+     * $asShownName (first and last name in a search of 'name'), also to an entry without a display
+     * name: its first and last name are its shown name ("(domain) First Last").
+     */
+    private function foreignGuard(string $field, bool $asShownName, Sql $predicate): Sql
+    {
+        if (!in_array($field, $this->foreignWithheld, true)) {
+            return $predicate;
         }
-        return Sql::or(...$any);
+        $home = Sql::in('m.`domain`', $this->book->homeDomains);
+        if ($asShownName && ($field === 'firstname' || $field === 'surname')) {
+            return Sql::and(Sql::or($home, Sql::raw("TRIM(m.name) = ''")), $predicate);
+        }
+        return Sql::and($home, $predicate);
+    }
+
+    /**
+     * Sort key of persons: for a book that withholds first / last name from foreign entries, such an
+     * entry is sorted by its name key instead (a field that is not shown does not order the list).
+     */
+    private function personSortKey(string $sortCol): Sql
+    {
+        $key = $this->fields->personSortKey($sortCol);
+        $field = ['firstname' => 'firstname', 'surname' => 'surname'][$sortCol] ?? null;
+        if ($field === null || !in_array($field, $this->foreignWithheld, true)) {
+            return Sql::raw($key);
+        }
+        $home = Sql::in('m.`domain`', $this->book->homeDomains);
+        return Sql::raw('CASE WHEN ' . $home->sql . ' THEN ' . $key . ' ELSE ' . $this->fields->personSortKey('name') . ' END', $home->params);
     }
 
     private function textMatch(string $col, string $word, int $mode): Sql
@@ -550,7 +828,19 @@ final class QueryBuilder
         if ($group['kind'] === IdCodec::GROUP_DOMAIN) {
             return $this->book->inScope($group['key']) ? Sql::eq('m.`domain`', $group['key']) : Sql::false();
         }
-        return $this->fields->has('department') ? Sql::eq('LOWER(TRIM(m.department))', $group['key']) : Sql::false();
+        if (!$this->fields->has('department')) {
+            return Sql::false();
+        }
+        if ($this->book->id === BookDefinition::GLOBAL) {
+            // "domain:department" (groupsQuery()): a group of the global book never crosses tenants;
+            // an ID of the merged form of 1.0.x (no ':') selects nothing
+            $parts = explode(':', $group['key'], 2);
+            if (count($parts) !== 2 || !$this->book->inScope($parts[0])) {
+                return Sql::false();
+            }
+            return Sql::and(Sql::eq('m.`domain`', $parts[0]), Sql::eq('LOWER(TRIM(m.department))', $parts[1]));
+        }
+        return Sql::eq('LOWER(TRIM(m.department))', $group['key']);
     }
 
     // ------------------------------------------------------------------ statements
@@ -568,9 +858,10 @@ final class QueryBuilder
         $params = [];
         foreach ($this->kinds() as $kind) {
             $where = Sql::and($this->root($kind), $this->group($group, $kind), $this->filter($spec, $kind));
-            $sortkey = $kind === self::KIND_PERSON ? $this->fields->personSortKey($sortCol) : FieldMap::listSortKey($kind === self::KIND_ALIAS ? 'a' : 'ml');
-            $selects[] = "SELECT '{$kind}' AS kind, " . $this->addressColumn($kind) . ' AS address, ' . $sortkey . ' AS sortkey FROM ' . $this->from($kind) . ' WHERE ' . $where->sql;
-            array_push($params, ...$where->params);
+            $sortkey = $kind === self::KIND_PERSON ? $this->personSortKey($sortCol) : Sql::raw(FieldMap::listSortKey($kind === self::KIND_ALIAS ? 'a' : 'ml'));
+            $selects[] = "SELECT '{$kind}' AS kind, " . $this->addressColumn($kind) . ' AS address, ' . $sortkey->sql . ' AS sortkey FROM ' . $this->from($kind) . ' WHERE ' . $where->sql;
+            // the parameters in the order of the statement: the select list before the WHERE clause
+            array_push($params, ...$sortkey->params, ...$where->params);
         }
         $dir = strtoupper($order) === 'DESC' ? 'DESC' : 'ASC';
         return [implode(' UNION ALL ', $selects) . " ORDER BY sortkey {$dir}, address {$dir}, kind", $params];
@@ -636,16 +927,24 @@ final class QueryBuilder
     }
 
     /**
-     * Per-user alias addresses of the given (already visible) persons, under userAliasRoot().
+     * Per-user alias addresses of the given (already visible) persons, under userAliasRoot(): at
+     * most $perOwner rows for each owner, the first ones in address order (ROW_NUMBER() per owner -
+     * a window function: MariaDB 10.2, MySQL 8.0, PostgreSQL 8.4, SQLite 3.25), ordered by owner and
+     * address. The bound is per owner, so no owner's rows can push another owner's out.
      *
      * @param list<string> $usernames
      *
      * @return array{0: string, 1: list<scalar|null>}
      */
-    public function userAliasesQuery(array $usernames): array
+    public function userAliasesQuery(array $usernames, int $perOwner): array
     {
         $where = Sql::and($this->userAliasRoot(), Sql::in('f.forwarding', $usernames));
-        return ['SELECT f.forwarding, f.address, f.`domain` FROM ' . self::USER_ALIAS_FROM . ' WHERE ' . $where->sql . ' ORDER BY f.forwarding, f.address', $where->params];
+        return [
+            'SELECT ua.forwarding, ua.address, ua.`domain` FROM (SELECT f.forwarding, f.address, f.`domain`,'
+                . ' ROW_NUMBER() OVER (PARTITION BY f.forwarding ORDER BY f.address) AS rn FROM ' . self::USER_ALIAS_FROM
+                . ' WHERE ' . $where->sql . ') ua WHERE ua.rn <= ' . max(1, $perOwner) . ' ORDER BY ua.forwarding, ua.address',
+            $where->params,
+        ];
     }
 
     /**
@@ -656,6 +955,14 @@ final class QueryBuilder
     public function groupsQuery(string $grouping): ?array
     {
         $root = $this->personRoot();
+        if ($grouping === 'department' && $this->fields->has('department') && $this->book->id === BookDefinition::GLOBAL) {
+            // the global book: one group per domain and department - equal department names of
+            // different tenants never form one group (Repository::groups() keys it "domain:department")
+            $sql = 'SELECT m.`domain` AS gdomain, LOWER(TRIM(m.department)) AS gkey, MIN(TRIM(m.department)) AS label, COUNT(m.username) AS n FROM '
+                . $this->from(self::KIND_PERSON) . ' WHERE ' . $root->sql . " AND TRIM(m.department) <> ''"
+                . ' GROUP BY m.`domain`, LOWER(TRIM(m.department)) ORDER BY gdomain, gkey';
+            return [$sql, $root->params];
+        }
         if ($grouping === 'department' && $this->fields->has('department')) {
             $sql = 'SELECT LOWER(TRIM(m.department)) AS gkey, MIN(TRIM(m.department)) AS label, COUNT(m.username) AS n FROM '
                 . $this->from(self::KIND_PERSON) . ' WHERE ' . $root->sql . " AND TRIM(m.department) <> ''"

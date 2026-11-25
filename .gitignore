@@ -1,5 +1,19 @@
-# local configuration (contains the vmail database password)
+# local configuration (contains the vmail database password) - and the copies an editor, a
+# package manager or an administrator leaves next to it (the template stays tracked)
 /config.inc.php
+/config.inc.php.*
+!/config.inc.php.dist
+/config.inc.php~
+/galbridge.inc.php
+/galbridge.inc.php.*
+/config/
+# output of "bin/galbridge.sh grants" saved in the checkout (the SQL/ templates stay tracked; the
+# DSN line with the role password goes to standard error, but keep such files out anyway)
+/*.sql
+.env.*
+*.bak
+*.orig
+*~
 # tooling
 /vendor/
 /composer.lock

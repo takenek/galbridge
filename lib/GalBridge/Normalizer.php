@@ -60,6 +60,62 @@ final class Normalizer
     public const RIGHT_BRACE = "\u{FF5D}";
 
     /**
+     * What an ASCII dollar sign becomes in display text: U+FF04 FULLWIDTH DOLLAR SIGN. Roundcube's
+     * suggestion list fills its template with String.replace(), the directory text being the
+     * REPLACEMENT string, so "$&", "$`", "$'", "$1" or "$<x>" in a name would be expanded there.
+     */
+    public const DOLLAR = "\u{FF04}";
+
+    /** what a '%' at either end of a display text becomes: U+FF05 FULLWIDTH PERCENT SIGN */
+    public const PERCENT = "\u{FF05}";
+
+    /**
+     * The address rule of the directory (a canonical row): a local part of lower-case ASCII letters,
+     * digits and . _ + = - in dot-atom form (no leading, trailing or double dot, at most 64 bytes)
+     * and a host name of at least two labels (letters, digits and inner hyphens, at most 63 bytes
+     * each) whose last label starts with a letter or is an A-label (xn--). Applied to the lower-case
+     * form of a printable ASCII value of at most 254 bytes (canonicalAddress()).
+     *
+     * It is the ONE rule for what the directory offers: QueryBuilder renders it in SQL for every row
+     * (canonicalAddressSql()) and RecordMapper applies it to every row it maps, so a row is offered
+     * everywhere (list, count, search, group, full set) or nowhere. It is a strict subset of what
+     * rcube_utils::check_email() and address() accept, and it leaves out every character that has a
+     * meaning in a sink of Roundcube (HTML character references, mailto: parameters, template
+     * placeholders, quotes) and every non-ASCII look-alike.
+     */
+    public const CANONICAL_ADDRESS = '/^(?=[^@]{1,64}@)[a-z0-9_+=-]+(?:\.[a-z0-9_+=-]+)*@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z][a-z0-9]{0,62}|xn--[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)$/D';
+
+    /** the host name part of CANONICAL_ADDRESS (canonicalDomain(), at most 253 bytes) */
+    public const CANONICAL_DOMAIN = '/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z][a-z0-9]{0,62}|xn--[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)$/D';
+
+    /**
+     * The canonical form of a directory address (see CANONICAL_ADDRESS): its lower-case form, or
+     * null when the value is no string, longer than 254 bytes, contains anything but printable ASCII
+     * or does not follow the rule. Used for the rows of the directory only; configuration lists,
+     * logins and IDs keep address().
+     */
+    public static function canonicalAddress(mixed $value): ?string
+    {
+        if (!is_string($value) || strlen($value) > self::MAX_ADDRESS || preg_match('/[^\x21-\x7E]/', $value) === 1) {
+            return null;
+        }
+        $address = strtolower($value);
+        return preg_match(self::CANONICAL_ADDRESS, $address) === 1 ? $address : null;
+    }
+
+    /**
+     * The canonical form of a host name of the directory (see CANONICAL_DOMAIN), or null.
+     */
+    public static function canonicalDomain(mixed $value): ?string
+    {
+        if (!is_string($value) || strlen($value) > self::MAX_DOMAIN || preg_match('/[^\x21-\x7E]/', $value) === 1) {
+            return null;
+        }
+        $domain = strtolower($value);
+        return preg_match(self::CANONICAL_DOMAIN, $domain) === 1 ? $domain : null;
+    }
+
+    /**
      * Normalise a domain: trim, NFC, lower case, IDNA to ASCII, trailing dot removed, validated.
      */
     public static function domain(mixed $value): ?string
@@ -196,7 +252,11 @@ final class Normalizer
      *    form would be decoded by the recipients' mail clients into arbitrary text;
      *  - '{' and '}' become U+FF5B / U+FF5D: core fills a contactlist_name_template placeholder by
      *    placeholder, so a "{field}" inside a value would be replaced by another field and the two
-     *    texts joined behind every check made here (see LEFT_BRACE).
+     *    texts joined behind every check made here (see LEFT_BRACE);
+     *  - '$' becomes U+FF04 and a run of '%' is split by blanks ("%%" never survives; a '%' at
+     *    either end becomes U+FF05, see edges()): Roundcube's suggestion list puts the text into
+     *    its template as the replacement string of String.replace() ("$&", "$`", "$'", "$1",
+     *    "$<x>" would be expanded) and turns "##...%%" into highlighting without showing the markers.
      *
      * What Roundcube itself DELETES later is deleted here first, because a deletion joins the text on
      * both sides of it: with a contactlist_name_template other than "{name}", core removes every
@@ -236,7 +296,7 @@ final class Normalizer
         // notations decoded later (see above). Every character removed at the top left a space and
         // the deletions are done, so neither notation can be re-assembled from the pieces around a
         // removed part
-        $s = str_replace(['&', '{', '}', '=?', '?='], [self::AMPERSAND, self::LEFT_BRACE, self::RIGHT_BRACE, '= ?', '? ='], $s);
+        $s = self::notations($s);
         if (mb_strlen($s) > $max) {
             // cutting the end joins nothing; it can only leave an opening bracket or a space there
             $s = (string) preg_replace('/[\s(\[]+$/u', '', mb_substr($s, 0, $max));
@@ -245,15 +305,30 @@ final class Normalizer
     }
 
     /**
-     * A text never starts or ends with '=' or '?' (they become U+FF1D / U+FF1F): a name template
-     * may put two fields next to each other without a blank ("{name}{department}"), and the two
-     * characters of an encoded-word delimiter would then come from two texts that are harmless
-     * each. Inside a text the delimiters are split (displayText()).
+     * The notations of displayText() that a later consumer would decode: '&', '{', '}', '$' become
+     * their full-width forms, the encoded-word delimiters "=?" / "?=" are split, and so is every
+     * run of '%' (a blank after each '%' that another one follows: "%%%" -> "% % %").
+     */
+    private static function notations(string $s): string
+    {
+        $s = str_replace(['&', '{', '}', '$', '=?', '?='], [self::AMPERSAND, self::LEFT_BRACE, self::RIGHT_BRACE, self::DOLLAR, '= ?', '? ='], $s);
+        return (string) preg_replace('/%(?=%)/', '% ', $s);
+    }
+
+    /**
+     * A text never starts or ends with '=', '?' or '%' (they become U+FF1D / U+FF1F / U+FF05): a
+     * name template may put two fields next to each other without a blank ("{name}{department}"),
+     * and the two characters of an encoded-word delimiter - or the "%%" of a highlight marker of
+     * the suggestion list - would then come from two texts that are harmless each. Inside a text
+     * they are split (notations()).
      */
     private static function edges(string $s): string
     {
-        $s = (string) preg_replace_callback('/^[=?]|[=?]$/', static fn (array $m): string => $m[0] === '=' ? "\u{FF1D}" : "\u{FF1F}", $s);
-        return $s;
+        return (string) preg_replace_callback('/^[=?%]|[=?%]$/', static fn (array $m): string => match ($m[0]) {
+            '=' => "\u{FF1D}",
+            '?' => "\u{FF1F}",
+            default => self::PERCENT,
+        }, $s);
     }
 
     /**
@@ -283,11 +358,13 @@ final class Normalizer
 
     /**
      * A search word as it has to be compared with display text (labels of groups and
-     * organizations), which went through displayText().
+     * organizations), which went through displayText(): the same notations ('&', '{', '}', '$',
+     * the encoded-word delimiters and runs of '%'). A '%' at either end of a label is full-width
+     * there; a word may stand inside a label, so its own ends keep the plain character.
      */
     public static function labelWord(string $word): string
     {
-        return str_replace(['&', '{', '}', '=?', '?='], [self::AMPERSAND, self::LEFT_BRACE, self::RIGHT_BRACE, '= ?', '? ='], $word);
+        return self::notations($word);
     }
 
     /**

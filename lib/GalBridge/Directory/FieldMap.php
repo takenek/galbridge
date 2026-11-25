@@ -192,8 +192,11 @@ final class FieldMap
     }
 
     /**
-     * Record fields that can be required (search $required) and the person column that must then be
-     * non-empty ('' = always present).
+     * Record fields that can be required (search $required) and the person column that must then
+     * hold a shown value ('' = always present). QueryBuilder::required() renders it by column type:
+     * a text column must be non-empty after trimming; 'birthday' is a DATE (iRedMail: NOT NULL
+     * DEFAULT '0001-01-01') and must be a real date, year 0001 meaning none (as in RecordMapper) - a
+     * date is never compared with text.
      */
     public function requiredColumn(string $field): ?string
     {

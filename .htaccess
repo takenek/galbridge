@@ -1,4 +1,5 @@
 # GAL Bridge: this plugin serves no web assets - Roundcube reads it from disk only. Deny direct
-# access (Apache 2.4+, effective only with AllowOverride; nginx, including the iRedMail templates
-# that alias /static.php/ to the Roundcube directory: see README section 2.6).
+# access. Effective only on Apache 2.4+ with AllowOverride AuthConfig (or All) for this directory;
+# nginx - including the iRedMail templates that alias /static.php/ to the Roundcube directory -
+# ignores it: see README section 2.6, and check with "galbridge.sh diag --url=...".
 Require all denied

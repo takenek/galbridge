@@ -936,13 +936,17 @@ final class CorePathsTest extends TestCase
         $_REQUEST = $_POST;
         self::assertSame(['Jan Kowalski <jan.kowalski@example.com>'], self::mailto(self::book($dsn, [], self::JAN, 'mailto')));
 
-        // foreign / crafted IDs: only in-scope requested IDs, never the book
+        // foreign / crafted IDs: never the book - and since the second verification pass (F-31) the
+        // selection is refused as a whole, never cut to the in-scope IDs (a recipient set does not
+        // lack a selected entry silently)
         $_POST = ['_cid' => [self::SOURCE => [self::id('bob@example.org'), '21981839', $anna]]];
         $_REQUEST = $_POST;
-        self::assertSame(['Anna Nowak <anna.nowak@example.com>'], self::mailto(self::book($dsn, [], self::JAN, 'mailto')));
+        self::assertSame([], self::mailto(self::book($dsn, [], self::JAN, 'mailto', $notices)));
+        self::assertSame(['incomplete'], self::labels($notices));
         $_POST = ['_cid' => [self::SOURCE => ['21981839']]];
         $_REQUEST = $_POST;
-        self::assertSame([], self::mailto(self::book($dsn, [], self::JAN, 'mailto')));
+        self::assertSame([], self::mailto(self::book($dsn, [], self::JAN, 'mailto', $notices)));
+        self::assertSame(['incomplete'], self::labels($notices));
 
         // compose to a group (no group e-mail: list_records with max_group_members ?: 999)
         $_POST = ['_gid' => self::sprzedaz(), '_source' => self::SOURCE];
@@ -1034,20 +1038,31 @@ final class CorePathsTest extends TestCase
         self::assertSame(['anna.nowak@example.com', self::JAN], self::addresses($contacts->list_records(null, 0, true)));
 
         // selected contacts (_cid in the GET URL): set_pagesize(count($ids)) + search('ID', $ids, 1, true, true)
-        $_GET = ['_cid' => self::id(self::JAN) . ',' . self::id('newsletter@example.com', IdCodec::MAILLIST) . ',' . self::id('bob@example.org'), '_source' => self::SOURCE];
-        $records = [];
-        foreach (\rcmail_action_contacts_index::get_cids() as $s => $ids) {
-            $source = self::book($dsn, [], self::JAN, 'export', $n, $s);
-            $source->set_page(1);
-            $source->set_pagesize(count($ids));
-            foreach ($source->search('ID', $ids, 1, true, true) as $record) {
-                self::exportVcard($record, $source);
-                $record['sourceid'] = $s;
-                $records[\rcube_addressbook::compose_contact_key($record, (string) self::cfg('addressbook_sort_col', 'name'))] = $record;
+        $exportSelected = static function (string $cids) use ($dsn, &$notices): array {
+            $_GET = ['_cid' => $cids, '_source' => self::SOURCE];
+            $records = [];
+            $notices = [];
+            foreach (\rcmail_action_contacts_index::get_cids() as $s => $ids) {
+                $source = self::book($dsn, [], self::JAN, 'export', $n, $s);
+                $source->set_page(1);
+                $source->set_pagesize(count($ids));
+                foreach ($source->search('ID', $ids, 1, true, true) as $record) {
+                    self::exportVcard($record, $source);
+                    $record['sourceid'] = $s;
+                    $records[\rcube_addressbook::compose_contact_key($record, (string) self::cfg('addressbook_sort_col', 'name'))] = $record;
+                }
+                $notices = array_merge($notices, $n);
             }
-        }
-        self::assertSame([self::JAN, 'newsletter@example.com'], self::addresses($records));
+            return $records;
+        };
+        $selected = self::id(self::JAN) . ',' . self::id('newsletter@example.com', IdCodec::MAILLIST);
+        self::assertSame([self::JAN, 'newsletter@example.com'], self::addresses($exportSelected($selected)));
+        self::assertSame([], $notices);
         self::assertLessThan(2048, strlen((string) $_GET['_cid']), 'IDs stay short enough for the export URL');
+        // with an entry of another tenant among them: refused as a whole (second verification pass,
+        // F-31) - the hook answers 204 instead of a file that silently lacks a selected entry
+        self::assertSame([], $exportSelected($selected . ',' . self::id('bob@example.org')));
+        self::assertSame(['incomplete'], self::labels($notices));
     }
 
     #[DataProviderExternal(Env::class, 'engines')]
@@ -1190,7 +1205,8 @@ final class CorePathsTest extends TestCase
         // core has composed the list name: it DELETES empty bracket pairs (with the whitespace before
         // them) when a template is set, which joins the text on both sides; a text that starts with a
         // closing bracket pairs with the bracket of the template; and an entry without any name gets
-        // the local part of its address, which may hold '&', '#', '=' and '?'.
+        // the local part of its address - of the canonical alphabet (second verification pass, F-20:
+        // '=' and '+' are part of it, '&', '#' and '?' are not).
         $word = '?UTF-8?B?Y2VvQGJhbmsuZXhhbXBsZQ==?=';
         $hostile = [
             'deleted brackets' => $mapper->person(['username' => 'h1@example.com', 'domain' => 'example.com', 'name' => '=()' . $word, 'first_name' => '=[]' . $word,
@@ -1200,11 +1216,22 @@ final class CorePathsTest extends TestCase
             'square bracket of the template' => $mapper->person(['username' => 'h3@example.com', 'domain' => 'example.com', 'name' => $word, 'first_name' => $word, 'last_name' => 'x',
                 'department' => 'Sales =[']),
             'foreign, deleted brackets' => $mapper->person(['username' => 'h4@example.org', 'domain' => 'example.org', 'name' => '=()' . $word, 'department' => ')' . $word]),
-            'local part as the name: character reference' => $mapper->person(['username' => 'ceo&#64bank.example@example.com', 'domain' => 'example.com', 'name' => '']),
-            'local part as the name: encoded-word' => $mapper->person(['username' => '=?UTF-8?B?Y2Vv?=@example.com', 'domain' => 'example.com', 'name' => '']),
-            'local part as the name, foreign' => $mapper->person(['username' => 'boss&#64bank.example@example.org', 'domain' => 'example.org', 'name' => '"', 'first_name' => '@x']),
-            'list without a name' => $mapper->mailList('l', ['address' => 'all&#64bank.example@example.com', 'domain' => 'example.com', 'name' => '']),
+            'local part as the name: equals signs at the edges' => $mapper->person(['username' => '=utf-8=b=@example.com', 'domain' => 'example.com', 'name' => '']),
+            'local part as the name: a name core takes for empty' => $mapper->person(['username' => '=q=ceo=40bank.example=@example.com', 'domain' => 'example.com', 'name' => '0']),
+            'local part as the name, foreign' => $mapper->person(['username' => '=boss=@example.org', 'domain' => 'example.org', 'name' => '"', 'first_name' => '@x']),
+            'list without a name' => $mapper->mailList('l', ['address' => '=all=@example.com', 'domain' => 'example.com', 'name' => '']),
         ];
+        // an address outside the canonical alphabet is no entry at all (the SQL of the book does not
+        // offer it either): '&', '#', '?' ... can never reach a name or a sink of core
+        foreach ([
+            'character reference' => $mapper->person(['username' => 'ceo&#64bank.example@example.com', 'domain' => 'example.com', 'name' => '']),
+            'encoded-word' => $mapper->person(['username' => '=?UTF-8?B?Y2Vv?=@example.com', 'domain' => 'example.com', 'name' => '']),
+            'character reference, foreign' => $mapper->person(['username' => 'boss&#64bank.example@example.org', 'domain' => 'example.org', 'name' => '"', 'first_name' => '@x']),
+            'list, character reference' => $mapper->mailList('l', ['address' => 'all&#64bank.example@example.com', 'domain' => 'example.com', 'name' => '']),
+        ] as $label => $record) {
+            self::assertNull($record, $label);
+        }
+        self::assertStringContainsString('WARN scope: row_invalid', implode("\n", $GLOBALS['galbridge_test_log']));
         foreach ($hostile as $label => $record) {
             self::assertIsArray($record, $label);
             $email = $record['email:work'][0];

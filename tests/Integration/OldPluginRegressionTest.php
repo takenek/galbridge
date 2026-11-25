@@ -549,11 +549,17 @@ final class OldPluginRegressionTest extends TestCase
             self::assertSame(1, preg_match_all('/\bCREATE\b[^;]*?\bVIEW\s+((?:vmail\.)?[a-z_]+)/', $sql, $views), $flavour);
             self::assertSame($flavour === 'mysql' ? 'vmail.galbridge_forwardings' : 'galbridge_forwardings', $views[1][0]);
             if ($flavour === 'postgres') {
-                // STAGE 6: CREATE OR REPLACE keeps the owner of a view that existed before - the
-                // administrator running the grant set takes it over
-                self::assertStringContainsString('ALTER VIEW galbridge_forwardings OWNER TO CURRENT_USER;', $sql);
+                // second verification pass (F-04): dropped and created afresh - a new object of the
+                // administrator, without a grant, rule or comment of a view that existed before
+                // (STAGE 6 had CREATE OR REPLACE + ALTER VIEW ... OWNER TO CURRENT_USER)
+                self::assertMatchesRegularExpression('/^DROP VIEW IF EXISTS galbridge_forwardings;\s+CREATE VIEW galbridge_forwardings /m', $sql);
+                self::assertStringNotContainsString('CREATE OR REPLACE VIEW', $sql);
+            } else {
+                // second verification pass (F-03): never merged into the queries of the role
+                self::assertStringContainsString('CREATE OR REPLACE ALGORITHM = TEMPTABLE SQL SECURITY DEFINER VIEW vmail.galbridge_forwardings AS', $sql);
             }
-            self::assertMatchesRegularExpression('/VIEW\s+\S+(?: WITH \(security_barrier = true\))? AS\s+SELECT address, forwarding, domain, is_alias, is_list, is_maillist, active\s+FROM (?:vmail\.)?forwardings\s+WHERE is_alias = 1 OR is_list = 1 OR is_maillist = 1;/', $sql, $flavour);
+            // ... and fenced: the server builds the rows before it applies a condition of the query
+            self::assertMatchesRegularExpression('/VIEW\s+\S+(?: WITH \(security_barrier = true\))? AS\s+SELECT address, forwarding, domain, is_alias, is_list, is_maillist, active\s+FROM (?:vmail\.)?forwardings\s+WHERE is_alias = 1 OR is_list = 1 OR is_maillist = 1\s+(?:LIMIT 18446744073709551615|OFFSET 0);/', $sql, $flavour);
             self::assertDoesNotMatchRegularExpression('/\bGRANT\b[^;]*\bON (?:vmail\.)?forwardings\b/', $sql, $flavour . ': no grant on the forwardings table');
             self::assertMatchesRegularExpression('/GRANT SELECT \([a-z_, ]+\) ON (?:vmail\.)?galbridge_forwardings TO /', $sql, $flavour);
             self::assertStringNotContainsString('is_forwarding', $sql, $flavour);
@@ -738,7 +744,9 @@ final class OldPluginRegressionTest extends TestCase
         mkdir($dir, 0o700);
         try {
             copy($script, $dir . '/matrix.sh');
-            $proc = proc_open(['bash', $dir . '/matrix.sh', $dir . '/no-roundcube-here'], [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+            // (matrix.sh refuses root since the second verification pass, F-25: nothing runs here,
+            // so a root run of this suite opts in)
+            $proc = proc_open(['bash', $dir . '/matrix.sh', $dir . '/no-roundcube-here'], [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null, ['GALBRIDGE_E2E_ALLOW_ROOT' => '1'] + getenv());
             self::assertIsResource($proc);
             $out = (string) stream_get_contents($pipes[1]);
             fclose($pipes[1]);

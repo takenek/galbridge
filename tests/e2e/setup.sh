@@ -19,12 +19,29 @@
 #   - plugin options go to ROUNDCUBE_CONFIG_DIR/galbridge.inc.php (Roundcube loads it when the
 #     plugin directory has no config.inc.php); GALBRIDGE_EXTRA_CONFIG is appended to it verbatim.
 #
+# Everything is checked before anything is changed (no server stopped, no directory removed, no link
+# written while a refusal is still possible):
+#   - it refuses to run as root (exit 2): Roundcube runs with the caller's rights, on a test
+#     configuration with the login rate limit off - run it as an unprivileged user, or set
+#     GALBRIDGE_E2E_ALLOW_ROOT=1 in a disposable container;
+#   - it refuses a Roundcube tree that is configured (config/config.inc.php: an installation, not an
+#     unpacked release) unless GALBRIDGE_E2E_ON_CONFIGURED_TREE=1;
+#   - plugins/galbridge is created when it is missing, kept when it already links to this checkout,
+#     replaced when it is a dangling link; a link to anything else is refused unless
+#     GALBRIDGE_E2E_REPLACE_LINK=1, and a directory is never replaced. <run>/plugin-link.state records
+#     what was done ("created", "kept", "replaced <old target>"): the suites put it back at the end
+#     (tests/e2e/harness.py) and stop only the web server this script started.
+#
 # Prints RUN=<run dir> and URL=<base url>.
 #
 # @license GPL-3.0-or-later
 set -euo pipefail
 
 [ $# -eq 4 ] || { echo "usage: $0 <roundcube_dir> <php_binary> <mysql|pgsql> <http_port>" >&2; exit 2; }
+if [ "$(id -u)" -eq 0 ] && [ "${GALBRIDGE_E2E_ALLOW_ROOT:-}" != 1 ]; then
+  echo "refusing to run Roundcube and Chromium as root (they run with the caller's rights); use an unprivileged user, or GALBRIDGE_E2E_ALLOW_ROOT=1 in a disposable container" >&2
+  exit 2
+fi
 RC="$(realpath "$1")"; PHP="$2"; DB="$3"; PORT="$4"
 PLUGIN="$(cd "$(dirname "$0")/../.." && pwd)"
 [ -f "$RC/program/include/iniset.php" ] || { echo "not a Roundcube directory: $RC" >&2; exit 1; }
@@ -42,6 +59,32 @@ case "$DB" in
   *) echo "unknown vmail database $DB (mysql|pgsql)" >&2; exit 1 ;;
 esac
 case "$VMAIL_DSN" in *"'"*|*\\*) echo "unsupported character in the DSN" >&2; exit 1 ;; esac
+
+if [ -e "$RC/config/config.inc.php" ] && [ "${GALBRIDGE_E2E_ON_CONFIGURED_TREE:-}" != 1 ]; then
+  echo "$RC is a configured Roundcube installation (config/config.inc.php): the suites link the plugin into it and serve it on a port - use an unpacked release tarball (GALBRIDGE_E2E_ON_CONFIGURED_TREE=1 overrides)" >&2
+  exit 1
+fi
+
+# The plugin link: decided here, written below (after the last refusal).
+LINK="$RC/plugins/galbridge"
+if [ -L "$LINK" ]; then
+  OLD_TARGET="$(readlink "$LINK")"
+  if [ ! -e "$LINK" ]; then
+    LINK_STATE="replaced $OLD_TARGET"           # a dangling link
+  elif [ "$(realpath "$LINK")" = "$(realpath "$PLUGIN")" ]; then
+    LINK_STATE=kept
+  elif [ "${GALBRIDGE_E2E_REPLACE_LINK:-}" = 1 ]; then
+    LINK_STATE="replaced $OLD_TARGET"
+  else
+    echo "$LINK points to $(realpath "$LINK"), not to this checkout; not replaced (GALBRIDGE_E2E_REPLACE_LINK=1 replaces it, and the suites put it back afterwards)" >&2
+    exit 1
+  fi
+elif [ -e "$LINK" ]; then
+  echo "$LINK exists and is not a symbolic link; not replaced" >&2
+  exit 1
+else
+  LINK_STATE=created
+fi
 
 RUN="$PLUGIN/tests/e2e/run/$(basename "$RC")-$(basename "$PHP")-$DB"
 
@@ -67,13 +110,11 @@ fi
 rm -rf "$RUN"; mkdir -p "$RUN"/{temp,logs}
 chmod 0700 "$RUN"
 
-# plugin link (a stale link or an old copy of the plugin is replaced)
-if [ -L "$RC/plugins/galbridge" ] || [ ! -e "$RC/plugins/galbridge" ]; then
-  # atomic replacement (-n: never follow an existing link into the repository)
+# plugin link, as decided above (-n: never follow an existing link into the repository)
+if [ "$LINK_STATE" != kept ]; then
   ln -sfn "$PLUGIN" "$RC/plugins/galbridge"
-else
-  echo "$RC/plugins/galbridge exists and is not a symbolic link; not replaced" >&2; exit 1
 fi
+printf '%s\n' "$LINK_STATE" > "$RUN/plugin-link.state"
 
 DES_KEY="TESTONLY$(head -c 24 /dev/urandom | base64 | tr -dc A-Za-z0-9 | head -c 16)"
 cat > "$RUN/config.inc.php" <<EOF

@@ -123,6 +123,23 @@ final class Sql
         return new self('(EXISTS (' . $subSelect . '))', $params);
     }
 
+    /**
+     * "$expr IN (sub-select)" - an UNCORRELATED semi-join written by this plugin. Used for the view
+     * galbridge_forwardings, which the server builds as a whole before it applies a condition
+     * (README 2.2): the sub-select is computed once per statement and probed by value (a hashed
+     * sub-plan / a materialised sub-query), also inside OR, where a correlated EXISTS would build
+     * the view again for every row of the outer table.
+     *
+     * @param list<scalar|null> $params
+     */
+    public static function inSelect(string $expr, string $subSelect, array $params = []): self
+    {
+        if (substr_count($subSelect, '?') !== count($params)) {
+            throw new \LogicException('placeholder count mismatch');
+        }
+        return new self('(' . self::expr($expr) . ' IN (' . $subSelect . '))', $params);
+    }
+
     public static function escapeLike(string $value): string
     {
         return strtr($value, ['!' => '!!', '%' => '!%', '_' => '!_']);

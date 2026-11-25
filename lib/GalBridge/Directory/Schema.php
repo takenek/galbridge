@@ -40,6 +40,22 @@ final class Schema
     /** the iRedMail table behind it: must NOT be readable by the plugin's role */
     public const FORWARDINGS_TABLE = 'forwardings';
 
+    /**
+     * Every column the grant templates give the role (SQL/grants.*.sql, the commented-out
+     * personal-data grant included) - and so every column a statement of GAL Bridge may read
+     * (with the configured galbridge_visibility_column). diag names any other column the role can
+     * see; a unit test keeps this list equal to the templates.
+     */
+    public const GRANTABLE = [
+        'mailbox' => ['username', 'name', 'domain', 'active', 'enabledeliver', 'expired', 'department', 'first_name', 'last_name', 'telephone', 'mobile', 'birthday'],
+        'domain' => ['domain', 'active', 'backupmx', 'expired'],
+        self::FORWARDINGS => ['address', 'forwarding', 'domain', 'is_alias', 'is_list', 'is_maillist', 'active'],
+        'alias' => ['address', 'name', 'accesspolicy', 'domain', 'active', 'expired'],
+        'maillists' => ['address', 'name', 'accesspolicy', 'domain', 'active', 'expired'],
+        'moderators' => ['address', 'moderator'],
+        'maillist_owners' => ['address', 'owner'],
+    ];
+
     /** field => mailbox column */
     private const FIELD_COLUMNS = [
         'firstname' => 'first_name',

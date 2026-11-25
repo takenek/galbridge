@@ -188,9 +188,13 @@ final class DsnPolicyTest extends TestCase
 
     public function testRefusedUserListIsConfigurableAndStillRefusesTheRoundcubeUser(): void
     {
-        $config = self::config(['galbridge_db_refused_users' => ['Legacy_GAL', '', 42]]);
+        // a valid list (second verification pass, F-30: an entry that is not a role name refuses every
+        // connection) ADDS names: the built-in ones stay refused, the dedicated role connects
+        $config = self::config(['galbridge_db_refused_users' => ['Legacy_GAL']]);
         self::assertRefused('mysql://legacy_gal:' . self::PASSWORD . '@127.0.0.1/vmail', $config);
+        self::assertRefused('mysql://vmail:' . self::PASSWORD . '@127.0.0.1/vmail', $config);
         self::assertRefused('mysql://rcmail_rw:' . self::PASSWORD . '@127.0.0.1/vmail', $config, 'mysql://rcmail_rw:x@localhost/rc');
+        self::assertSame('galbridge', (new Dsn('mysql://galbridge:' . self::PASSWORD . '@127.0.0.1/vmail', $config))->user());
     }
 
     public function testDsnWithoutUserIsRefused(): void
@@ -434,8 +438,9 @@ final class DsnPolicyTest extends TestCase
             // a password may contain anything (it never reaches the connection string): '?', '=', '&', ';', '@'
             'pgsql://galbridge:' . rawurlencode('p@ss?word=1&x;y z') . '@127.0.0.1/vmail',
             'mysql://galbridge:a?b=c&d@127.0.0.1/vmail',
-            // the core parser cuts a database name at ';' itself: the driver receives "vmail"
-            "mysql://{$u}@127.0.0.1/vmail%3Bhost=db.evil.example",
+            // (a database name that the core parser cuts at ';' - "vmail%3Bhost=..." - was accepted
+            // here until the second verification pass, F-13: text the parser drops is refused now,
+            // see Remediation2DsnTest)
         ] as $dsn) {
             $accepted = new Dsn($dsn, self::config());
             self::assertSame('galbridge', $accepted->user(), $dsn);
@@ -888,9 +893,12 @@ final class DsnPolicyTest extends TestCase
         self::assertContains('jk@example.com', array_column($rows, 'address'), 'per-user aliases are in the view');
         self::assertContains('newsletter@example.com', array_column($rows, 'address'), 'mailing lists are in the view');
 
-        // read-only in every respect: the view cannot be used to change the table
+        // read-only in every respect: the view cannot be used to change the table - refused for the
+        // privilege, or (second verification pass, F-03: a fenced view is no updatable view at all)
+        // by PostgreSQL as not updatable (55000) before it looks at the privilege; MariaDB/MySQL
+        // refuse the privilege (1142) first
         foreach (['UPDATE `' . Schema::FORWARDINGS . '` SET active = active WHERE 1 = 0', 'DELETE FROM `' . Schema::FORWARDINGS . '` WHERE 1 = 0'] as $sql) {
-            self::assertSame('denied', $conn->probeWrite($sql), $sql);
+            self::assertContains($conn->probeWrite($sql), str_starts_with($dsn, 'pgsql') ? ['denied', '55000'] : ['denied'], $sql);
         }
         $conn->close();
     }

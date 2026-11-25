@@ -5,10 +5,13 @@ semantic versioning.
 
 ## [Unreleased]
 
+## [1.0.2] – 2026-11-25
+
 Verification of the remediation in 1.0.1 against the audit report (2026-11-25, Anthropic's Claude
 Opus 5.5): the fixes were checked in the code and by the suites on all three engines; where a fix
-was incomplete or brought a new risk, it is completed here. No configuration or database step is
-needed for the upgrade.
+was incomplete or brought a new risk, it is completed here. The fixes of this first verification
+need no configuration or database step; the second verification pass below names the changes that
+can (its "Upgrading" items).
 
 ### Security
 - U-11 (completed): the IMAP binding compared the session's `storage_host` and the user's
@@ -32,6 +35,9 @@ needed for the upgrade.
   conditions evaluated on the rows behind it (MariaDB/MySQL merge views, PostgreSQL leakproof
   operators) - corrected. The PostgreSQL grant set makes the administrator who runs it the owner of
   the view; `diag` checks that the view holds no other rows than alias, alias-member and list rows.
+  (Superseded in the second verification pass, below: the view is now materialised and fenced, so
+  no condition reaches the rows behind it any more (F-03), and the PostgreSQL grant set drops and
+  re-creates it (F-04).)
 - U-08 (completed): with the account's connection limit active on both engines, a refusal because
   that limit is reached was memoised like an outage (no directory for 30 s in that session); it now
   fails only the request (log `db_busy`). The documentation no longer calls the role's statement
@@ -49,16 +55,20 @@ needed for the upgrade.
   exit code 2.
 - I-05 (completed): with `--allow-root`, the configuration directories of `RCUBE_CONFIG_PATH` (and
   `ROUNDCUBE_CONFIG_DIR` read as Roundcube reads it) are checked, a symbolic link to a path that does
-  not exist is refused, the working directory is taken off `include_path`, and the logs of a root
-  process go to syslog instead of `log_dir` (which the web server user owns and could point at any
-  file). README 2.2: generate the grant set from code the web server cannot change and read it
-  before the database administrator runs it.
+  not exist is refused, the relative entries are taken off `include_path`, and Roundcube's log lines
+  of a root process go to syslog instead of `log_dir` (which the web server user owns and could
+  point at any file). README 2.2: generate the grant set from code the web server cannot change and
+  read it before the database administrator runs it. (Neither kept the working directory or PHP's
+  own error log out of reach: completed in the second verification pass below, F-11.)
 - I-06 (completed): no fixed temporary file name in a test and in the release procedure.
 - I-07 (completed in the repository): Composer's blocking of releases with advisories is switched
   off for the PHPUnit job only; the 1.7.0 legs and the coding-style job audit their dependencies as
   well (the 1.7.0 legs all but that core); the release job also requires the tagged commit to be
   part of `main`; the exceptions of the secret scanner are anchored at the top of the repository.
-  The signed release tag and pinning the release key remain a step of the maintainers.
+  The signed release tag and pinning the release key remain a step of the maintainers. (Completed in
+  the second verification pass, below: the key is pinned in `.github/release-signers` and verified by
+  CI (F-22), the policy switch is narrowed to advisories (F-21), and the secret scanner excepts named
+  files and exact values only (F-24).)
 - I-10 (completed): the documentation and `diag` said that only a NEW own alias waits for
   `galbridge_scope_ttl`; a removed one does too (restricted lists stay visible until then) - only the
   mailbox itself is confirmed on every reading request.
@@ -68,7 +78,635 @@ needed for the upgrade.
   and the excluded domains in SQL - dropped later, but counted and matched by searches. The
   deny-lists compare in lower case on every engine.
 
-## [1.0.1] – 2026-11-24
+### Second verification pass (assessment of 1.0.1)
+
+A second, independent assessment of 1.0.1 (2026-11-25; 36 findings, F-01 … F-36) found the gaps
+below; each is closed here (remediation with Anthropic's Claude Opus 5.5), with a test that fails on
+the code before the fix. The entries are grouped by area – `diag`, identity binding, configuration,
+database layer, database role and grants, directory sets and text, development and release,
+documentation and accepted risks, and (found afterwards by a run against every supported database
+server) database compatibility, followed by the findings of a final review of the whole change –
+and each group ends with what an upgrade has to consider.
+
+- F-11 / I-05 (completed): the root process of `diag --allow-root` now works in Roundcube's verified
+  `program/` directory – PHP looks into the working directory last for a relative file name
+  whatever `include_path` says, and Roundcube's autoloader asks for one (an unknown database driver
+  was enough to execute a file of the administrator's working directory as root) –, keeps only the
+  absolute `include_path` entries that exist and checks them like `program/`, and hands Roundcube
+  the canonical paths it checked (`INSTALL_PATH`, `RCMAIL_CONFIG_DIR`, `RCUBE_CONFIG_PATH`) instead
+  of a spelling with a symbolic link that another account could swap. It is refused when PHP's
+  error log is a file in a `log_dir` that is not root's alone, or a symbolic link (every
+  `rcube_config` object – Roundcube's and the ones the plugin creates to read the configuration
+  again – points `error_log` at `<log_dir>/errors.log`, so switching to syslog after Roundcube's
+  start was not enough: a PHP warning was still written through a link of the web server user), and
+  when Roundcube's database is an SQLite file in a directory another account can write. iRedMail
+  (`log_driver = 'syslog'`) is not affected; with `log_driver = 'file'` and a `log_dir` of the web
+  server user run the tool as that user (as documented). The documentation names what the checks
+  do not cover: PHP's own configuration and the start code of every enabled Roundcube plugin.
+- F-12: `diag` neutralises every line it prints (`GalBridge\Cli\Terminal`): control, bidi,
+  zero-width and separator characters and invalid UTF-8 appear as visible escapes such as `\x1B`;
+  the settings a database server reports, the iRedMail release line, `imap_host` and the reason of
+  an aborted check are sanitised like log values (a DSN password masked). While `diag` runs, what
+  Roundcube, the database drivers and PHP write to standard error is neutralised as well (a filter
+  on `STDERR`; PHP's messages are written by the tool's own handler as one sanitised line, to the
+  error log and – with `display_errors = stderr` – to standard error), and the refusals of
+  `--allow-root` escape the file names they show. A local socket in `galbridge_imap_hosts` must be
+  printable ASCII without blanks and `%` (another entry disables the plugin); a session or stored
+  `mail_host` in socket form with other bytes is `host_mismatch`, and `diag` counts such users
+  without printing the value.
+- F-27: `diag` checks every configuration file Roundcube loads for the plugin (`galbridge.inc.php`
+  from every configuration directory, `RCUBE_CONFIG_PATH` included) and the core files
+  `defaults.inc.php` and `config.inc.php`, with the owner of their directories and the directories
+  above (WARN); the plugin code recursively – a file the PHP user owns counts as changeable whatever
+  its mode says –, the directories above the plugin and Roundcube's `plugins/` directory, as root
+  with the rule of `--allow-root` (an explicit OK or WARN line instead of none), and a WARN when the
+  user cannot be determined; files inside `bin/`, `lib/`, `SQL/`, `localization/` and `docs/` that a
+  release does not hold. It says that the PHP version, extensions and environment it reports are
+  those of the command line process (INFO `process`), says when no `ROUNDCUBE_GALBRIDGE_*` variable
+  is set there and lists the core options that `ROUNDCUBE_*` variables of the process override
+  (names only); the web process logs the names of the `ROUNDCUBE_GALBRIDGE_*` variables in effect
+  there once per session (INFO `env_override`). An unchecked Roundcube database is a WARN (was
+  INFO); the summary says when the web access was not checked; `diag --strict` counts WARN lines as
+  problems (exit code 2). An exception or a PHP fatal error during Roundcube's start – or an `exit()`
+  of other code while the tool runs – ends with `Result: aborted` and exit code 2 (core's
+  fatal-error handler ended such a run with exit code 0 on PHP 8.4 and 8.5); an unexpected error
+  while connecting to the vmail database is a `[FAIL] check aborted` line of its section, with the
+  counts and the summary kept.
+- Upgrading (`diag`): the new WARN lines can turn `Result: OK` into `Result: OK with N warning(s)` on
+  installations whose files or directories belong to the web server user (true findings; the exit
+  code stays 0 without `--strict`), the output has new INFO lines, and the summary line can carry
+  "(not checked: web access - run with --url)": scripts that match whole lines may need an update.
+- F-01 (verified): the IMAP binding compares the session's host and port and the stored `mail_host`
+  in the raw form Roundcube wrote them (U-11 above); re-checked against Roundcube 1.7.0 – 1.7.7, no
+  further change. Its tests now run their sessions on non-local servers over TLS (F-18).
+- F-06: the options of the core – `imap_host`, `include_host_config`, `imap_conn_options`,
+  `des_key`, `db_dsnw`, the plugin list – are read as Roundcube applies them (its own configuration
+  object: an environment-specific `config-<env>.inc.php` and files pulled in with
+  `include_once`/`require_once` included), no longer from a second reading of the files; that second
+  reading is used only for a name that a stored preference shadows (also the legacy `default_host`).
+  No IMAP binding is derived when the two readings disagree on `imap_host`; `include_host_config`
+  counts when either reading enables it; the configuration fingerprint is keyed with the `des_key`
+  Roundcube uses; the database users of Roundcube (`db_dsnw`, now also `db_dsnr`) and of the password
+  plugin are refused from every reading. The plugin's file is found with a `RCUBE_PLUGINS_DIR`
+  defined without the trailing slash, and with Roundcube's environment suffix
+  (`Config::pluginFiles()`, one routine for every reader). `diag` names (never prints) the options a
+  second reading loses (WARN "configuration read again"), configuration files that use
+  `include_once`/`require_once` and environment-specific files.
+- F-08: with Roundcube's `include_host_config`, the Host header of the request – the client's choice –
+  selects a configuration file; a `galbridge_*` option such a file sets (hidden lists, viewer lists,
+  the global book, the DSN …) used to be applied for whoever sent that host name. Every `galbridge_*`
+  option of a request is now compared with the host-independent configuration (`config.inc.php` and
+  the plugin's file); a difference disables every book for that request before the database is
+  asked (log `config_invalid` naming the option; the two book names may differ). `diag` merges every
+  file a request can select and names the options it sets (FAIL), and checks a per-host
+  `imap_host`.
+- F-17: an open session kept the directory after its password was changed or its IMAP service was
+  disabled (the role cannot see either, and address-book requests do not connect to IMAP). When the
+  cached user is renewed (`galbridge_scope_ttl`) the IMAP server now confirms the session's
+  credentials through Roundcube's own connection: a refusal ends the directory for the rest of the
+  session (log `viewer_revoked`, status `imap_refused`), an IMAP server that cannot be asked makes it
+  unavailable for 30 s (`imap_unavailable`), never "refused". With the strict list policy the user's
+  own aliases are read again with the mailbox confirmation, so a removed alias applies with the next
+  request (log `viewer_changed`). README 3.9 documents what applies when, and how to end a
+  compromised account's access at once.
+- F-18: the identity binding trusts the IMAP login; over an unprotected link to a remote IMAP server
+  anyone on that network could answer it (`tls://` on Roundcube 1.7.0 – 1.7.6 even continues in
+  plain text when the server offers no STARTTLS). A session on an IMAP server that is not local
+  (socket, `localhost`, `127.0.0.0/8`, `::1`) now gets the directory only over TLS that verifies the
+  server – `ssl`/`imaps`, or `tls` on Roundcube 1.7.7 or later, PHP's `openssl`, no
+  `imap_conn_options` that switch verification off – checked on every request (log
+  `imap_transport`, status `transport_unprotected`); the new switch `galbridge_imap_allow_plaintext`
+  (default `false`) accepts it for a trusted private link, with a warning. `diag` judges the
+  transport of every configured server ("IMAP transport").
+- F-33: the decisions that depend on the action (autocomplete switches, complete-or-refused exports,
+  the refusal of a stale search export, the 204 answer of a refused export, groups as full sets) now
+  compare it in the canonical form of Roundcube's dispatcher (`EXPORT` and `group_expand` reach the
+  same handlers as `export` and `group-expand`), and the export hook is registered for every request
+  of the address book (it acts only after a refusal). The new `contact_exists` hook removes the GAL
+  Bridge books from Roundcube's known-contact check: a `collected_senders` or `collected_recipients`
+  preference that names one (Roundcube saves them unchecked) no longer makes every directory address
+  a trusted sender. The threat model no longer says that `init()` reads a resolved action name.
+- Upgrading (identity binding): a directory IMAP server on another host needs verified TLS (`ssl://`,
+  or `tls://` on Roundcube 1.7.7+; certificate verification on) or `galbridge_imap_allow_plaintext =
+  true` – until then its sessions get no books (`diag` FAIL "IMAP transport"); loopback and sockets
+  (the iRedMail default) are not affected. With `include_host_config`, move every `galbridge_*`
+  option out of the per-host files into the plugin's configuration file (`config/galbridge.inc.php`,
+  or `plugins/galbridge/config.inc.php` if that is the one in use – never both; `diag` names them). An
+  `imap_host` set through `include_once`, an environment-specific file or another plugin, without
+  `galbridge_imap_hosts`, disables the plugin until the list is set or the configuration is
+  flattened. The fingerprint changes once (every session resolves its user again). Address-book
+  requests make one IMAP login per session and `galbridge_scope_ttl` when Roundcube has not
+  connected yet, and requests that read the directory one bounded alias statement more (strict list
+  policy).
+- F-07: a plugin configuration file that exists but cannot be loaded (not readable by the PHP user,
+  no `$config` array – Roundcube only logs error 527 and goes on), a `config/galbridge.inc.php` that
+  Roundcube ignores because `plugins/galbridge/config.inc.php` exists, and a `galbridge_*` option or
+  `ROUNDCUBE_GALBRIDGE_*` variable this version does not know (a typo left the option meant at its
+  default – for a hidden list, nothing hidden) now disable every book before anything connects (log
+  `config_invalid` naming the file or the option); compose wires no book into autocomplete then.
+  `diag` fails for each – with the closest valid option name –, lists an ignored file as "NOT read"
+  with the same mode checks, says "none" with the reason on the `enabled books` line and shows the
+  size of the hidden and excluded lists and of the organizations (INFO `policy lists`). `Config` is
+  given the plugin's own directory (`rcube_plugin::$home`, or the one `diag` works with).
+- F-09: SECURITY.md (and the threat model) recommended listing `galbridge_*` options – first of all
+  `galbridge_db_dsn` – in Roundcube's `dont_override`; with an option set through an environment
+  variable Roundcube then stored its value, the DSN with the database password, in the preferences
+  of every user who saved settings. The advice is withdrawn (SECURITY.md now says not to), the
+  plugin is loaded in the Settings task for one hook only, `preferences_update`, which removes every
+  `galbridge_*` key from the preferences Roundcube saves and from the stored ones (copies saved
+  before disappear at the user's next save), and `diag` fails for `galbridge_db_dsn` in
+  `dont_override` (WARN for other `galbridge_*` names) and counts the users whose stored
+  preferences hold `galbridge_db_dsn` (FAIL) or other `galbridge_*` keys (WARN) – counts only.
+- F-10: the README said that `composer update` keeps `plugins/galbridge/config.inc.php`; Roundcube's
+  plugin installer re-creates it at every update as a new file with the owner and umask of the user
+  running Composer (typically readable by every local account) and keeps a full copy of the plugin
+  directory, configuration included, in `plugins/galbridge-<20 digits>` until the update succeeds.
+  Composer installations are now told to keep the configuration in `config/galbridge.inc.php`
+  (created before `composer require --prefer-dist`); `diag` fails for a leftover installer copy and
+  warns for a plugin-directory configuration of a Composer installation (also on its "readable by
+  everyone" FAIL); the nginx rule of README 2.6 covers the copy (`plugins/galbridge(-[0-9]+)?/`).
+- F-29: the log mask of passwords covers `password=` / `PGPASSWORD=` / `db_pass=` pairs (bare or
+  quoted) and `"password": "…"`, passwords with blanks, tabs, `@` or `/`, user names with a slash and
+  the old `driver(syntax)://` notation, and replaces a text it cannot handle as a whole; it runs
+  after control characters are replaced, and every format character (Unicode `Cf`, e.g. the soft
+  hyphen and tag characters) is replaced now. Parameters that carry a password or a DSN are marked
+  `#[\SensitiveParameter]`. A context value with a blank, `=`, `"` or `\` is written in double
+  quotes (`allowed="127.0.0.1 mail.example.com"`), a key is a code constant. `config_invalid` names
+  the position of a rejected list entry instead of the entry – a rejected hidden address no longer
+  reaches the log. An autocomplete request that names no book no longer logs `denied_source` for an
+  enabled book the user is not entitled to (the plugin added it to the autocomplete sources itself;
+  debug only); with `_source`, and for every other action, it still does. No present code path
+  logged a DSN: the mask is a safety net.
+- F-30: the built-in refused database roles can no longer be removed (`galbridge_db_refused_users`
+  adds names), and a value that is not a list of role names refuses every database connection (it
+  shrank or fell back before). Numeric options accept whole numbers only – an integer or a string of
+  digits, an environment variable judged by its text – and report a value outside their range
+  (`Config::RANGES`, the one range of every caller; `diag` used to check nothing). The configuration
+  fingerprint kept in sessions no longer covers the database password, so the session store holds
+  nothing derived from it whatever `des_key` is (SECURITY.md, the architecture and the threat model
+  claimed that unconditionally). `diag` warns while `galbridge_db_allow_plaintext` or
+  `galbridge_db_allow_verify_ca` is on – also unused –, while `galbridge_global_allow_wildcard` is on
+  without `'*'`, when the password plugin is enabled with its SQL driver but its DSN is unknown, and
+  for a `des_key` that is not a string or shorter than 24 characters (besides the published default
+  and an empty one); it shows the refused roles.
+- Upgrading (configuration): every book is disabled until fixed – `diag` names the cause – for an
+  unknown `galbridge_*` option or `ROUNDCUBE_GALBRIDGE_*` variable, for both configuration files
+  present, and for a configuration file that cannot be loaded; a configuration that removed a
+  built-in refused role to connect with it, or that has a malformed refused-roles list, loses the
+  database connection. A fractional number (`2.5`) now gives the default instead of its integer
+  part. Remove `galbridge_*` names from `dont_override`; if `diag` counts stored copies of the DSN,
+  give the role a new password (`grants --reset-password`). Composer installations move the
+  configuration to `config/galbridge.inc.php` and widen the nginx rule. Log parsers that split on
+  blanks must accept quoted values. The fingerprint changes once (every session resolves its user
+  again). The plugin is now instantiated in the Settings task (one hook, nothing else).
+- F-13 (completed): the DSN handed to the driver is rebuilt from the parts the policy checked and
+  must read back to exactly those parts – 1.0.1 passed the configured text with `?timeout=N`
+  appended, so a `?` before the database name turned the timeout into part of that name and left the
+  driver without a connect timeout. The DSN is written in one grammar (`host`, `host:port`,
+  `[IPv6]`, `[IPv6]:port` or `unix(/path)`, then `/database` as the driver receives it, then the
+  parameters); refused: a second port, text around an IPv6 address, the `unix+…` and `tcp(…)`
+  notations, a raw `+` in a parameter value (misleadingly reported as "no host" before), a
+  percent-encoded or `;`-suffixed database name, a parameter the parser does not read, MariaDB/MySQL
+  `localhost:PORT` or a port inside `unix(…)` (the driver ignores it and uses the socket), MySQL
+  `localhost` without a usable `pdo_mysql.default_socket`, and unix socket paths over 107 bytes
+  (PostgreSQL including `.s.PGSQL.<port>`). MySQL `localhost` is shown with its socket on `diag`'s
+  `DSN` line, and `diag` warns when the socket's directory is writable by every local account.
+  PostgreSQL `localhost` – looked up by the system resolver on every connection – is accepted with a
+  warning (log `dsn_warning`, `diag` WARN; SECURITY.md register). The driver class is created
+  directly instead of through `rcube_db::factory()` (which ends the PHP process on a driver it does
+  not know), and an error the driver raises while connecting – e.g. a PDO MySQL constant missing
+  from a `pdo_mysql` without `mysqlnd` on Roundcube 1.7.6+ – is a memoised outage
+  (`db_down cause=driver_error`) with its reason on `diag`'s `connect` line instead of an unmemoised
+  exception. `grants --host=` no longer accepts an IPv6 address with an embedded IPv4 part, whose DSN
+  the plugin would refuse. The docblocks named wrong driver defaults.
+- F-14: the MariaDB/MySQL connection gets a read timeout – the larger of
+  `galbridge_db_connect_timeout` and `galbridge_db_timeout` plus 2 s, set as
+  `mysqlnd.net_read_timeout` while the plugin's connection is created and restored right after; a
+  lower php.ini value is kept. Before, a server or proxy that accepted the connection and stayed
+  silent held the PHP worker for mysqlnd's default of 86400 s (the connect timeout covers the TCP
+  connection only). A connection lost during a statement (read timeout, server restart) is an
+  outage for 30 s like a failed connect (`db_down cause=lost`). `diag` shows the read timeout and
+  warns where none can be set (`pdo_mysql` without `mysqlnd`, `ini_set` disabled; log
+  `read_timeout_unavailable` / `read_timeout_not_applied`). PostgreSQL has no read timeout after
+  connecting: SECURITY.md now asks for PHP-FPM's `request_terminate_timeout`.
+- F-26: no value with a control character or a backslash is bound any more – Roundcube inlines bound
+  values and PDO scans the statement again (a backslash moved the literal boundaries PDO saw;
+  libpq cut a value at a NUL byte, shorter than the length rules checked): such search input is not
+  searched (it matches nothing), a department with one is not offered as a group (log
+  `group_key_unusable`) and a forged group ID with one selects nothing, and the connection refuses a
+  NUL byte or a backslash before it sends a statement (log `unsafe_parameter`). A server that
+  refuses the plugin's statement timeout or read-only mode disables the books (log
+  `session_limit_refused`, `db_down cause=session_limit`) instead of a warning – on MySQL nothing
+  bounded the statements then; `diag` shows the `statement time (this session)` and fails when it is
+  not `galbridge_db_timeout`. Expiry is judged by the database clock in its session time zone and by
+  UTC, whichever comes first (UTC only before: on a server east of UTC an entry expired in local
+  time stayed visible for the offset). A required birthday means a real date (`m.birthday <> ''`
+  failed on PostgreSQL and counted year 0001 elsewhere); a required text field must be non-empty
+  after trimming. The documentation, `diag` and the code no longer call the session limits a
+  "backstop to the role limits": `galbridge_db_timeout` is the statement bound of the plugin on
+  every engine, the role's statement time a default for other sessions (MySQL has none).
+- Upgrading (database layer): newly refused DSN spellings (see F-13) disable every book until the DSN
+  is corrected – `diag` says what to write (MariaDB/MySQL `localhost:PORT` becomes `127.0.0.1:PORT`);
+  PostgreSQL `localhost` only warns. A server that refuses the session settings disables the books
+  (every supported server accepts them). Searches with control characters or a backslash return
+  nothing; departments with them are no groups. On database servers east of UTC expired entries
+  disappear at their local expiry. Set `request_terminate_timeout` for the Roundcube PHP-FPM pool.
+  Log parsers: `db_down` carries `cause=`, `session limit not applied` is replaced by
+  `session_limit_refused`.
+- F-02: the output of `grants` is run by the database administrator, but 1.0.1 documented producing
+  it as the web server user (`sudo -u www-data ... grants`), and outside `--allow-root` nothing checked
+  who could change the code and templates it loads and prints. `grants` is now run as root with
+  `--allow-root`, whose code check covers it (the script, `lib/`, `SQL/`, `localization/`,
+  `galbridge.php`, the configuration and every directory above them must be root's alone). As any
+  other user it refuses, before it loads a class, to run when that user can read a configuration
+  file of Roundcube or of the plugin – the web server user, whose other processes could read or
+  change the output while it is produced (`ptrace`, `/proc`) – and refuses code and templates that an
+  account other than root and itself owns or that group or others can write. It works in the plugin
+  directory with the plugin's `lib/` as include path. The output holds no backslash and no line that
+  starts with a long-form mysql client command (checked before anything is printed; the templates
+  had a backslash in a comment), and README 2.2 adds what code cannot enforce: a check of the plugin
+  files with `find` / `namei` before a root run (a changed script could skip its own check), a review
+  of the output (role line, `grep` for a backslash, a `diff` against the template) and applying it with
+  the client commands off (`mysql --binary-mode <`, `runuser -u postgres -- psql -X ... <`). A
+  Composer installation must leave the code to root (README 2.1). `diag`'s "plugin code" line says
+  that `grants` and `--allow-root` refuse such a tree.
+- F-03: the MariaDB/MySQL view `galbridge_forwardings` was merged into the queries of the role (a
+  caller's condition was evaluated on private forwarding rows – on MariaDB 11.8 as an index condition
+  before the flag filter), and PostgreSQL's `security_barrier` let leakproof conditions through. The
+  view is now materialised and fenced on every engine: MariaDB/MySQL `ALGORITHM = TEMPTABLE` with
+  `LIMIT 18446744073709551615` (`TEMPTABLE` alone still let the server push conditions into it),
+  PostgreSQL `security_barrier` with `OFFSET 0` – the server builds its rows before any condition of a
+  query applies, so not even a query sent with the role's credentials sees a private row. The plugin's
+  statements refer to the view in uncorrelated semi-joins only (built once per statement, also in the
+  OR branches of the list policies). `diag` checks the view object (and, through `SHOW VIEW`, which the
+  MariaDB/MySQL grant set now gives, its definition) and fails for an unfenced view; the plugin logs
+  `view_not_materialised` and keeps working until the grant set is applied again.
+- F-04: the role checks covered eight relations and three columns of `mailbox`. The plugin now refuses
+  (`role_too_broad`, the reasons in the log) a role that can do more than read the directory: a secret
+  column of **any** table, the `forwardings` table, a membership in another role, a role attribute,
+  the ownership of the database, a global privilege, a privilege outside the directory database
+  (PostgreSQL: also outside its schema – a relation or sequence of another schema and, completed by
+  the final review below, `CREATE` on another schema and any other privilege granted to the role in
+  the database) or a privilege to change anything – read in one catalog
+  statement per engine (`RoleScope`) – and a view `galbridge_forwardings` that holds rows of another
+  kind (on every engine). `diag` fails for each, checks the view object (PostgreSQL: kind, owner,
+  options, fence, dependencies), writes on every relation and sequence, CREATE on the schema or the
+  database (FAIL, was a WARN) and owned objects, lists the other databases a PostgreSQL role may
+  connect to and names every column beyond the grant set. The PostgreSQL grant set drops and
+  re-creates the view (no grant, owner, rule or comment of an earlier view survives; a table of that
+  name stops it), takes `CREATE` on schema `public` from `PUBLIC` (the default of PostgreSQL 15; table
+  owners keep it by name) and explicit `CREATE` / `TEMPORARY` on the database from the role, asserts
+  the role attributes (`NOBYPASSRLS` included) in every form and works with `search_path = public`.
+  The documentation no longer calls role defaults (`statement_timeout`,
+  `default_transaction_read_only`) limits, and gives the `pg_hba.conf` lines that keep the role to the
+  vmail database.
+- F-28: `grants` printed the DSN line with the password into the SQL stream (a client that keeps
+  comments would send it to the server and its logs); it is now on standard error, and so are usage
+  errors, refusals, template errors, an aborted run and PHP's own messages – a redirected SQL file
+  holds none of them. A
+  repeated option and `--account-host` with `--driver=pgsql` (silently ignored before) are usage
+  errors. The clear-text form for MySQL 8.4+ stops on MariaDB before the statement with the password
+  also through a client that drops comments: a statement only MySQL 8 can run
+  (`SELECT @@SESSION.information_schema_stats_expiry`) follows the MariaDB-only `SIGNAL` comment. The
+  PostgreSQL grant set keeps its statements out of `pg_stat_statements` (`track_utility` off for its
+  transaction), and the manual PostgreSQL path reads a root-only copy of the template through
+  standard input (`runuser -u postgres -- psql -X ... < /root/galbridge-grants.sql`) instead of a
+  file the postgres account had to read. `diag` warns about a MariaDB/MySQL account other hosts may
+  use without `REQUIRE SSL` (the account statement is read, never printed).
+- Upgrading (database role and grants): apply the grant set again – as root, `plugins/galbridge/bin/
+  galbridge.sh grants --allow-root --driver=... --grants-only` with the `--role`, `--db`,
+  `--account-host` and `--connection-limit` you used, reviewed and applied as README 2.2 describes
+  (`mysql --binary-mode` / `psql -X`). Until then the books keep working; the log warns
+  (`view_not_materialised`, on PostgreSQL 14 databases `role_can_create`) and `diag` fails on the
+  view and on `schema public`. `sudo -u www-data ... grants` is refused; a Composer installation made
+  as the web server user needs `chown -R root plugins/galbridge && chmod -R go-w
+  plugins/galbridge` first (the owner only: a `plugins/galbridge/config.inc.php` keeps its PHP group
+  and mode 0640). Scripts that read the DSN line from the output must read standard error.
+  A hand-made role with a membership, an attribute, a global or foreign privilege, a write privilege
+  or a secret column of another table loses its books (`diag` names why); roles created by the grant
+  set are not affected. On PostgreSQL the re-created view drops the grant of any second GAL Bridge
+  role on the same database: apply its grant set as well.
+- F-05 / F-16 / F-20: SQL and the PHP re-check now apply ONE address rule – only canonical rows are
+  offered. The deny-lists in SQL compared `LOWER(column)` while PHP compared the NFC / lower-case /
+  A-label form, so a hidden address in another spelling (Unicode NFD, a non-ASCII capital) and an
+  entry whose domain column held the U-label of an excluded domain escaped the hidden lists and
+  exclusions in SQL: counted, matched by searches (also through a per-user alias) and part of the
+  group aggregate, dropped only by PHP – an existence oracle. Rows that PHP rejected for other
+  reasons (Roundcube's e-mail check: a double dot, `_` in a domain label, a single-label domain; an
+  address that does not belong to its domain column) refused every export and group expansion of
+  their whole scope, and the log did not name them. The local part of an address was checked by a
+  deny-list looser than names and reached Roundcube's sinks unchanged (`&` in the HTML of the
+  suggestion list, `?`, `&`, `#` in the `mailto:` value of the contact view, non-ASCII look-alikes),
+  and a name `0` – empty for Roundcube – let the bare address become the recipient text. Now
+  `Normalizer::CANONICAL_ADDRESS` (local part `a-z 0-9 . _ + = -` in dot-atom form, at most 64 bytes;
+  an ASCII host name of at least two labels with a letter-led or `xn--` top-level label; at most 254
+  bytes) is rendered in the root predicate of every kind for each engine
+  (`QueryBuilder::canonicalAddressSql()` / `canonicalDomainSql()`: PostgreSQL `~`, MariaDB/MySQL
+  `REGEXP`, both behind an ASCII-only test, SQLite `GLOB`; all patterns bound) and applied by
+  `RecordMapper` to the same rows, so an entry is offered everywhere or nowhere – it is a strict
+  subset of Roundcube's e-mail check (seeded corpus test; the renderings compared with the PHP rule
+  and on every engine). The hidden lists and exclusions therefore compare canonical ASCII. A row the
+  re-check still drops (a defect, a row changed during the request) refuses the full set as before,
+  and the log names it by a non-reversible tag (`row_invalid` for an address or domain-column
+  failure, including the e-mail check; `row_out_of_scope` for scope and hidden lists; both
+  `row=<tag>`). A name Roundcube takes for empty falls back to first and last name or the local part.
+  `diag` replaces its "lower-case addresses" line with `entries not offered`: per kind (persons, alias
+  accounts, mailing lists, per-user aliases, hosted domains) the rows outside the rule, with up to 10
+  JSON-escaped examples and their `row=` tags; on MariaDB/MySQL also the addresses with capitals it
+  offers and a WARN for a Turkish/Azerbaijani collation of an address column.
+- F-15: what one authenticated user can make the directory spend. (a) Any connection failure that is
+  not the English "too many connections" was memoised for 30 s in the session – also PostgreSQL's
+  "remaining connection slots are reserved" and every connection error of a server with another
+  `lc_messages`, so a user holding the role's connections took the directory away from other
+  sessions. Now only an unreachable or slow server is memoised (the attempt took at least half of the
+  connect timeout, or a known "cannot reach" error); any other answer the server gives at once fails
+  that request only (`db_busy`, or `db_down cause=refused` without `retry_in`). (b) Core's copy action
+  calls `get_record()` for every ID of the request, without a bound: at most `galbridge_max_ids`
+  contacts are now read one by one per request (`LookupBudget`, shared by the books of the request),
+  the rest is refused with the "too many contacts" message. (c) The details and aliases of a full set
+  went into one statement with every address, which `rcube_db` binds client-side at a quadratic
+  cost; they are read in batches of 500 (`Repository::DETAIL_BATCH`), and `diag` warns above 10000
+  for `galbridge_max_export` and the group cap. (d) The documentation presented a limit on
+  `_action=autocomplete` in the query string as the required control; it now requires per-client
+  request-rate and concurrency limits on every Roundcube PHP request (the concurrency limit below the
+  role's connection limit) and says why the action key alone misses requests (POST body, cookie,
+  URL-decoding and character stripping by Roundcube).
+- F-19 (completed): Roundcube's suggestion list fills its template with `String.replace()` using
+  the directory text as the replacement string (`$&`, `` $` ``, `$'`, `$1`, `$<x>` were expanded) and
+  shows `##…%%` as bold text without the markers. `$` now becomes `＄` (U+FF04), runs of `%` are split
+  by blanks, and a `%` at either end of a text becomes `％`, so two fields of a name template cannot
+  form `%%`; group- and organization-label search uses the same notation. Organization labels are cut
+  at an at-sign like every other text that reaches recipient names (reported as a configuration
+  problem). Phone numbers keep their free text under every display rule (no allow-list – decided and
+  documented). The template matrix test covers every text field, payloads of every class and
+  templates with every placeholder.
+- F-31: complete-or-refuse and list bounds. Compose to selected and export of selected silently
+  dropped a selected ID that was malformed or found no visible entry; such a selection is now refused
+  as a whole (`incomplete`, log `set_incomplete missing=N dropped=N`; the export answers 204). A full
+  set is recognised by core's own page sizes (9999, 99999) and the recipient actions of a group: a
+  browse page above the page bound (`max_pagesize` 0 or above 1000, a large `addressbook_pagesize`)
+  was handled like an export or a group expansion and is now a page of at most 1000 entries with the
+  new message "The directory shows at most N entries per page"; `pagesize` is honoured where
+  `addressbook_pagesize` is not set; `diag` warns. List totals at `galbridge_max_count` now tell the
+  user ("Only the first N directory entries can be browsed …", new message), and the pages of a search
+  result stop at the result cap with its notice. The per-user aliases of a page are bounded per owner
+  (`ROW_NUMBER()`), so a few owners with very many aliases no longer leave other entries of the page
+  without theirs (`aliases_skipped` is gone); window functions are now required (MariaDB 10.2, MySQL
+  8.0; `diag` FAIL while `galbridge_user_aliases` is on with an older server). The page number is
+  clamped (PHP 8.5 warned about an out-of-range float-to-int cast). The export of a stale stored search
+  was already refused (STAGE 6).
+- F-32: in a book of several domains, the fields an entry of another domain does not carry (first and
+  last name; department and phones under a name template that shows them before `{name}`) remained
+  search and sort criteria, so their values could be confirmed; they are now neither matched nor
+  sorted by for such an entry (first and last name only when it has no display name – they are then
+  its shown name), from one list for record and SQL (`RecordMapper::foreignWithheld()`). Department
+  groups of the global book merged equal department names of different tenants – any tenant could
+  add accounts to another tenant's group; they are now per domain, labelled `(domain) Department`
+  (key `domain:department`; group IDs of 1.0.x select nothing), and `diag` warns about
+  `galbridge_global_groups = 'department'`. Domain books of an organization keep one group per
+  department name.
+- Upgrading (directory sets and text): no configuration or database step. Entries whose address does
+  not follow the address rule – characters outside `a-z 0-9 . _ + = -` in the local part, non-ASCII,
+  odd dots, single-label or non-letter top-level domains, `_` in a domain label, an address that is
+  not in its domain column, and on PostgreSQL addresses written with capitals – disappear from every
+  book: run `diag` and correct the entries it lists under `entries not offered`. Compose to selected
+  and export of selected are refused when a selected contact cannot be read; copying to a personal
+  address book stops after `galbridge_max_ids` contacts; page sizes above 1000 give pages of 1000
+  with a message. With `galbridge_user_aliases` the server must be MariaDB 10.2 / MySQL 8.0 or newer.
+  Global-book department group IDs change. Log parsers: `row_invalid` / `row_out_of_scope` carry
+  `row=`, `set_incomplete` may carry `missing=`, `db_down` may come with `cause=refused` and without
+  `retry_in`, `aliases_skipped` no longer appears. Reverse proxies: configure the per-client limits of
+  SECURITY.md.
+- F-21: CI no longer switches off Composer's malware and abandoned-package blocking
+  (`COMPOSER_NO_BLOCKING` did that along with the advisory blocking): only the blocking of releases
+  with advisories is off, only for `composer install` in the PHPUnit job, and the pinned 1.7.0 core
+  of the compatibility legs is the only audit exception (a runner-local `policy.advisories.ignore`
+  entry with the constraint 1.7.0). Every leg runs a plain `composer audit`, which fails on
+  advisories, malware-list matches, abandoned packages and unreachable advisory sources - the 1.7.0
+  legs had filtered the JSON output for advisories only. Composer is downloaded in a pinned version
+  and checked against its SHA-256 (setup-php installs no tools), every job runs on `ubuntu-24.04`,
+  and every job that resolves dependencies records them with the source commit of each package, the
+  runner image, PHP and Composer versions, and keeps its `composer.lock` as a 90-day artifact - the
+  workflow comments, SECURITY.md (GB-32) and the threat model had claimed that for jobs that did not
+  do it. The release verification runs in a disposable container from the lock of the release
+  commit's CI run, as an unprivileged user - never as root on the machine that signs (1.0.1's
+  release procedure asked for exactly that). The documentation relies on the daily run only together
+  with a check that GitHub has not disabled the schedule (docs/RELEASING.md step 3).
+- F-22 / I-07 (completed): release tags must be signed with an SSH key listed in
+  `.github/release-signers` (principal `galbridge-release`; RSA 8192, fingerprint
+  `SHA256:Dh488r7YcvACwpsZov0/TASb3v3FRjz4//bwoQCyPwU`, published in SECURITY.md, README 2.1 and
+  docs/RELEASING.md). The CI job `release` accepted the signature of ANY GitHub account; it now
+  verifies the tag with `git verify-tag` against the key file of `main` (`tests/release/verify-tag.sh`:
+  an annotated tag object of that very name - a signed tag of another version pushed under this name
+  is refused -, the commit CI tested, a commit of `main`), puts the tag object in place from GitHub's
+  API when the checkout stored only a reference, and needs no fetch of its own (the old step's
+  `git fetch` had no credentials on a private repository). The archive is checked against an
+  allow-list of full paths (`tests/release/check-archive.php`, also on every push by the test suite)
+  instead of two diverging deny-lists. The maintainer runs both scripts before pushing the tag, because
+  Packagist publishes on push. README 2.1 gives a verify command that works for SSH signatures
+  (1.0.1's failed without `gpg.ssh.allowedSignersFile`), asks for the fingerprint comparison, drops
+  GitHub's unsigned "Source code" archive as an alternative and says that Composer does not verify
+  signatures (with the check of the installed commit against a verified tag).
+- F-23: SECURITY.md named two private reporting channels that did not work - GitHub's private
+  vulnerability reporting (unavailable while the repository is private) and an e-mail address that is
+  published nowhere. GitHub's private vulnerability reporting is now the only private channel, with a
+  fallback that discloses nothing (a public issue that only says a report is waiting) and the URL of
+  the current policy. docs/RELEASING.md has an ordered first-publication checklist (section 0): the
+  signed tag pushed while the repository is private, the repository made public, the Packagist
+  submission immediately after (vendor name checked first), then private vulnerability reporting,
+  secret scanning with push protection, rulesets for `main` and `refs/tags/v*`, the allowed actions
+  and two-factor authentication. 1.0.0 and 1.0.1 were never tagged: their sections below are marked
+  as not published, and the documentation no longer calls them published releases. README 2.1
+  installs the version of `galbridge.php` (one `v=` line; the version bump changes both).
+- F-24: the secret scanner excepted every current and future file below `tests/fixtures/vmail/` and
+  three whole harness files; it now excepts one named file - `tests/fixtures/vmail/seed.sql`, whose
+  canary values are meant to look like secrets - besides exact values (the throw-away passwords, the
+  `CHANGE_ME_*` placeholders, the public fingerprint of the release key) and git-ignored local
+  directories. A new rule reports a database DSN with a password (the `grants` DSN line, a copied
+  configuration), and job `security` proves with controls that the rule works and that a new file of
+  the fixture directory is scanned. `.gitguardian.yaml` names the same exceptions. `.gitignore` also
+  covers copies of the configuration file (`config.inc.php.*`, `config.inc.php~`, `*.bak`, `*.orig`),
+  `galbridge.inc.php`, `config/`, grants output saved at the top of a checkout (`/*.sql`) and `.env.*`.
+- F-25: the end-to-end and browser harness refuses to run Roundcube and Chromium as root (exit 2;
+  `GALBRIDGE_E2E_ALLOW_ROOT=1` for a disposable container), keeps Chromium's sandbox unless
+  `GALBRIDGE_UI_NO_SANDBOX=1` says otherwise, and never lets Selenium download a driver.
+  `tests/e2e/setup.sh` checks everything before it changes anything, never redirects a plugin link
+  that points elsewhere (unless `GALBRIDGE_E2E_REPLACE_LINK=1`, put back afterwards) and refuses a
+  configured Roundcube tree (`GALBRIDGE_E2E_ON_CONFIGURED_TREE=1`); the suites stop only the web
+  server they started and remove only a link they created. `tests/fixtures/vmail/load.sh` creates an
+  account for every host with the published test password only with `GALBRIDGE_LOAD_ANY_HOST=1`
+  (otherwise `localhost` and `127.0.0.1`) and has a `drop` mode; `tests/e2e/dovecot.sh` restores the
+  Dovecot service state it found and works without systemd.
+- F-34: CI fails on any skipped test (`--fail-on-skipped`); the two MariaDB-only cases of
+  `CliToolTest` no longer get a PostgreSQL case that could only be skipped. The refusal of
+  `bin/galbridge.sh` to run as root and the checks of `--allow-root` run as root in CI, from a
+  root-owned copy of the checkout (the group `root-aware`, which holds every `root` test - PHPUnit 13
+  selects nothing for `--group root,root-aware`). The end-to-end and browser suites run in CI (job
+  `e2e`: Debian 13 container, Roundcube 1.7.0 and the newest known 1.7.x from release tarballs
+  verified by SHA-256, MariaDB and PostgreSQL, Dovecot 2.4, Chromium, as an unprivileged user) and,
+  like `tests/e2e/matrix.sh`, count a skipped case as a failure (`--allow-skips` for a partial local
+  run); the first strict run brought E2E case 25 in line with the complete-or-refuse rule of F-31 (a
+  selection with IDs of another tenant is refused as a whole). The source guard covers every PHP file
+  of a release and string literals that name a restricted function (`Remediation2SourceGuardTest`);
+  the workflow, the threat model and docs/TESTING.md call it a lexical regression check, not a proof.
+- Upgrading (development and release): installations are not affected. Contributors: a local run of
+  the E2E or browser suites as root needs `GALBRIDGE_E2E_ALLOW_ROOT=1`; a MariaDB that relied on the
+  test role's `'%'` account (skip-name-resolve) gets the `'127.0.0.1'` account instead; new tests must
+  not skip in the full CI environment (root-only tests carry the groups `root` and `root-aware`), and
+  a DSN password of 16 or more characters in a test is reported by the secret scan (use short or
+  `CHANGE_ME_*` values). Releases must be signed with the SSH key of `.github/release-signers`; a
+  GPG-signed tag fails the release job.
+- F-35: an ambiguous switch was read as its built-in default while it disables every book – the
+  permissive value for `domain_book`, `domain_autocomplete`, `domain_export`, `global_autocomplete`,
+  `include_aliases` and `include_mailing_lists`, although the documentation called it "the
+  conservative value". It is now read as its restrictive value (`Config::RESTRICTIVE`: off, except
+  `hide_expired` and `mark_foreign_domains`), and `diag` shows that value (`off (INVALID)`). `diag`
+  describes the order of autocomplete suggestions for the core release in use: the ICU collator,
+  which lists entries with the `(domain)` marker first, sorts only from Roundcube 1.7.6; 1.7.0 –
+  1.7.5 sort with the C library locale of the user's language, which usually interleaves them by
+  the domain in the marker. Documentation and comments corrected: which configuration errors
+  disable every book (an ambiguous switch, the visibility column, the hidden lists), which only the
+  book they protect (a domain deny-list) and which refuse every connection (the refused roles); the
+  password plugin's DSN is read from its own file as well; the core method that renders recipient
+  inputs is `rcmail_sendmail::headers_output()` (there is no `compose_headers()`); `init()` reads the
+  action as core took it from the request, before the `startup` and `ready` hooks; the inventory of
+  core paths includes the vCard attachment of `vcard_attachments` and `rcmail::contact_exists()`;
+  the `autocomplete` key of a source entry is informational (Roundcube 1.7 does not read it);
+  examples use reserved domain names. Since F-17 a new own alias is taken over with the next reading
+  request – the documentation and `diag`'s `viewer cache` line still said it waited for
+  `galbridge_scope_ttl`.
+- F-36: the residual risks of documented decisions are now visible where code can see them. `diag`
+  warns for a `galbridge_imap_hosts` entry without a port (it covers every IMAP port of its host),
+  while `galbridge_debug` is on (also through `ROUNDCUBE_GALBRIDGE_DEBUG`), and – instead of an INFO –
+  while the configuration file lies in the plugin directory and `--url` was not given; with `--url`
+  it asks the web server for the configuration file in use (`config over HTTP`: FAIL when it is
+  served as text, nothing of the answer printed); on PostgreSQL it reports statement logging by
+  `pgaudit.log` or `auto_explain.log_min_duration`, which the grant set does not switch off. An
+  ERROR or WARN line that Roundcube refuses to write to the `galbridge` log (`per_user_logging`
+  without a log directory of the user, an unwritable file) goes to Roundcube's `errors` log (and to
+  PHP's error log as the last resort) instead of disappearing. `grants` and the documentation
+  recommend `config/galbridge.inc.php`; the unverifiable claim that iRedMail's nginx templates deny
+  both configuration locations is replaced by the `diag --url` check, and the `.htaccess`
+  precondition is exact (Apache 2.4, `AllowOverride AuthConfig` or `All`). The threat model no
+  longer says that a request loop cannot flood the log (the bound is one line per reason code per
+  request). The register of accepted risks gains GB-31 (the configuration file in the plugin
+  directory), GB-22 (debug texts, log volume, refused log lines) and GB-21 (no statement audit trail
+  of the PostgreSQL role), and documents group IDs, browser history and proxy logs (GB-04), the port
+  rule (GB-11), the log volume of a request loop (GB-26), the order of suggestions by core release
+  (GB-19) and the role's verifier as a secret, with the conditions under which a login handshake
+  can be recorded (GB-30).
+- Upgrading (documentation and accepted risks): no configuration or database step. `diag` without
+  `--url` warns while the configuration is `plugins/galbridge/config.inc.php` – move it to
+  `config/galbridge.inc.php` (README 2.3) or run `diag --url=`; a `config over HTTP` FAIL means the
+  web server hands out the database password: deny it and run `grants --reset-password`. Further new
+  WARN lines (an IMAP host entry without a port, debug on, a PostgreSQL audit extension) keep exit
+  code 0 unless `--strict` is given. With `per_user_logging`, GAL Bridge's ERROR and WARN lines of
+  requests without a user log directory now appear in Roundcube's `errors` log.
+- Database compatibility (found by running the suites against MariaDB 10.5 – 13.1, MySQL 8.0, 8.4,
+  9.7 and 26.10 and PostgreSQL 13 – 19): `grants --port=N` writes the port into the printed DSN
+  (`host:port`, `[IPv6]:port`; digits only, 1–65535; a repeated option is a usage error) – before, a
+  server on another port needed the printed DSN edited by hand, and the DSN as printed reached the
+  default server or none. With `--driver=mysql` it is refused together with the host `localhost`
+  (also the default host), which PHP reaches through the unix socket whatever the port: the message
+  says to use `--host=127.0.0.1`.
+- Database compatibility: on a MariaDB/MySQL server set up by `mariadb-install-db` (RHEL and its
+  rebuilds, FreeBSD, the official tarballs) every account can see the database `test` (and `test_*`)
+  – MariaDB 10.11 and later grant it to `PUBLIC`, older servers through blank-user rows of
+  `mysql.db` – and the plugin refused every role there (`role_too_broad`, "privileges outside the
+  directory (test)"): every book was gone. Such a database, on which the role holds no grant of its
+  own, is now a warning (`server_test_database`) and a `diag` FAIL of its own ("server-wide test
+  database", naming `mariadb-secure-installation` and the statements that remove it); any other
+  database the role can see, and a test database it holds a privilege on, stay refusals (SECURITY.md
+  register GB-23, THREAT_MODEL GB-23).
+- Database compatibility (test suite): every test that derives a DSN or a grants output from the test
+  DSN keeps its port; on MySQL without an active `mysql_native_password` plugin (8.4 and later by
+  default, 9.x has none) the tests apply the `--clear-text-password` form and
+  `tests/fixtures/vmail/load.sh` creates the test role with it (the verifier statement of the
+  template cannot run there); MySQL variants of the view checks (`EXPLAIN FORMAT=TREE` and
+  `EXPLAIN ANALYZE` instead of MariaDB's JSON), of the unfenced-view `diag` text (MySQL has no
+  `VIEWS.ALGORITHM`), of the clear-text guard tests (the output runs on MySQL) and of the role test
+  (MySQL roles, with and without a default role: without one `diag` fails on `role memberships`, the
+  write statements are refused; with one it fails on `write privileges` as well). A test whose engine
+  has no server in a run is skipped without a PHP warning.
+- Database compatibility (CI and documentation): a new CI job `databases` runs the PHPUnit suite
+  (PHP 8.4, the newest Roundcube 1.7.x, failing on any skipped test) against seven pairs of a
+  MariaDB or MySQL server and a PostgreSQL server – MariaDB 10.6, 10.11, 11.4 and 12.3, MySQL 8.0,
+  8.4 and 9.7, PostgreSQL 13 – 19 – in Docker service containers pinned by digest (one digest per
+  tag in the whole workflow, checked by `Remediation2CiTest`); a step checks that each leg's servers
+  report the flavour and the versions the leg names, and the fixture is loaded as in job `tests`.
+  README section 1 names the server versions tested with this version (MariaDB 10.5, 10.6, 10.11,
+  11.4, 11.8, 12.3 and 13.1, MySQL 8.0, 8.4, 9.7 and 26.10, PostgreSQL 13 – 19) and the CI legs; the
+  statements that MySQL was not tested (README 10, SECURITY.md register GB-23, THREAT_MODEL GB-14,
+  docs/TESTING.md section 7) now say what the suites verified there; docs/TESTING.md describes how
+  to run the database matrix, docs/RELEASING.md how to refresh the digest of every CI image.
+- Upgrading (database compatibility): no step. Scripts that called `grants` with a host of their own
+  and a non-default port can pass `--port` instead of editing the DSN. A server with the
+  `mariadb-install-db` test database gets its books back and a `diag` FAIL until the database is
+  removed (`mariadb-secure-installation`).
+- Final review (PRODUCT-1): the PostgreSQL role check (`RoleScope`) did not look at privileges of the
+  role in the directory database that are not on a relation: `CREATE` on another schema – or `USAGE`
+  on it, `EXECUTE` on a function, a foreign server or wrapper, a large object, default privileges –
+  left a hand-made role reported as clean, although README, SECURITY.md and the class documentation
+  promised its refusal (MariaDB/MySQL refused the same already). They are now privileges outside
+  (`role_too_broad`, named by `pg_identify_object()`, in the same words whatever the server's
+  language): `CREATE` on every other schema (also through `PUBLIC`), and every privilege of the
+  role recorded in `pg_shdepend` for this database that is not on a relation and not its `USAGE` on
+  its own schema; likewise a privilege on (or the ownership of) a tablespace or – PostgreSQL 15+ – a
+  configuration parameter (`GRANT SET` / `ALTER SYSTEM ON PARAMETER`), which the check of other
+  databases did not cover. The old default of PostgreSQL 14 and older – `CREATE` of `PUBLIC` on schema
+  `public` – stays a warning (`role_can_create`) and a `diag` FAIL, also when the role's own schema
+  is another one; granted to the role itself it is a privilege outside. `diag`'s CREATE line
+  (`schema public`) now judges the role's schema, schema `public`, every other schema and the
+  database, so its OK text ("no CREATE privilege (its schema, schema public, the other schemas and
+  the database)") is true. The roles of the grant sets of 1.0.0, 1.0.1 and this release hold none of
+  these (verified on PostgreSQL 13 – 19).
+- Final review (CLI-1): `diag --allow-root` loaded – and so ran as root – every per-host file of
+  `include_host_config`, also one named by an absolute or `../` path outside the configuration
+  directories, or one another account could write (the root check of `galbridge.sh` covers the
+  configuration directories and their `*.php`, `*.inc`, `*.sql` and `*.sh` files only). As root a
+  per-host file is now loaded only when it lies in one of the configuration directories that check
+  verified and is owned by root and writable by nobody else; any other is named in a WARN line ("not
+  loaded as root - ...: run diag as the web server user to check it") and never run. Runs as another
+  user are unchanged.
+- Final review (CLI-2): the header of the `--clear-text-password` output still said that the file
+  carries the password as its verifier and pointed at a note this output leaves out. It now says
+  that the password stands in clear text in the statements of the `[role]` block and that the output
+  must be kept private and deleted after use (a MariaDB/MySQL template whose header sentence is not
+  the shipped one is refused for that form); the documentation of the tool class and
+  `config.inc.php.dist` name this exception to "the SQL output never holds the password".
+- Final review (CI-1): the "least-privilege" PostgreSQL fixture access of the unprivileged E2E user
+  (job `e2e`, docs/TESTING.md section 2) was `pg_read_all_data` / `pg_write_all_data` – every table
+  of every database of the cluster, `pg_authid` included. `tests/fixtures/vmail/load.sh` now grants
+  an existing role named by `GALBRIDGE_FIXTURE_USER` the rows of the test database only (`CONNECT`
+  on it, `USAGE` on its schema `public`, `SELECT, INSERT, UPDATE, DELETE` on its tables, `USAGE,
+  SELECT, UPDATE` on its sequences) after every PostgreSQL load; it refuses a bad or reserved name,
+  the test role, a superuser and a member of those predefined roles. Job `e2e` creates the role
+  `e2e` and loads the fixture with it; the E2E helper probes its access on the fixture database.
+- Final review (CI-2): `.gitleaks.toml` excepts the git-ignored local directories (`tests/e2e/run/`,
+  `tmp/`, `vendor/`) by path, and gitleaks applies that exception to the history scan as well: a
+  secret committed there and removed again passed the CI scans. Job `security` now fails before the
+  history scan when any commit of any branch or tag ever had a file in those directories (the list
+  is checked against the exception).
+- Final review (DOCS-1 – DOCS-4): the documents told to give the plugin directory recursively to
+  owner and group `root:root`, which also takes the PHP group away from a configuration kept in
+  `plugins/galbridge/config.inc.php` (mode 0640: unreadable, every book disabled); they now say
+  `chown -R root plugins/galbridge && chmod -R go-w plugins/galbridge` (the owner only – the refusals
+  check the owner and the write bits, never the group). The `include_host_config` upgrade step and
+  the manual steps of both grant templates name the plugin's configuration file
+  (`config/galbridge.inc.php`, or `plugins/galbridge/config.inc.php` if that is the one in use –
+  never both) instead of creating a second file. The session inventories of SECURITY.md, README 6
+  and the threat model (GB-15) name `galbridge_env_noted` (the names of the `ROUNDCUBE_GALBRIDGE_*`
+  variables in effect, never their values), and the register row GB-24 says that the DSN is handed
+  to the driver rebuilt from the judged parts, not "exactly as written".
+- Upgrading (final review): no configuration or database step for a role made by a grant set. A
+  hand-made PostgreSQL role with such a privilege loses its books until the privilege is revoked
+  (`diag` names it under `privileges outside`). `diag --allow-root` with `include_host_config` can
+  show WARN lines for per-host files it no longer loads: run `diag` as the web server user to check
+  them. Development: `load.sh` takes the E2E user's PostgreSQL access from `GALBRIDGE_FIXTURE_USER`
+  on every PostgreSQL load (docs/TESTING.md section 2); it refuses a role that is still a member of
+  `pg_read_all_data` or `pg_write_all_data` (revoke that membership first).
+
+## [1.0.1] – 2026-11-24 – Not published (no tag was created; superseded by 1.0.2, the first tagged release)
 
 Remediation of the security audit of 1.0.0 (full source review with Anthropic's Mythos 5.2; it
 found no vulnerability of high or medium risk). The identifiers U-01 … U-11 (low risk) and I-01 …
@@ -201,7 +839,7 @@ Configuration values of the wrong type, which 1.0.0 silently cast, now disable e
 ### Fixed after the review of the remediation
 The changes above were reviewed again before the release – an independent review of the diff and a
 run of the CI steps as an unprivileged user with the Roundcube package of Packagist. What it found
-was fixed before 1.0.1 was published:
+was fixed before 1.0.1 was completed:
 
 - The split of `=?` (U-04) could be undone by Roundcube itself: with a `contactlist_name_template`
   other than `{name}` core deletes empty bracket pairs from a composed name, so a name written as
@@ -304,7 +942,7 @@ was fixed before 1.0.1 was published:
   `NormalizerTest`), E2E cases 31–35 and a browser test of the recipient widget; the E2E matrix
   covers Roundcube 1.7.0 and 1.7.7.
 
-## [1.0.0] – 2026-11-24
+## [1.0.0] – 2026-11-24 – Not published (no tag was created; superseded by 1.0.2, the first tagged release)
 
 First release: a read-only Global Address List for Roundcube 1.7.7, read from the SQL `vmail`
 database of iRedMail 1.8.x (MariaDB/MySQL and PostgreSQL editions). GAL Bridge was written from

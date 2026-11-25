@@ -25,3 +25,5 @@ $messages['toomanyids'] = 'Jednocześnie można użyć najwyżej $max kontaktów
 $messages['exportdisabled'] = 'Eksport tego katalogu jest niedozwolony.';
 $messages['exporttoolarge'] = 'Katalog ma więcej niż $max wpisów i nie można go wyeksportować w całości. Wyeksportuj wynik wyszukiwania albo grupę.';
 $messages['incomplete'] = 'Nie udało się odczytać z katalogu wszystkich wpisów tego zestawu, dlatego nie został on użyty. Spróbuj ponownie; jeśli problem się powtarza, skontaktuj się z administratorem.';
+$messages['pagetoolarge'] = 'Katalog pokazuje najwyżej $max wpisów na stronie. Poproś administratora o zmniejszenie rozmiaru strony.';
+$messages['listcapped'] = 'Przeglądać można tylko pierwsze $max wpisów katalogu. Pozostałe znajdziesz wyszukiwaniem.';

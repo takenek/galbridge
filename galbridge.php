@@ -34,7 +34,11 @@ use GalBridge\Log;
 
 class galbridge extends rcube_plugin
 {
-    public $task = 'mail|addressbook';
+    /**
+     * settings: only to drop galbridge_* user preferences when settings are saved
+     * (preferences_update) - nothing else runs there
+     */
+    public $task = 'mail|addressbook|settings';
 
     private rcmail $rc;
 
@@ -66,20 +70,39 @@ class galbridge extends rcube_plugin
         if (empty($this->rc->user->ID)) {
             return; // login page etc.
         }
+        if ($this->rc->task === 'settings') {
+            // no configuration, no texts, no database, no address book: only the preference guard
+            $this->add_hook('preferences_update', [$this, 'preferences_update']);
+            return;
+        }
 
+        // Roundcube logs error 527 for a plugin configuration file that does not load and goes on
+        // without it; whether the policy in effect is the administrator's is decided by
+        // Config::configUnreliable() (every book is disabled otherwise)
         $this->load_config();
         Log::setDebug($this->config()->bool('galbridge_debug'));
+        $this->noteEnvironment();
         $this->add_texts('localization/');
 
         $this->add_hook('addressbooks_list', [$this, 'addressbooks_list']);
         $this->add_hook('addressbook_get', [$this, 'addressbook_get']);
 
-        // the only readers of these two options (compose and the Redirect dialog render recipient
-        // inputs through rcmail_sendmail::compose_headers); never touch the database here
-        if ($this->rc->task === 'mail' && in_array((string) $this->rc->action, ['compose', 'bounce', 'autocomplete'], true)) {
+        // the only readers of these two options: compose and the Redirect dialog render recipient
+        // inputs through rcmail_sendmail::headers_output(), which calls
+        // rcmail_action::autocomplete_init() (it reads autocomplete_addressbooks and
+        // autocomplete_min_length), and mail/autocomplete reads autocomplete_addressbooks itself.
+        // Never touch the database here. The action as it is now (core took it from the request's
+        // _action; before the 'startup' and 'ready' hooks), in canonical form.
+        if ($this->rc->task === 'mail' && in_array($this->action(), ['compose', 'bounce', 'autocomplete'], true)) {
             $this->wireAutocomplete();
         }
-        if ($this->rc->task === 'addressbook' && (string) $this->rc->action === 'export') {
+        if ($this->rc->task === 'mail') {
+            // a directory entry is never a "known contact" (trusted sender, collected recipient)
+            $this->add_hook('contact_exists', [$this, 'contact_exists']);
+        }
+        if ($this->rc->task === 'addressbook') {
+            // for every action of the task: it acts only after a book refused an export of this
+            // request, so it depends on no spelling of the action and on no plugin that changes it
             $this->add_hook('addressbook_export', [$this, 'addressbook_export']);
         }
     }
@@ -95,7 +118,7 @@ class galbridge extends rcube_plugin
         return [
             'name' => 'GAL Bridge',
             'vendor' => 'TaKeN.PL Usługi Informatyczne Marek Królikowski',
-            'version' => '1.0.1',
+            'version' => '1.0.2',
             'license' => 'GPL-3.0-or-later',
             'uri' => 'https://github.com/takenek/galbridge',
         ];
@@ -105,7 +128,7 @@ class galbridge extends rcube_plugin
     {
         if ($this->config === null) {
             $prefs = !empty($this->rc->user->ID) ? (array) $this->rc->user->get_prefs() : [];
-            $this->config = new Config($this->rc->config, $prefs);
+            $this->config = new Config($this->rc->config, $prefs, null, $this->home);
         }
         return $this->config;
     }
@@ -123,6 +146,9 @@ class galbridge extends rcube_plugin
                         'name' => rcube::Q($book->name),      // core prints source names raw
                         'readonly' => true,
                         'groups' => $factory->grouping($book) !== 'none',
+                        // informational: Roundcube 1.7 does not read this key - autocomplete is
+                        // wired through autocomplete_addressbooks (wireAutocomplete()) and
+                        // enforced by the book itself (search(), list_groups())
                         'autocomplete' => $book->autocomplete,
                         'undelete' => false,
                     ];
@@ -167,7 +193,77 @@ class galbridge extends rcube_plugin
         return $p;
     }
 
+    /**
+     * No galbridge_* option is a user preference (Config ignores such preferences). Roundcube stores
+     * the current value of every option listed in dont_override in the preferences of a user who
+     * saves settings - for an option set through a ROUNDCUBE_GALBRIDGE_* variable that is the value,
+     * the DSN with the database password included. Every galbridge_* key is removed from what is saved
+     * and from the stored preferences it is merged with ('old'), so copies saved before disappear at
+     * the user's next save as well. Registered in the Settings task only (where dont_override is
+     * written); it touches nothing else.
+     */
+    public function preferences_update(array $p): array
+    {
+        foreach (['prefs', 'old'] as $part) {
+            if (is_array($p[$part] ?? null)) {
+                foreach (array_keys($p[$part]) as $key) {
+                    if (is_string($key) && str_starts_with($key, 'galbridge_')) {
+                        unset($p[$part][$key]);
+                    }
+                }
+            }
+        }
+        return $p;
+    }
+
+    /**
+     * rcmail::contact_exists() decides whether an address is a "known contact" (remote content of
+     * trusted senders, collected recipients). Its sources include the collected_senders and
+     * collected_recipients preferences without checking that they name a writable book - a
+     * preference that names a GAL Bridge book would make every directory address a trusted sender.
+     * The GAL Bridge books are removed from the sources (the order of the others is kept); nothing
+     * else changes, and nothing touches the database.
+     */
+    public function contact_exists(array $p): array
+    {
+        if (is_array($p['sources'] ?? null)) {
+            $p['sources'] = array_values(array_filter($p['sources'], static fn (mixed $s): bool => !Factory::isOwnId(is_scalar($s) ? (string) $s : '')));
+        }
+        return $p;
+    }
+
     // ------------------------------------------------------------------ internals
+
+    /**
+     * The environment of the web server's PHP (a PHP-FPM pool: env[...], clear_env) is not the one
+     * bin/galbridge.sh diag sees from a shell. The names of the ROUNDCUBE_GALBRIDGE_* variables that
+     * override options here are logged once per session - and again when the set changes - so the
+     * administrator can compare; never their values (one may be the DSN).
+     */
+    private function noteEnvironment(): void
+    {
+        $names = $this->config()->envOverrides();
+        $noted = implode(',', $names);
+        if ($names === []) {
+            unset($_SESSION['galbridge_env_noted']);
+            return;
+        }
+        if (($_SESSION['galbridge_env_noted'] ?? null) === $noted) {
+            return;
+        }
+        $_SESSION['galbridge_env_noted'] = $noted;
+        Log::info('config', 'env_override: ' . implode(', ', array_map(static fn (string $n): string => 'ROUNDCUBE_' . strtoupper($n), $names))
+            . ' override options of this plugin in the PHP of the web server (names only)');
+    }
+
+    /**
+     * The action of the request as it is NOW (another plugin may change it in the 'ready' hook, after
+     * init()), in the canonical form of Roundcube's dispatcher (Factory::canonicalAction()).
+     */
+    private function action(): string
+    {
+        return Factory::canonicalAction((string) $this->rc->action);
+    }
 
     private function factory(): ?Factory
     {
@@ -184,7 +280,7 @@ class galbridge extends rcube_plugin
                 $dsn = new Dsn(
                     $config->string('galbridge_db_dsn'),
                     $config,
-                    (string) $config->adminCore('db_dsnw', ''),
+                    (string) $config->coreValue('db_dsnw', ''),
                     $config->passwordPluginDsn(),
                 );
                 if (!$this->dsnWarned) {
@@ -200,6 +296,8 @@ class galbridge extends rcube_plugin
             }
             return $this->connection;
         };
+        $rc = $this->rc;
+        $ssl = $_SESSION['storage_ssl'] ?? null;
         $resolver = new ViewerResolver(
             $config,
             $connection,
@@ -208,10 +306,13 @@ class galbridge extends rcube_plugin
             (string) ($user->data['mail_host'] ?? ''),
             (string) ($_SESSION['storage_host'] ?? ''),
             (int) ($_SESSION['storage_port'] ?? 0),
+            is_string($ssl) ? strtolower($ssl) : '',
+            // asked when the cached Viewer is renewed: Roundcube's own IMAP connection with the
+            // credentials of the session (the one of this request when it is open already)
+            static fn (): ?bool => self::imapCheck($rc),
         );
-        $rc = $this->rc;
         $notify = function (string $label, array $vars) use ($rc): void {
-            if ((string) $rc->action === 'export' && in_array($label, self::EXPORT_REFUSALS, true)) {
+            if ($this->action() === 'export' && in_array($label, self::EXPORT_REFUSALS, true)) {
                 $this->exportRefused = true;
                 return;
             }
@@ -219,12 +320,40 @@ class galbridge extends rcube_plugin
                 $rc->output->show_message('galbridge.' . $label, 'warning', $vars);
             }
         };
-        return $this->factory = new Factory($config, $resolver, $connection, fn (string $l): string => $this->gettext($l), (string) $this->rc->action, $notify);
+        $sourceNamed = rcube_utils::get_input_string('_source', rcube_utils::INPUT_GPC) !== '';
+        return $this->factory = new Factory($config, $resolver, $connection, fn (string $l): string => $this->gettext($l), $this->action(), $notify, $sourceNamed);
+    }
+
+    /**
+     * Does the IMAP server still accept the credentials of this session? true when Roundcube's IMAP
+     * connection of this request is open (it logged in with them) or opens now
+     * (rcmail::storage_connect(): the session's host, port, TLS mode, user and password - a password
+     * the user changed through the password plugin is the session's new one); false when the server
+     * refuses them (ViewerResolver::imapVerdict()); null when that cannot be told.
+     */
+    public static function imapCheck(rcmail $rc): ?bool
+    {
+        try {
+            $storage = $rc->get_storage();
+            if ($storage->is_connected()) {
+                return true;
+            }
+            $connected = $rc->storage_connect();
+            $conn = $storage instanceof rcube_imap ? $storage->conn : null;
+            return ViewerResolver::imapVerdict($connected, $conn instanceof rcube_imap_generic ? $conn->errornum : null, $conn instanceof rcube_imap_generic ? $conn->resultcode : null);
+        } catch (\Throwable $e) {
+            Log::exception('viewer', $e);
+            return null;
+        }
     }
 
     private function wireAutocomplete(): void
     {
         $config = $this->config();
+        if ($config->booksDisabled()) {
+            // a configuration error disables every book: no source that cannot exist is wired
+            return;
+        }
         $ids = [];
         foreach (Entitlements::enabledIds($config) as $id) {
             if ($config->bool($id === BookDefinition::DOMAIN ? 'galbridge_domain_autocomplete' : 'galbridge_global_autocomplete')) {

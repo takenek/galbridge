@@ -10,6 +10,11 @@ tests/fixtures/vmail/load.sh uses:
     MYSQL_ADMIN   default "mariadb -u root", then "mysql -u root"
     PSQL_ADMIN    default "psql -U postgres -h 127.0.0.1 -w", then "runuser -u postgres -- psql"
 
+or the least-privilege access of an unprivileged user (docs/TESTING.md section 2): the rows of the
+test database only - MariaDB/MySQL a grant ON <db>.*, PostgreSQL the grants that load.sh makes for
+GALBRIDGE_FIXTURE_USER. The access is probed on the fixture database itself, so no other database
+has to be open to that user.
+
 Only a local database whose name contains "test" is ever touched. Without administrator access the
 calling case is skipped (Unavailable).
 
@@ -49,7 +54,7 @@ def _run(cmd, stdin=None):
     return r.returncode, r.stdout.decode('utf-8', 'replace'), r.stderr.decode('utf-8', 'replace')
 
 
-def _admin(engine):
+def _admin(engine, database):
     if engine in _WORKING:
         return _WORKING[engine]
     configured = os.environ.get('PSQL_ADMIN' if engine == 'pgsql' else 'MYSQL_ADMIN', '').strip()
@@ -61,7 +66,7 @@ def _admin(engine):
         candidates = [['mariadb', '-u', 'root'], ['mysql', '-u', 'root']]
     _WORKING[engine] = None
     for cmd in candidates:
-        probe = cmd + (['-X', '-q', '-t', '-d', 'postgres', '-c', 'SELECT 1'] if engine == 'pgsql' else ['-N', '-e', 'SELECT 1'])
+        probe = cmd + (['-X', '-q', '-t', '-d', database, '-c', 'SELECT 1'] if engine == 'pgsql' else ['-N', '-e', 'SELECT 1'])
         code, out, _ = _run(probe)
         if code == 0 and out.strip() == '1':
             _WORKING[engine] = cmd
@@ -72,7 +77,7 @@ def _admin(engine):
 def execute(dsn, statements):
     """Run SQL statements (portable, without a trailing semicolon) against the fixture database."""
     engine, database = target(dsn)
-    cmd = _admin(engine)
+    cmd = _admin(engine, database)
     if cmd is None:
         raise Unavailable('no administrator access to the %s test server (MYSQL_ADMIN / PSQL_ADMIN as for load.sh)' % engine)
     sql = ';\n'.join(statements) + ';\n'
@@ -87,8 +92,7 @@ def execute(dsn, statements):
 @contextlib.contextmanager
 def altered(dsn, apply, revert):
     """Apply statements for the duration of the block; the revert statements always run afterwards."""
-    target(dsn)
-    if _admin(target(dsn)[0]) is None:
+    if _admin(*target(dsn)) is None:
         raise Unavailable('no administrator access to the fixture database (MYSQL_ADMIN / PSQL_ADMIN as for load.sh)')
     try:
         execute(dsn, apply)

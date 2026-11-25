@@ -96,7 +96,9 @@ CREATE INDEX IF NOT EXISTS idx_forwardings_is_list ON forwardings (is_list);
 CREATE INDEX IF NOT EXISTS idx_forwardings_is_alias ON forwardings (is_alias);
 
 -- The view the plugin reads instead of the table (mirror of SQL/grants.*.sql): no private
--- forwarding target (is_forwarding rows) is reachable through it.
+-- forwarding target (is_forwarding rows) is reachable through it. (The fence of the server
+-- templates - TEMPTABLE with LIMIT, security_barrier with OFFSET 0 - keeps conditions of a query sent
+-- with the role's credentials away from the table; SQLite has no roles, so the mirror needs none.)
 CREATE VIEW IF NOT EXISTS galbridge_forwardings AS
     SELECT address, forwarding, domain, is_alias, is_list, is_maillist, active
       FROM forwardings

@@ -1,42 +1,81 @@
 # GAL Bridge - continuous integration.
 #
 # Design notes (the decisions behind them, their owner and review date: SECURITY.md, section
-# "Accepted risks and design decisions"):
+# "Accepted risks and design decisions"); tests/Unit/Remediation2CiTest.php checks the statements
+# marked [checked] against the jobs below:
 # - third-party actions are pinned to full commit SHAs (tag in the comment); update both together
-#   (Dependabot does, .github/dependabot.yml);
+#   (Dependabot does, .github/dependabot.yml). Every job runs on the pinned image ubuntu-24.04 (the
+#   job "e2e" in a Debian 13 container pinned by digest) [checked];
 # - read-only token (permissions: contents: read), no secrets, no pull_request_target: untrusted
-#   pull requests run with the same minimal rights as pushes;
-# - composer.lock is git-ignored (a plugin, not an application), so every PHP version resolves its
-#   own dependency set - what an installation on that PHP version gets. Every job writes the set it
-#   resolved (package versions and the SHA-256 of the generated composer.lock) to its job summary
-#   and "composer audit" checks it, so a run can be reproduced and reviewed afterwards;
+#   pull requests run with the same minimal rights as pushes. Nothing here needs more: no step
+#   fetches with credentials of its own, so every step works on a private and on a public
+#   repository alike;
+# - Composer is downloaded from getcomposer.org in the version COMPOSER_VERSION and runs only after
+#   its SHA-256 matched COMPOSER_SHA256 (setup-php installs no tools) [checked];
+# - composer.lock is git-ignored (a plugin, not an application), so every job resolves its own
+#   dependency set - what an installation on that PHP version gets. EVERY job that resolves one
+#   writes it to its job summary (name, version and source commit of each package, the runner image,
+#   PHP and Composer versions, the SHA-256 of the lock) and keeps its composer.lock as an artifact for
+#   90 days, "composer-lock-<job>-...": the release verification installs from it
+#   (docs/RELEASING.md step 2) [checked];
+# - "composer audit" checks every resolved set with Composer's defaults: a security advisory, a
+#   malware filter-list match or an abandoned package fails it, and so does an advisory source that
+#   cannot be reached [checked]. Composer also refuses to RESOLVE releases with advisories or on a
+#   malware list. Only in job "tests", only for "composer install", only the blocking of releases
+#   with ADVISORIES is switched off (COMPOSER_POLICY_ADVISORIES_BLOCK=0): the leg installs exactly
+#   what it asks for, and the audit after it names the advisory instead of a silent older release.
+#   The malware and abandoned-package policies keep Composer's defaults everywhere [checked];
 # - Roundcube is not a runtime dependency of the plugin. GAL Bridge supports the whole 1.7 branch,
 #   so the suite runs against the OLDEST release (1.7.0) and against the NEWEST 1.7.x that
-#   Packagist has on the day of the run (constraint "~1.7.0"; "composer require --no-update" edits
-#   composer.json on the runner only, after "composer validate"). The daily run therefore tests a
-#   new patch release of the core without any change here. The advisory check is made with the
-#   newest core - a security advisory against it fails the run on purpose; the 1.7.0 leg proves
-#   compatibility only (its core has known advisories, which is why nobody should run it).
-#   Composer (2.9 and later) by itself leaves releases with a security advisory out of the
-#   dependency resolution: the pinned 1.7.0 would then not install at all, and for "~1.7.0" an
-#   older release would silently replace a newest one that has an advisory. COMPOSER_NO_BLOCKING
-#   switches that off for the PHPUnit job only - it installs exactly what it asks for, and
-#   "composer audit" reports advisories (in the 1.7.0 legs for every package but that core). The
-#   other jobs keep Composer's blocking of releases with advisories;
-# - MariaDB 11.8 and PostgreSQL 17 are throw-away service containers on the job's ephemeral runner
-#   and hold only the TEST-ONLY fixture (tests/fixtures/vmail). They are pinned by digest: refresh
-#   tag and digest together (docs/RELEASING.md). "ci-throwaway" is their administrator password
-#   (named in .gitleaks.toml and .gitguardian.yaml); the read-only role the tests connect with is
-#   created by load.sh from the plugin's own SQL/grants.*.sql, so every run proves that the
-#   documented grants are sufficient. The fixture is loaded with the client inside each container
-#   (docker exec): client and server versions always match;
+#   Packagist has on the day of the run (constraint "~1.7.0"). composer.json is edited on the runner
+#   only ("composer require --no-update", "composer config"); the committed manifest is validated in
+#   job "phpstan" before any such edit. The scheduled run tests a new patch release of the core
+#   without any change here (while GitHub keeps the schedule enabled: docs/RELEASING.md step 3
+#   checks it). Later 1.7.x releases fix security problems of 1.7.0, not all with advisory
+#   entries: the pinned 1.7.0 core is the ONLY audit exception (policy.advisories.ignore with the
+#   constraint 1.7.0, written in the 1.7.0 legs only); an advisory against the newest core fails
+#   the run on purpose [checked];
+# - the database servers (MariaDB 11.8 and PostgreSQL 17 in job "tests", the pairs of job
+#   "databases") are throw-away service containers on the job's ephemeral runner and hold only the
+#   TEST-ONLY fixture (tests/fixtures/vmail). They are pinned by digest, one digest per tag in the
+#   whole file: refresh tag and digest together (docs/RELEASING.md) [checked]. "ci-throwaway" is
+#   their administrator password (named in .gitleaks.toml and .gitguardian.yaml); the read-only role
+#   the tests connect with is created by load.sh from the plugin's own SQL/grants.*.sql, so every
+#   run proves that the documented grants are sufficient. The fixture is loaded with the client
+#   inside each container (docker exec): client and server versions always match;
+# - job "databases": the PHPUnit suite (PHP 8.4, the newest Roundcube 1.7.x) against the other
+#   supported server versions of README section 1 - MariaDB 10.6, 10.11, 11.4 and 12.3, MySQL 8.0,
+#   8.4 and 9.7, PostgreSQL 13 - 19 -, one MariaDB or MySQL server and one PostgreSQL server per
+#   leg, so that every database test has its server and --fail-on-skipped holds as in job "tests".
+#   A step checks that the servers report the flavour and the versions the leg names. On MySQL 8.4
+#   and later, which do not load mysql_native_password, load.sh gives the test role the form of
+#   "grants --clear-text-password" [checked];
+# - PHPUnit fails on any skipped test (--fail-on-skipped) [checked]: a missing engine, Roundcube
+#   tree or administrator access fails the run instead of hiding tests. The unprivileged run leaves
+#   out the group "root"; the PHP 8.4 legs run the group "root-aware" (which holds every "root"
+#   test) once more as root from a root-owned copy - the refusal of bin/galbridge.sh to run as root
+#   and the checks of --allow-root are tested in CI [checked];
+# - job "e2e": the end-to-end and browser suites against Roundcube 1.7.0 and the newest 1.7.x this
+#   version knows (release tarballs verified by SHA-256), MariaDB and PostgreSQL, Dovecot 2.4 and
+#   Chromium from Debian 13, run as an unprivileged user whose fixture access is the rows of the
+#   test database only (PostgreSQL: GALBRIDGE_FIXTURE_USER of load.sh, no cluster-wide predefined
+#   role); a skipped case fails it [checked];
 # - job "security": the history and the tree are scanned for secrets with a gitleaks release that
-#   is verified by its SHA-256 before it runs (.gitleaks.toml). The static security checks of the
-#   production code (no process execution, dynamic code, deserialisation or file writes; SQL in one
-#   class) are part of the PHPUnit suite (tests/Unit/SourceGuardTest.php) and so run in every leg;
-# - job "release" (tags only): the tag must be annotated and carry a signature that GitHub verifies,
-#   it must point to a commit of main, and its version must be the one in galbridge.php and
-#   CHANGELOG.md (docs/RELEASING.md). Which key may sign is not pinned here (docs/RELEASING.md).
+#   is verified by its SHA-256 before it runs (.gitleaks.toml), after controls that prove the
+#   scanner reports a planted key, a DSN with a password and a new fixture file, and after a check
+#   that no commit of any branch or tag ever had a file in the git-ignored directories that
+#   .gitleaks.toml excepts by path (gitleaks applies that exception to the history scan as well)
+#   [checked]. The PHPUnit suite also runs tests/Unit/SourceGuardTest.php - a lexical regression check: it reports direct uses
+#   of the listed functions, operators and superglobals, and (Remediation2SourceGuardTest) string
+#   literals naming those functions, in every PHP file of a release; indirect forms (callables built
+#   at run time, variable calls) are not proven absent - review and PHPStan cover them;
+# - job "release" (tags only): the tag must be an annotated tag object of that name, signed with an
+#   SSH key listed in .github/release-signers on main (and verified by GitHub), point to a commit of
+#   main and name the version of galbridge.php and CHANGELOG.md, and its archive must hold exactly
+#   the allow-listed paths (tests/release/verify-tag.sh, tests/release/check-archive.php - the
+#   maintainer runs both before pushing the tag). The workflow comes from the tagged commit, so the
+#   job catches mistakes; the independent check is the administrator's comparison of the key
+#   fingerprint (README 2.1, SECURITY.md "Release signing key") [checked].
 name: CI
 
 on:
@@ -45,7 +84,9 @@ on:
     tags: ['v*']
   pull_request:
     branches: [main]
-  # Recheck resolved dependencies daily, even without source changes (05:23 UTC).
+  # Recheck resolved dependencies and the newest Roundcube 1.7.x daily, even without source
+  # changes (05:23 UTC). GitHub disables a schedule after 60 days without repository activity:
+  # docs/RELEASING.md step 3 checks that it is still active.
   schedule:
     - cron: '23 5 * * *'
   workflow_dispatch:
@@ -61,10 +102,16 @@ defaults:
   run:
     shell: bash
 
+env:
+  # https://getcomposer.org/download/<version>/composer.phar and its published SHA-256
+  # (composer.phar.sha256sum next to it); refresh both together (docs/RELEASING.md step 3)
+  COMPOSER_VERSION: '2.10.3'
+  COMPOSER_SHA256: 7a2d379d5b8ffdaa028580ef26494c36d2feef4b178d3dd1473a4dbc5e17c8d6
+
 jobs:
   tests:
     name: PHPUnit (PHP ${{ matrix.php }}, Roundcube ${{ matrix.core }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -80,8 +127,6 @@ jobs:
             core: '1.7.0'
     env:
       CORE: ${{ matrix.core }}
-      # install what is asked for; advisories are reported by "composer audit" (see the notes above)
-      COMPOSER_NO_BLOCKING: '1'
     services:
       mariadb:
         image: mariadb:11.8@sha256:e1d5495f445654134f226f55a41ce0da227116f6f27f283101f405c794d841fc
@@ -113,50 +158,65 @@ jobs:
       - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
           php-version: ${{ matrix.php }}
-          tools: composer:v2
+          tools: none
           extensions: mbstring, intl, dom, pdo, pdo_mysql, pdo_pgsql, pdo_sqlite, sqlite3
           coverage: none
 
-      # The core that roundcube/plugin-installer pulls in: the oldest or the newest release of the
-      # supported 1.7 branch (a runner-local edit of composer.json, never committed).
-      - name: Select the Roundcube release
-        run: composer require --dev --no-update --no-interaction "roundcube/roundcubemail:$CORE"
+      - name: Install Composer (verified by its SHA-256)
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/composer.phar" "https://getcomposer.org/download/$COMPOSER_VERSION/composer.phar"
+          echo "$COMPOSER_SHA256  $RUNNER_TEMP/composer.phar" | sha256sum --check --strict -
+          sudo install -m 0755 "$RUNNER_TEMP/composer.phar" /usr/local/bin/composer
+          test "$(command -v composer)" = /usr/local/bin/composer
+          composer --version | grep -F "Composer version $COMPOSER_VERSION "
 
+      # The core that roundcube/plugin-installer pulls in: the oldest or the newest release of the
+      # supported 1.7 branch (runner-local edits of composer.json, never committed). In the 1.7.0
+      # legs that core - and only that core, in that version - is exempt from the audit.
+      - name: Select the Roundcube release
+        run: |
+          composer require --dev --no-update --no-interaction "roundcube/roundcubemail:$CORE"
+          if [ "$CORE" = '1.7.0' ]; then
+            composer config --json --merge policy.advisories.ignore '{"roundcube/roundcubemail": {"constraint": "1.7.0", "reason": "compatibility leg: the oldest release of the supported branch, never run in production"}}'
+          fi
+
+      # Install exactly what was asked for (advisory blocking off for this step only; the malware
+      # and abandoned-package policies stay on); the audit below names any advisory.
       - name: Install dependencies
+        env:
+          COMPOSER_POLICY_ADVISORIES_BLOCK: '0'
         run: composer install --no-interaction --no-progress
 
-      # What this leg really tested: kept with the run (job summary) for later review.
+      # This leg's installed packages, including dev and transitive dependencies and the core:
+      # advisories (except the pinned 1.7.0 core in its own legs), malware lists, abandoned packages.
+      - name: Audit dependencies
+        run: composer audit --no-interaction --format=plain
+
+      # What this leg really tested: kept with the run (job summary and artifact) for later review
+      # and for the release verification (docs/RELEASING.md step 2).
       - name: Record the resolved dependency set
         env:
           PHP_LEG: ${{ matrix.php }}
         run: |
           {
-            echo "### Resolved dependencies (PHP $PHP_LEG, Roundcube constraint $CORE)"
+            echo "### Resolved dependencies (job tests, PHP $PHP_LEG, Roundcube constraint $CORE)"
             echo
-            echo '```'
-            composer show --no-interaction --format=text | awk '{ print $1, $2 }'
-            echo '```'
+            echo "Runner image ${ImageOS:-?} ${ImageVersion:-?}; PHP $(php -r 'echo PHP_VERSION;'); $(composer --version 2>/dev/null | head -n 1)"
+            echo
+            echo '| package | version | source commit |'
+            echo '|---|---|---|'
+            jq -r '(.packages + (."packages-dev" // []))[] | "| \(.name) | \(.version) | \(.source.reference // .dist.reference // "-") |"' composer.lock
             echo
             echo "composer.lock SHA-256: \`$(sha256sum composer.lock | cut -d' ' -f1)\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # Audit this PHP version's installed packages, including dev and transitive dependencies and
-      # the newest core.
-      - name: Audit dependencies
-        if: matrix.core != '1.7.0'
-        run: composer audit --no-interaction --format=plain
-
-      # The 1.7.0 legs: that core has advisories (fixed by later 1.7.x), every OTHER package of the
-      # leg - its own dependency set - must have none.
-      - name: Audit dependencies (all but the pinned 1.7.0 core)
-        if: matrix.core == '1.7.0'
-        run: |
-          composer audit --no-interaction --format=json > "$RUNNER_TEMP/audit.json" || true
-          others='[(.advisories // {}) | to_entries[] | select(.key != "roundcube/roundcubemail") | .value | length] | add // 0'
-          if ! jq -e "($others) == 0" "$RUNNER_TEMP/audit.json" > /dev/null; then
-            jq '(.advisories // {}) | with_entries(select(.key != "roundcube/roundcubemail"))' "$RUNNER_TEMP/audit.json" || cat "$RUNNER_TEMP/audit.json"
-            exit 1
-          fi
+      - name: Keep the composer.lock of this leg
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: composer-lock-tests-php${{ matrix.php }}-${{ matrix.core == '1.7.0' && '1.7.0' || 'newest' }}
+          path: composer.lock
+          retention-days: 90
+          if-no-files-found: error
 
       # The git-sourced package reports "1.7-git" in its constants, so the release is verified
       # through Composer's installed metadata. logs/ and temp/ mirror a real installation.
@@ -176,13 +236,15 @@ jobs:
 
       # load.sh (re)creates galbridge_vmail_test on each server, loads the upstream iRedMail 1.8.11
       # schema and seed.sql, creates the read-only role from SQL/grants.*.sql and prints its DSN.
-      # MYSQL_ADMIN / PSQL_ADMIN are exported for the whole job: the role tests in
-      # tests/Integration/DsnPolicyTest.php create their extra roles through the same variables
-      # (without them those tests are skipped, not failed).
+      # The tests connect over TCP from the runner, i.e. from the Docker bridge, not from loopback:
+      # GALBRIDGE_LOAD_ANY_HOST=1 creates the role's '%' account as well (on a throw-away server
+      # only). MYSQL_ADMIN / PSQL_ADMIN are exported for the whole job: the role and fixture tests
+      # create roles and rows through them, and the suite fails on a test skipped without them.
       - name: Load the TEST-ONLY vmail fixture
         env:
           MARIADB_CID: ${{ job.services.mariadb.id }}
           POSTGRES_CID: ${{ job.services.postgres.id }}
+          GALBRIDGE_LOAD_ANY_HOST: '1'
         run: |
           export MYSQL_ADMIN="docker exec -i $MARIADB_CID mariadb -u root -pci-throwaway"
           export PSQL_ADMIN="docker exec -i -e PGPASSWORD=ci-throwaway $POSTGRES_CID psql -U postgres"
@@ -197,7 +259,28 @@ jobs:
           cat "$out/dsn.env" >> "$GITHUB_ENV"
 
       - name: PHPUnit (SQLite mirror, MariaDB 11.8, PostgreSQL 17)
-        run: vendor/bin/phpunit
+        run: vendor/bin/phpunit --fail-on-skipped --exclude-group root
+
+      # The refusal of bin/galbridge.sh to run as root and what --allow-root checks need root and a
+      # tree root alone can change: a root-owned copy of the checkout (vendor/ included) and a
+      # root-owned Roundcube directory over it. The group "root-aware" holds every "root" test.
+      - name: PHPUnit as root (the refusal and the --allow-root checks of bin/galbridge.sh)
+        if: matrix.php == '8.4'
+        run: |
+          r="$(sudo mktemp -d /opt/galbridge-root.XXXXXX)"
+          sudo cp -a "$GITHUB_WORKSPACE/." "$r/"
+          sudo chown -R root:root "$r"
+          sudo chmod -R go-w "$r"
+          sudo chmod 0755 "$r"
+          rc="$r-rc"
+          sudo mkdir -m 0755 "$rc" "$rc/logs" "$rc/temp"
+          for d in program config plugins SQL; do
+            sudo ln -s "$r/vendor/roundcube/roundcubemail/$d" "$rc/$d"
+          done
+          sudo ln -s "$r/vendor" "$rc/vendor"
+          cd "$r"
+          sudo --preserve-env=GALBRIDGE_TEST_MYSQL_DSN,GALBRIDGE_TEST_PGSQL_DSN,MYSQL_ADMIN,PSQL_ADMIN \
+            env GALBRIDGE_RC="$rc" "$(command -v php)" vendor/bin/phpunit --fail-on-skipped --group root-aware
 
       - name: PHP syntax check
         run: |
@@ -207,9 +290,182 @@ jobs:
           done < <(find lib tests -type f -name '*.php' -print0; find localization -type f -name '*.inc' -print0; printf '%s\0' galbridge.php bin/galbridge.sh config.inc.php.dist)
           exit "$status"
 
+  # The PHPUnit suite against the other supported database servers (README section 1): each leg
+  # pairs a MariaDB or MySQL server with a PostgreSQL server, so every database test has its server
+  # and a skipped test fails the leg as in job "tests". PHP 8.4 and the newest Roundcube 1.7.x, as
+  # in job "phpstan". The images are pinned by digest (docs/RELEASING.md step 3); "leg" names the
+  # flavour and the tags of its two images, and a step checks that the servers report them.
+  databases:
+    name: Database servers (${{ matrix.leg }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - leg: mariadb-10.6-postgres-13
+            flavour: mariadb
+            server: mariadb:10.6@sha256:75079c0fb96894284d00d035bc4bef94234814f6f6c28b79877bc69d3285d760
+            postgres: postgres:13@sha256:4689940c683801b4ab839ab3b0a0a3555a5fe425371422310944e89eca7d8068
+          - leg: mariadb-10.11-postgres-14
+            flavour: mariadb
+            server: mariadb:10.11@sha256:e5fe75b2b9de0eb9f6f9a4d9c97272fb3a7480e389ccd487a786bab2a12cc0d7
+            postgres: postgres:14@sha256:c0e9c0e9bac7e4c1834b698217a03ee5c708de30d313c84a506972de0e24b059
+          - leg: mariadb-11.4-postgres-15
+            flavour: mariadb
+            server: mariadb:11.4@sha256:a8992b5e5404d11e03c54a31d0c1bdea3fd116d283aa6d1a627551f29045309b
+            postgres: postgres:15@sha256:91b9edc40277faf94bc1e3d7ae621b185fa70f3099b94309c4731a8296114870
+          - leg: mariadb-12.3-postgres-16
+            flavour: mariadb
+            server: mariadb:12.3@sha256:4aaf88b3106382c8c18e49f0cec60267be618fc22f858c4503afb2a2555afed3
+            postgres: postgres:16@sha256:07abc3f43c9395b0bdbbab36bc25ddb0e8d83cd4fcafb5fb7d6abe14ff156dd8
+          - leg: mysql-8.0-postgres-18
+            flavour: mysql
+            server: mysql:8.0@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
+            postgres: postgres:18@sha256:c699303802144847d238196173655dbbecf7a96aeca1565f2b02eb671a1f0b6b
+          - leg: mysql-8.4-postgres-19
+            flavour: mysql
+            server: mysql:8.4@sha256:8c233bad33d520a7aae1c1e619c3a9775f4a1ba2d463d692fada04ec7f40be00
+            postgres: postgres:19@sha256:aaa10f7ba7328b4a221a6c3184d83eef885bd16bf1f6de864757863156b0a4d1
+          - leg: mysql-9.7-postgres-17
+            flavour: mysql
+            server: mysql:9.7@sha256:1f2ca53a9e94ff9f1f313099fa7dc7fb2f72e180ca5b2ef83574031e451bbbf1
+            postgres: postgres:17@sha256:87c8b42f423b45d5247e6aa8fdb2e7762fec164c68a50fe3eb07e7bfcaf4dbcf
+    env:
+      FLAVOUR: ${{ matrix.flavour }}
+      LEG: ${{ matrix.leg }}
+    # The health checks connect over TCP: the temporary server that each image's entry point runs
+    # while it initialises the data directory listens on its socket only.
+    services:
+      mysql:
+        image: ${{ matrix.server }}
+        env:
+          MARIADB_ROOT_PASSWORD: ci-throwaway
+          MYSQL_ROOT_PASSWORD: ci-throwaway
+        ports:
+          - '3306:3306'
+        options: >-
+          --health-cmd="${{ matrix.flavour == 'mariadb' && 'healthcheck.sh --connect --innodb_initialized' || 'mysqladmin ping -h 127.0.0.1 --silent' }}"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+      postgres:
+        image: ${{ matrix.postgres }}
+        env:
+          POSTGRES_PASSWORD: ci-throwaway
+        ports:
+          - '5432:5432'
+        options: >-
+          --health-cmd="pg_isready -U postgres -h 127.0.0.1"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.4'
+          tools: none
+          extensions: mbstring, intl, dom, pdo, pdo_mysql, pdo_pgsql, pdo_sqlite, sqlite3
+          coverage: none
+
+      - name: Install Composer (verified by its SHA-256)
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/composer.phar" "https://getcomposer.org/download/$COMPOSER_VERSION/composer.phar"
+          echo "$COMPOSER_SHA256  $RUNNER_TEMP/composer.phar" | sha256sum --check --strict -
+          sudo install -m 0755 "$RUNNER_TEMP/composer.phar" /usr/local/bin/composer
+          test "$(command -v composer)" = /usr/local/bin/composer
+          composer --version | grep -F "Composer version $COMPOSER_VERSION "
+
+      - name: Select the newest Roundcube 1.7.x
+        run: composer require --dev --no-update --no-interaction "roundcube/roundcubemail:~1.7.0"
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress
+
+      # Each leg resolves its dependency set on its own.
+      - name: Audit dependencies
+        run: composer audit --no-interaction --format=plain
+
+      - name: Record the resolved dependency set
+        run: |
+          {
+            echo "### Resolved dependencies (job databases, $LEG, PHP 8.4, Roundcube constraint ~1.7.0)"
+            echo
+            echo "Runner image ${ImageOS:-?} ${ImageVersion:-?}; PHP $(php -r 'echo PHP_VERSION;'); $(composer --version 2>/dev/null | head -n 1)"
+            echo
+            echo '| package | version | source commit |'
+            echo '|---|---|---|'
+            jq -r '(.packages + (."packages-dev" // []))[] | "| \(.name) | \(.version) | \(.source.reference // .dist.reference // "-") |"' composer.lock
+            echo
+            echo "composer.lock SHA-256: \`$(sha256sum composer.lock | cut -d' ' -f1)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the composer.lock of this leg
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: composer-lock-databases-${{ matrix.leg }}
+          path: composer.lock
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Assemble the Roundcube directory for integration tests
+        run: |
+          installed="$(php -r 'require "vendor/autoload.php"; echo Composer\InstalledVersions::getPrettyVersion("roundcube/roundcubemail");')"
+          echo "Roundcube $installed"
+          [[ "$installed" =~ ^1\.7\.[0-9]+$ ]]
+          rc="$RUNNER_TEMP/rc"
+          mkdir -p "$rc/logs" "$rc/temp"
+          for d in program config plugins SQL; do
+            ln -s "$GITHUB_WORKSPACE/vendor/roundcube/roundcubemail/$d" "$rc/$d"
+          done
+          ln -s "$GITHUB_WORKSPACE/vendor" "$rc/vendor"
+          test -f "$rc/program/lib/Roundcube/bootstrap.php"
+          echo "GALBRIDGE_RC=$rc" >> "$GITHUB_ENV"
+
+      # As in job "tests", with the administrator client of the leg's image ("mariadb" or "mysql").
+      # The servers must report the flavour and the versions the leg names (a mistyped digest shows
+      # here). On MySQL 8.4 and later, which do not load mysql_native_password, load.sh gives the
+      # test role the form of "grants --clear-text-password" (it says so on stderr).
+      - name: Load the TEST-ONLY vmail fixture
+        env:
+          MYSQL_CID: ${{ job.services.mysql.id }}
+          POSTGRES_CID: ${{ job.services.postgres.id }}
+          GALBRIDGE_LOAD_ANY_HOST: '1'
+        run: |
+          export MYSQL_ADMIN="docker exec -i $MYSQL_CID $FLAVOUR -u root -pci-throwaway"
+          export PSQL_ADMIN="docker exec -i -e PGPASSWORD=ci-throwaway $POSTGRES_CID psql -U postgres"
+          printf 'MYSQL_ADMIN=%s\nPSQL_ADMIN=%s\n' "$MYSQL_ADMIN" "$PSQL_ADMIN" >> "$GITHUB_ENV"
+          read -r -a my <<< "$MYSQL_ADMIN"
+          read -r -a pg <<< "$PSQL_ADMIN"
+          version="$("${my[@]}" -N -B -e 'SELECT VERSION()')"
+          pgversion="$("${pg[@]}" -X -A -t -c 'SHOW server_version')"
+          echo "$LEG: $version; PostgreSQL $pgversion" | tee -a "$GITHUB_STEP_SUMMARY"
+          leg_matches() {
+            [[ "$LEG" =~ ^(mariadb|mysql)-([0-9]+\.[0-9]+)-postgres-([0-9]+)$ ]] || return 1
+            [ "${BASH_REMATCH[1]}" = "$FLAVOUR" ] || return 1
+            [[ "$version" == "${BASH_REMATCH[2]}".* && "$pgversion" == "${BASH_REMATCH[3]}".* ]] || return 1
+            if [ "$FLAVOUR" = mariadb ]; then [[ "$version" == *-MariaDB* ]]; else [[ "$version" != *MariaDB* ]]; fi
+          }
+          leg_matches || { echo "the servers of this leg are not what $LEG names (flavour $FLAVOUR)" >&2; exit 1; }
+          out="$RUNNER_TEMP/fixture"
+          mkdir -p "$out"
+          tests/fixtures/vmail/load.sh mysql | tee "$out/mysql.txt"
+          tests/fixtures/vmail/load.sh pgsql | tee "$out/pgsql.txt"
+          grep -h -E '^GALBRIDGE_TEST_(MYSQL|PGSQL)_DSN=(mysql|pgsql)://' "$out/mysql.txt" "$out/pgsql.txt" > "$out/dsn.env"
+          # both engines or fail: a missing DSN would silently reduce the suite to the SQLite mirror
+          test "$(wc -l < "$out/dsn.env")" -eq 2
+          cat "$out/dsn.env" >> "$GITHUB_ENV"
+
+      - name: PHPUnit (SQLite mirror and the two servers of this leg)
+        run: vendor/bin/phpunit --fail-on-skipped --exclude-group root
+
   phpstan:
     name: PHPStan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -219,11 +475,20 @@ jobs:
       - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
           php-version: '8.4'
-          tools: composer:v2
+          tools: none
           extensions: mbstring, intl, dom, pdo, pdo_mysql, pdo_pgsql, pdo_sqlite, sqlite3
           coverage: none
 
-      # The manifest must stay valid for Packagist; validated before the CI-only pin edits it.
+      - name: Install Composer (verified by its SHA-256)
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/composer.phar" "https://getcomposer.org/download/$COMPOSER_VERSION/composer.phar"
+          echo "$COMPOSER_SHA256  $RUNNER_TEMP/composer.phar" | sha256sum --check --strict -
+          sudo install -m 0755 "$RUNNER_TEMP/composer.phar" /usr/local/bin/composer
+          test "$(command -v composer)" = /usr/local/bin/composer
+          composer --version | grep -F "Composer version $COMPOSER_VERSION "
+
+      # The committed manifest must stay valid for Packagist: validated before the runner-local
+      # edit of composer.json below (the other jobs make the same kind of edit and do not repeat it).
       - name: Validate composer.json
         run: composer validate --strict --no-check-lock --no-interaction
 
@@ -233,9 +498,31 @@ jobs:
       - name: Install dependencies
         run: composer install --no-interaction --no-progress
 
-      # Audit the independently resolved dependency set used by PHPStan.
+      # The independently resolved dependency set used by PHPStan.
       - name: Audit dependencies
         run: composer audit --no-interaction --format=plain
+
+      - name: Record the resolved dependency set
+        run: |
+          {
+            echo '### Resolved dependencies (job phpstan, PHP 8.4, Roundcube constraint ~1.7.0)'
+            echo
+            echo "Runner image ${ImageOS:-?} ${ImageVersion:-?}; PHP $(php -r 'echo PHP_VERSION;'); $(composer --version 2>/dev/null | head -n 1)"
+            echo
+            echo '| package | version | source commit |'
+            echo '|---|---|---|'
+            jq -r '(.packages + (."packages-dev" // []))[] | "| \(.name) | \(.version) | \(.source.reference // .dist.reference // "-") |"' composer.lock
+            echo
+            echo "composer.lock SHA-256: \`$(sha256sum composer.lock | cut -d' ' -f1)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the composer.lock of this job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: composer-lock-phpstan
+          path: composer.lock
+          retention-days: 90
+          if-no-files-found: error
 
       # phpstan.neon.dist scans Roundcube at /opt/rcrun/1.7.7 (its documented default location for a
       # tree of the supported branch); the scanned tree must be a 1.7.x release (rcube_addressbook's
@@ -260,7 +547,7 @@ jobs:
 
   coding-style:
     name: PHP-CS-Fixer
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -271,9 +558,17 @@ jobs:
       - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
           php-version: '8.4'
-          tools: composer:v2
+          tools: none
           extensions: mbstring, intl, dom, pdo, pdo_mysql, pdo_pgsql, pdo_sqlite, sqlite3
           coverage: none
+
+      - name: Install Composer (verified by its SHA-256)
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/composer.phar" "https://getcomposer.org/download/$COMPOSER_VERSION/composer.phar"
+          echo "$COMPOSER_SHA256  $RUNNER_TEMP/composer.phar" | sha256sum --check --strict -
+          sudo install -m 0755 "$RUNNER_TEMP/composer.phar" /usr/local/bin/composer
+          test "$(command -v composer)" = /usr/local/bin/composer
+          composer --version | grep -F "Composer version $COMPOSER_VERSION "
 
       - name: Select the newest Roundcube 1.7.x
         run: composer require --dev --no-update --no-interaction "roundcube/roundcubemail:~1.7.0"
@@ -285,13 +580,35 @@ jobs:
       - name: Audit dependencies
         run: composer audit --no-interaction --format=plain
 
+      - name: Record the resolved dependency set
+        run: |
+          {
+            echo '### Resolved dependencies (job coding-style, PHP 8.4, Roundcube constraint ~1.7.0)'
+            echo
+            echo "Runner image ${ImageOS:-?} ${ImageVersion:-?}; PHP $(php -r 'echo PHP_VERSION;'); $(composer --version 2>/dev/null | head -n 1)"
+            echo
+            echo '| package | version | source commit |'
+            echo '|---|---|---|'
+            jq -r '(.packages + (."packages-dev" // []))[] | "| \(.name) | \(.version) | \(.source.reference // .dist.reference // "-") |"' composer.lock
+            echo
+            echo "composer.lock SHA-256: \`$(sha256sum composer.lock | cut -d' ' -f1)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the composer.lock of this job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: composer-lock-coding-style
+          path: composer.lock
+          retention-days: 90
+          if-no-files-found: error
+
       # Check only: the configured rules are not risky, but CI never rewrites code.
       - name: PHP-CS-Fixer (dry run)
         run: vendor/bin/php-cs-fixer fix --dry-run --diff --using-cache=no --config=.php-cs-fixer.dist.php
 
   security:
     name: Secret scan (gitleaks)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       GITLEAKS_VERSION: 8.30.1
@@ -329,6 +646,56 @@ jobs:
             exit 1
           fi
 
+      # The rule of .gitleaks.toml for a database DSN with a password: a copied configuration line
+      # with a password like the one "grants" generates (40 random hex digits) must be reported by it.
+      - name: Control - a DSN with a password is detected
+        run: |
+          mkdir -p "$RUNNER_TEMP/control-dsn/config"
+          password="$(head -c 20 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+          printf "<?php\n\$config['galbridge_db_dsn'] = 'mysql://galbridge:%s@127.0.0.1/vmail';\n" "$password" > "$RUNNER_TEMP/control-dsn/config/galbridge.inc.php"
+          if "$RUNNER_TEMP/gitleaks/gitleaks" dir --no-banner --redact --config .gitleaks.toml \
+               --report-format json --report-path "$RUNNER_TEMP/control-dsn.json" "$RUNNER_TEMP/control-dsn"; then
+            echo "gitleaks did not report a DSN with a password" >&2
+            exit 1
+          fi
+          jq -e 'any(.[]; .RuleID == "galbridge-dsn-password")' "$RUNNER_TEMP/control-dsn.json" > /dev/null
+
+      # The exceptions name files: the same planted key in a NEW file of the fixture directory is
+      # reported, in the one excepted fixture file it is not (run from the control directory, as the
+      # tree scan below runs from the checkout, so the paths are matched as written there).
+      - name: Control - the exceptions name files, not the fixture directory
+        run: |
+          c="$RUNNER_TEMP/control-paths"
+          mkdir -p "$c/tests/fixtures/vmail"
+          {
+            printf -- '-----BEGIN %s PRIVATE KEY-----\n' RSA
+            head -c 480 /dev/urandom | base64 -w 64
+            printf -- '-----END %s PRIVATE KEY-----\n' RSA
+          } > "$c/tests/fixtures/vmail/new-fixture.sql"
+          cp "$c/tests/fixtures/vmail/new-fixture.sql" "$c/tests/fixtures/vmail/seed.sql"
+          cd "$c"
+          if "$RUNNER_TEMP/gitleaks/gitleaks" dir --no-banner --redact --config "$GITHUB_WORKSPACE/.gitleaks.toml" \
+               --report-format json --report-path "$RUNNER_TEMP/control-paths.json" .; then
+            echo "gitleaks did not report a new fixture file" >&2
+            exit 1
+          fi
+          files="$(jq -r '.[].File' "$RUNNER_TEMP/control-paths.json" | sed 's#^\./##' | sort -u)"
+          echo "reported: $files"
+          test "$files" = 'tests/fixtures/vmail/new-fixture.sql'
+
+      # .gitleaks.toml excepts the git-ignored local directories by path, and gitleaks applies a path
+      # exception to the history scan too: it holds only while no commit of any branch or tag has
+      # ever had a file there (also one that was removed again). The list is the directory entries
+      # of that exception (Remediation2CiTest keeps the two equal).
+      - name: The directories the scanner skips were never committed
+        run: |
+          committed="$(git log --all --format= --name-only -- tests/e2e/run/ tmp/ vendor/ | sed '/^$/d' | sort -u)"
+          if [ -n "$committed" ]; then
+            printf '%s\n' "$committed" >&2
+            echo "these files were committed under a git-ignored directory that .gitleaks.toml excepts by path: the history scan below would not see a secret in them - remove them from the history, or narrow the exception" >&2
+            exit 1
+          fi
+
       - name: Scan the history
         run: |
           "$RUNNER_TEMP/gitleaks/gitleaks" git --no-banner --redact --config .gitleaks.toml .
@@ -337,22 +704,137 @@ jobs:
         run: |
           "$RUNNER_TEMP/gitleaks/gitleaks" dir --no-banner --redact --config .gitleaks.toml .
 
+  e2e:
+    name: E2E and browser (Roundcube ${{ matrix.core }}, ${{ matrix.db }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    # Debian 13: Dovecot 2.4 (tests/e2e/dovecot.sh), PHP 8.4, MariaDB, PostgreSQL 17 and Chromium
+    # from the signed Debian archive. The image is pinned by digest (docs/RELEASING.md step 3).
+    container:
+      image: debian:13-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+    strategy:
+      fail-fast: false
+      matrix:
+        # the oldest release of the supported branch and the newest one this version knows
+        # (Tool::LATEST_KNOWN_ROUNDCUBE; tests/e2e/matrix.sh runs the same cores locally)
+        core: ['1.7.0', '1.7.7']
+        db: [mysql, pgsql]
+    env:
+      CORE: ${{ matrix.core }}
+      DB: ${{ matrix.db }}
+    steps:
+      - name: Install the test stack (Debian packages)
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          # no service starts while packages are installed; they are started explicitly below
+          printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d
+          chmod 0755 /usr/sbin/policy-rc.d
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git openssl procps python3 python3-requests \
+            python3-selenium chromium chromium-driver php8.4-cli php8.4-curl php8.4-intl php8.4-mbstring php8.4-mysql \
+            php8.4-pgsql php8.4-sqlite3 php8.4-xml mariadb-server postgresql-17 dovecot-imapd
+          rm -f /usr/sbin/policy-rc.d
+          {
+            echo '### Test stack (Debian packages)'
+            echo '```'
+            dpkg-query -W php8.4-cli mariadb-server postgresql-17 dovecot-imapd chromium chromium-driver python3-selenium python3-requests
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The official release tarball (with vendor/), checked against its SHA-256 (the digest of the
+      # GitHub release asset; 1.7.7 also verified with its GPG signature, docs/TESTING.md section 1).
+      - name: Download Roundcube (verified by its SHA-256)
+        run: |
+          case "$CORE" in
+            1.7.0) sum=a34c366da2b7a24ad4a6382b4bb9a677cb581ee08bfc6304d0a9a721098e7a98 ;;
+            1.7.7) sum=cc9358a27cda7b3e62c4b6758897bc0f132fe58420d02b2e842be7e10a1dd3fb ;;
+            *) echo "no SHA-256 pinned for Roundcube $CORE" >&2; exit 1 ;;
+          esac
+          curl -sSfL -o /tmp/roundcube.tar.gz "https://github.com/roundcube/roundcubemail/releases/download/$CORE/roundcubemail-$CORE-complete.tar.gz"
+          echo "$sum  /tmp/roundcube.tar.gz" | sha256sum --check --strict -
+
+      # The suites run as the unprivileged user e2e: their own copy of the checkout and of Roundcube.
+      # Root does what an administrator does once: databases, fixture, Dovecot, and the least-privilege
+      # fixture access of e2e (rows of the test database only; docs/TESTING.md section 2): MariaDB a
+      # grant on the database, PostgreSQL the grants load.sh makes in the test database for
+      # GALBRIDGE_FIXTURE_USER (the role first, then the load; nothing reloads the fixture later).
+      - name: Prepare the servers and the unprivileged user
+        run: |
+          useradd --create-home --shell /bin/bash e2e
+          cp -a "$GITHUB_WORKSPACE" /home/e2e/galbridge
+          chown -R e2e:e2e /home/e2e/galbridge
+          runuser -u e2e -- tar -xzf /tmp/roundcube.tar.gz -C /home/e2e
+          test -f "/home/e2e/roundcubemail-$CORE/program/include/iniset.php"
+          service mariadb start
+          pg_ctlcluster 17 main start
+          tests/fixtures/vmail/load.sh mysql
+          mariadb -e "CREATE USER 'e2e'@'localhost' IDENTIFIED VIA unix_socket; GRANT SELECT, INSERT, UPDATE, DELETE ON galbridge_vmail_test.* TO 'e2e'@'localhost';"
+          runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 -c 'CREATE ROLE e2e LOGIN'
+          PSQL_ADMIN="runuser -u postgres -- psql" GALBRIDGE_FIXTURE_USER=e2e tests/fixtures/vmail/load.sh pgsql
+          if pgrep -x dovecot > /dev/null; then echo "Dovecot runs before the install" >&2; exit 1; fi
+          tests/e2e/dovecot.sh install
+
+      - name: Control - the harness refuses to run Roundcube and Chromium as root
+        run: |
+          cd /home/e2e/galbridge
+          for suite in tests/e2e/test_e2e.py tests/ui/test_ui.py; do
+            code=0
+            python3 "$suite" --rc "/home/e2e/roundcubemail-$CORE" --php php8.4 --db "$DB" > "/tmp/refusal.txt" 2>&1 || code=$?
+            cat /tmp/refusal.txt
+            test "$code" -eq 2
+            grep -q 'refusing to run Roundcube and Chromium as root' /tmp/refusal.txt
+          done
+          test ! -e "/home/e2e/roundcubemail-$CORE/plugins/galbridge"
+
+      - name: E2E suite (unprivileged, a skipped case fails)
+        run: |
+          cd /home/e2e/galbridge
+          runuser -u e2e -- env HOME=/home/e2e MYSQL_ADMIN=mariadb PSQL_ADMIN=psql \
+            python3 tests/e2e/test_e2e.py --rc "/home/e2e/roundcubemail-$CORE" --php php8.4 --db "$DB" --port 8181
+
+      # Docker's default seccomp profile does not allow Chromium's sandbox; the container is
+      # disposable, so the suite is told to switch it off (it never does that on its own).
+      - name: Browser suite (unprivileged, a skipped case fails)
+        run: |
+          cd /home/e2e/galbridge
+          runuser -u e2e -- env HOME=/home/e2e MYSQL_ADMIN=mariadb PSQL_ADMIN=psql GALBRIDGE_UI_NO_SANDBOX=1 \
+            python3 tests/ui/test_ui.py --rc "/home/e2e/roundcubemail-$CORE" --php php8.4 --db "$DB" --port 8195
+
+      - name: Remove the Dovecot test server (the state before the install comes back)
+        if: always()
+        run: |
+          tests/e2e/dovecot.sh remove
+          if pgrep -x dovecot > /dev/null; then echo "Dovecot still runs although it did not before the install" >&2; exit 1; fi
+
   release:
     name: Release checks (signed tag, versions, archive)
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      # the whole history: the tagged commit must be one of main (below)
+      # the whole history and every branch (refs/remotes/origin/main is needed below); the
+      # checkout fetches with the job's token, so nothing has to be fetched again - a fetch of its
+      # own would have no credentials on a private repository
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
 
-      # The tag object is read through the API: a checkout stores an annotated tag as a plain
-      # reference to its commit. "verified" is GitHub's own check of the signature against the keys
-      # of the tagger's account.
-      - name: The tag is annotated and its signature is verified
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.4'
+          tools: none
+          coverage: none
+
+      # GitHub's own view: an annotated tag whose signature it verifies (the key must be registered
+      # as a signing key of the tagger's account). The checkout may store an annotated tag as a plain
+      # reference to its commit: the tag object is then put in place from what the API returns, and
+      # accepted only when it hashes to the object name the tag reference has.
+      - name: The tag is an annotated tag object and GitHub verifies its signature
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
@@ -360,15 +842,29 @@ jobs:
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           read -r type sha < <(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.type + " " + .object.sha')
           test "$type" = tag || { echo "$TAG is a lightweight tag: releases are signed, annotated tags (docs/RELEASING.md)" >&2; exit 1; }
-          verified="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$sha" --jq '.verification.verified')"
-          test "$verified" = true || { echo "the signature of $TAG is not verified by GitHub (docs/RELEASING.md)" >&2; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/git/tags/$sha" > "$RUNNER_TEMP/tag.json"
+          test "$(jq -r '.verification.verified' "$RUNNER_TEMP/tag.json")" = true \
+            || { echo "the signature of $TAG is not verified by GitHub (docs/RELEASING.md)" >&2; exit 1; }
+          if [ "$(git cat-file -t "refs/tags/$TAG" 2>/dev/null)" != tag ] || [ "$(git rev-parse "refs/tags/$TAG")" != "$sha" ]; then
+            jq -j '.verification.payload, .verification.signature' "$RUNNER_TEMP/tag.json" > "$RUNNER_TEMP/tag.object"
+            if [ "$(git hash-object -t tag "$RUNNER_TEMP/tag.object")" != "$sha" ]; then
+              printf '\n' >> "$RUNNER_TEMP/tag.object"
+            fi
+            test "$(git hash-object -t tag "$RUNNER_TEMP/tag.object")" = "$sha" \
+              || { echo "the tag object of $TAG could not be rebuilt from the API" >&2; exit 1; }
+            git hash-object -t tag -w "$RUNNER_TEMP/tag.object" > /dev/null
+            git update-ref "refs/tags/$TAG" "$sha"
+          fi
 
-      # A signature that GitHub verifies proves only that SOME account signed: the tag must at least
-      # name a commit that is already part of main (reviewed, pushed by the maintainers).
-      - name: The tagged commit is part of main
+      # The pinned keys: .github/release-signers as it is on main (not as the tagged commit has it),
+      # the tag object's own name, the commit that was checked out and tested, a commit of main.
+      - name: The tag is signed with a release key and names a commit of main
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "the tagged commit is not part of main (docs/RELEASING.md)" >&2; exit 1; }
+          git show refs/remotes/origin/main:.github/release-signers > "$RUNNER_TEMP/release-signers"
+          tests/release/verify-tag.sh "$TAG" --commit "$(git rev-parse HEAD)" --require-main --signers "$RUNNER_TEMP/release-signers" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: The tag, the plugin and the changelog name the same version
         env:
@@ -378,15 +874,9 @@ jobs:
           grep -q -F "'version' => '$version'" galbridge.php
           grep -q -F "## [$version]" CHANGELOG.md
 
-      # .gitattributes keeps tests, CI and tooling files out of the archive that installations use
+      # .gitattributes keeps tests, CI and tooling files out of the archive that installations use;
+      # every path must be on the allow-list of tests/release/check-archive.php
       - name: The release archive holds the plugin and nothing else
-        run: |
-          git archive --format=tar HEAD | tar -t > "$RUNNER_TEMP/archive.txt"
-          for f in galbridge.php composer.json LICENSE README.md SECURITY.md CHANGELOG.md .htaccess config.inc.php.dist \
-                   bin/galbridge.sh lib/autoload.php SQL/grants.mysql.sql SQL/grants.postgres.sql localization/en_US.inc; do
-            grep -q -x -F "$f" "$RUNNER_TEMP/archive.txt" || { echo "missing in the archive: $f" >&2; exit 1; }
-          done
-          if grep -E '^(tests/|\.github/|\.git[a-z]+|phpunit\.xml|phpstan\.neon|\.php-cs-fixer|STAGE_|FINAL_SECURITY_REPORT|DOSTARCZONE)' "$RUNNER_TEMP/archive.txt"; then
-            echo "the archive contains development or audit files" >&2
-            exit 1
-          fi
+        env:
+          TAG: ${{ github.ref_name }}
+        run: php tests/release/check-archive.php "refs/tags/$TAG"

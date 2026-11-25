@@ -12,10 +12,17 @@
 # directory and run the suite against it:  matrix.sh  with the entries below changed, or directly
 #   python3 tests/e2e/test_e2e.py --rc /path/to/roundcubemail-1.7.N --php php8.4 --db mysql
 #
-# Requirements: tests/e2e/dovecot.sh install; tests/fixtures/vmail/load.sh mysql|pgsql.
+# Requirements: tests/e2e/dovecot.sh install; tests/fixtures/vmail/load.sh mysql|pgsql. Run it as an
+# unprivileged user (it refuses root, like the suites: GALBRIDGE_E2E_ALLOW_ROOT=1 in a disposable
+# container only) with the fixture access of docs/TESTING.md section 2. A combination is green only
+# when its run exits with 0 and reports "0 failed, 0 skipped": a skipped case proves nothing.
 #
 # @license GPL-3.0-or-later
 set -u
+if [ "$(id -u)" -eq 0 ] && [ "${GALBRIDGE_E2E_ALLOW_ROOT:-}" != 1 ]; then
+  echo "refusing to run Roundcube and Chromium as root (they run with the caller's rights); use an unprivileged user, or GALBRIDGE_E2E_ALLOW_ROOT=1 in a disposable container" >&2
+  exit 2
+fi
 BASE="${1:-/opt/rcrun}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LOG="$HERE/run/matrix-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$LOG"
@@ -42,10 +49,12 @@ for r in "${runs[@]}"; do
   [ -d "$rc" ] || { echo "MISSING $rc (not present)" | tee -a "$LOG/summary.txt"; total=$((total+1)); bad=$((bad+1)); continue; }
   command -v "$php" >/dev/null || { echo "MISSING $php (not installed)" | tee -a "$LOG/summary.txt"; total=$((total+1)); bad=$((bad+1)); continue; }
   name="$tag-$php-$db"
-  python3 "$HERE/test_e2e.py" --rc "$rc" --php "$php" --db "$db" --port 8181 > "$LOG/$name.log" 2>&1
+  code=0
+  python3 "$HERE/test_e2e.py" --rc "$rc" --php "$php" --db "$db" --port 8181 > "$LOG/$name.log" 2>&1 || code=$?
   res=$(tail -1 "$LOG/$name.log")
   printf '%-24s %s\n' "$name" "$res" | tee -a "$LOG/summary.txt"
-  total=$((total+1)); case "$res" in *" 0 failed"*) ;; *) bad=$((bad+1));; esac
+  total=$((total+1))
+  case "$res" in *" 0 failed, 0 skipped"*) [ "$code" -eq 0 ] || bad=$((bad+1)) ;; *) bad=$((bad+1)) ;; esac
 done
 echo "MATRIX: $((total-bad))/$total combinations green (logs: $LOG)" | tee -a "$LOG/summary.txt"
 [ "$total" -gt 0 ] && [ "$bad" -eq 0 ]

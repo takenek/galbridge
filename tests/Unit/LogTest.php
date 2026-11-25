@@ -250,7 +250,9 @@ final class LogTest extends TestCase
         $line = $this->lines[0];
         self::assertStringNotContainsString("\n", $line);
         self::assertStringNotContainsString("\r", $line);
-        self::assertSame('ERROR search INFO forged: failed ERROR galbridge: FAKE ENTRY  more ke y=va  lue FAKE ENTRY user=7', $line);
+        // a context value with blanks is quoted and a key is a code constant (second verification
+        // pass, F-29): the forged text cannot pose as further key=value pairs
+        self::assertSame('ERROR search INFO forged: failed ERROR galbridge: FAKE ENTRY  more ke_y="va  lue FAKE ENTRY" user=7', $line);
     }
 
     public function testContextValuesAreSanitized(): void
@@ -261,7 +263,7 @@ final class LogTest extends TestCase
             'term' => "jan\u{202E}x",
             'list' => ['a', "b\nc"],
         ]);
-        self::assertSame('WARN db: connect failed dsn=pgsql://galbridge:***@db.example/vmail raw=[BINARY-REDACTED] term=jan x list=[a, b c]', $this->lines[0]);
+        self::assertSame('WARN db: connect failed dsn=pgsql://galbridge:***@db.example/vmail raw=[BINARY-REDACTED] term="jan x" list="[a, b c]"', $this->lines[0]);
         self::assertStringNotContainsString('hunter2', $this->lines[0]);
     }
 
@@ -274,7 +276,7 @@ final class LogTest extends TestCase
         Log::setDebug(true);
         self::assertTrue(Log::isDebug());
         Log::debug('search', 'shown', ['term' => "jan\nkowalski"]);
-        self::assertSame(['DEBUG search: shown term=jan kowalski'], $this->lines);
+        self::assertSame(['DEBUG search: shown term="jan kowalski"'], $this->lines);
 
         Log::setDebug(false);
         Log::debug('search', 'hidden again');
@@ -344,7 +346,7 @@ final class LogTest extends TestCase
     {
         Log::once('warning', "op\nINFO x", "code\r\nERROR y", "msg\nWARN z", ['k' => "v\nw"]);
         self::assertCount(1, $this->lines);
-        self::assertSame('WARN op INFO x: code  ERROR y: msg WARN z k=v w', $this->lines[0]);
+        self::assertSame('WARN op INFO x: code  ERROR y: msg WARN z k="v w"', $this->lines[0]);
     }
 
     public function testResetOnce(): void

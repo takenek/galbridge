@@ -8,22 +8,30 @@
 -- (PostgreSQL edition). GAL Bridge creates no tables of its own; this file creates the role and
 -- ONE view (galbridge_forwardings, see below).
 --
--- Prefer "plugins/galbridge/bin/galbridge.sh grants --driver=pgsql": it prints this file with a
--- fresh random password (as a SCRAM-SHA-256 verifier - the statements never contain the password
--- itself), your role name and database, and the matching DSN line. To use the file by hand:
--- 1. Replace CHANGE_ME_RANDOM_PASSWORD with a long random password, e.g.
+-- Prefer the generated output, made by root from the Roundcube directory (README 2.2):
+--   umask 077; plugins/galbridge/bin/galbridge.sh grants --allow-root --driver=pgsql > /root/galbridge-grants.sql
+-- It is this file with a fresh random password (as a SCRAM-SHA-256 verifier - the statements never
+-- contain the password itself), your role name and database; the matching DSN line goes to the
+-- terminal (standard error), never into the file. Review the file as README 2.2 describes and run
+-- it as the postgres superuser, connected to the vmail database. Root's shell reads the file, so
+-- the postgres account needs no access to it, and -X keeps the commands of a ~/.psqlrc out:
+--   runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d vmail < /root/galbridge-grants.sql
+-- (iRedMail's pg_hba.conf ends with "host all all 0.0.0.0/0 md5": password logins are accepted from
+-- every IPv4 address that listen_addresses lets in, for every database. README 2.2 gives the lines
+-- that limit this role to the vmail database and, for a remote Roundcube host, to TLS - insert them
+-- BEFORE that line: pg_hba.conf uses the first matching line.)
+-- To use the file by hand, take it from the verified release archive (README 2.1), never from a
+-- directory that another account can write:
+-- 1. Copy it where only root can read it,  install -m 0600 grants.postgres.sql /root/galbridge-grants.sql,
+--    and replace CHANGE_ME_RANDOM_PASSWORD there with a long random password, e.g.
 --      openssl rand -base64 33 | tr -d '/+=' | cut -c1-40
 --    Written by hand it is in clear text in the statement; the settings at the top of the
---    script keep this transaction out of the server log whatever the server-wide logging settings
---    say (an audit extension such as pgaudit has settings of its own - check it, or use the
---    generated output).
--- 2. Run as the postgres superuser, connected to the vmail database:
---      su - postgres -c "psql -v ON_ERROR_STOP=1 -d vmail -f /path/to/grants.postgres.sql"
---    (iRedMail's pg_hba.conf ends with "host all all 0.0.0.0/0 md5": password logins are accepted from
---    every IPv4 address that listen_addresses lets in. For a remote Roundcube host insert
---    "hostssl vmail galbridge <ip>/32 scram-sha-256" and "hostnossl vmail galbridge 0.0.0.0/0 reject"
---    BEFORE that line - pg_hba.conf uses the first matching line.)
--- 3. Put the DSN into plugins/galbridge/config.inc.php, e.g.
+--    transaction keep it out of the server log and out of pg_stat_statements whatever the
+--    server-wide settings say (an audit extension such as pgaudit has settings of its own - check
+--    it, or use the generated output).
+-- 2. Run it as shown above (runuser ... < /root/galbridge-grants.sql) and delete the file.
+-- 3. Put the DSN into the plugin's configuration file, config/galbridge.inc.php (README 2.3; or
+--    plugins/galbridge/config.inc.php if that is the one in use - never both), e.g.
 --      $config['galbridge_db_dsn'] = 'pgsql://galbridge:PASSWORD@127.0.0.1/vmail';
 --    and check it:  sudo -u www-data plugins/galbridge/bin/galbridge.sh diag
 --
@@ -48,13 +56,20 @@ $$;
 
 BEGIN;
 
+-- Unqualified names below are the iRedMail tables of schema public (and the built-in objects of
+-- pg_catalog, which PostgreSQL always looks at first) - never those of a schema that an earlier
+-- search_path setting of the session would add.
+SET LOCAL search_path = public;
 -- The statements of this transaction are not written to the server log - not as statements
 -- (log_statement), not when one of them fails (log_min_error_statement), not as slow statements
--- and not as a sample of them (log_min_duration_sample, PostgreSQL 13 and later). Superuser
--- settings, valid until COMMIT / ROLLBACK only.
+-- and not as a sample of them (log_min_duration_sample, PostgreSQL 13 and later) - and
+-- pg_stat_statements, when the server loads it, keeps no text of them (it records utility
+-- statements such as CREATE ROLE by default; without the module the setting is a placeholder).
+-- Superuser settings, valid until COMMIT / ROLLBACK only.
 SET LOCAL log_statement = 'none';
 SET LOCAL log_min_error_statement = 'panic';
 SET LOCAL log_min_duration_statement = -1;
+SET LOCAL pg_stat_statements.track_utility = off;
 DO $$
 BEGIN
     IF current_setting('server_version_num')::int >= 130000 THEN
@@ -72,7 +87,7 @@ BEGIN
     IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'galbridge') THEN
         RAISE EXCEPTION 'role "galbridge" already exists: nothing was changed (see --reset-password and --grants-only of the grants tool)';
     END IF;
-    CREATE ROLE galbridge WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT PASSWORD 'CHANGE_ME_RANDOM_PASSWORD';
+    CREATE ROLE galbridge WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT PASSWORD 'CHANGE_ME_RANDOM_PASSWORD';
 END
 $$;
 -- [/role]
@@ -106,22 +121,58 @@ $$;
 GRANT CONNECT ON DATABASE vmail TO galbridge;
 GRANT USAGE ON SCHEMA public TO galbridge;
 
+-- No object of its own: the role may create nothing in the vmail database. Up to PostgreSQL 14
+-- every role could create objects in schema public (PUBLIC held CREATE there, and a database
+-- created then keeps it after an upgrade) - this role too, whose password lies in a file the web
+-- server reads, and any other role of the database could plant a function or an operator there
+-- that a statement of GAL Bridge would pick up. So CREATE on schema public is taken from PUBLIC -
+-- the default of PostgreSQL 15 and later - for the WHOLE vmail database; a role that owns tables
+-- or functions there keeps it, granted to it by name. To give it back to the one role that needs
+-- it, grant CREATE ON SCHEMA public to that role (not to PUBLIC). Temporary tables stay allowed
+-- through PUBLIC: they belong to one session and vanish with it.
+DO $$
+DECLARE
+    owner_name name;
+BEGIN
+    IF has_schema_privilege('public', 'public', 'CREATE') THEN
+        FOR owner_name IN
+            SELECT DISTINCT o.rolname
+              FROM pg_roles o
+             WHERE NOT o.rolsuper AND o.rolname <> 'galbridge'
+               AND (o.oid IN (SELECT c.relowner FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace)
+                    OR o.oid IN (SELECT p.proowner FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace))
+        LOOP
+            EXECUTE format('GRANT CREATE ON SCHEMA public TO %I', owner_name);
+        END LOOP;
+    END IF;
+END
+$$;
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+REVOKE CREATE ON SCHEMA public FROM galbridge;
+REVOKE CREATE, TEMPORARY ON DATABASE vmail FROM galbridge;
+
 -- The table "forwardings" also holds the PRIVATE forwarding targets of every mailbox
 -- (is_forwarding rows, often external addresses). The role gets no access to that table. It reads
 -- this view, which has only the three kinds of rows GAL Bridge needs: per-user alias addresses
 -- (is_alias), members of alias accounts (is_list; needed for the "membersonly" policies) and
--- mailing lists (is_maillist). The view runs with the rights of its owner and is a security
--- barrier (no function of the caller sees a row before the filter). It is re-created on every run.
--- Before an iRedMail upgrade that alters the forwardings table (PostgreSQL refuses to change the
--- type of a column a view uses) run  DROP VIEW galbridge_forwardings;  and afterwards
--- "galbridge.sh grants --grants-only".
-CREATE OR REPLACE VIEW galbridge_forwardings WITH (security_barrier = true) AS
+-- mailing lists (is_maillist). The view runs with the rights of its owner - the administrator who
+-- runs this file - and the server builds its rows before it applies any condition of a query:
+-- security_barrier keeps the functions of a query away from the rows before the filter, and
+-- OFFSET 0 keeps the planner from moving ANY condition into the view, also one built from
+-- operators PostgreSQL calls leakproof (an index condition on such a column could otherwise
+-- confirm a guessed forwarding target through the row counts of EXPLAIN ANALYZE).
+-- The view is dropped and created afresh: a new object owned by the administrator, without any
+-- grant, rule or comment of a view of that name that existed before. When a TABLE of that name
+-- exists, or another object depends on the view, DROP VIEW fails, the transaction is rolled back
+-- and nothing is changed. Before an iRedMail upgrade that alters the forwardings table
+-- (PostgreSQL refuses to change the type of a column a view uses) run
+-- DROP VIEW galbridge_forwardings;  and afterwards "galbridge.sh grants --grants-only".
+DROP VIEW IF EXISTS galbridge_forwardings;
+CREATE VIEW galbridge_forwardings WITH (security_barrier = true) AS
     SELECT address, forwarding, domain, is_alias, is_list, is_maillist, active
       FROM forwardings
-     WHERE is_alias = 1 OR is_list = 1 OR is_maillist = 1;
--- CREATE OR REPLACE keeps the owner of a view that existed before: the administrator running this
--- becomes the owner, so a role that created a view of this name earlier cannot change it later
-ALTER VIEW galbridge_forwardings OWNER TO CURRENT_USER;
+     WHERE is_alias = 1 OR is_list = 1 OR is_maillist = 1
+    OFFSET 0;
 REVOKE ALL ON galbridge_forwardings FROM PUBLIC;
 -- the grants of GAL Bridge 1.0.0 gave the role the table itself: taken away (nothing happens for
 -- a role that never had it)

@@ -4,13 +4,18 @@
 #
 #   dovecot.sh install    install the test configuration, (re)start Dovecot, verify an IMAP LOGIN
 #   dovecot.sh status     show what is installed and try an IMAP LOGIN for every test user
-#   dovecot.sh remove     remove everything "install" created and stop Dovecot
+#   dovecot.sh remove     remove everything "install" created and give Dovecot back the state it
+#                         had before the first install (running with its own configuration, or not)
 #
 # What "install" creates (and "remove" deletes again), nothing else:
 #   /etc/dovecot/conf.d/99-galbridge-e2e.conf   the test configuration (Dovecot 2.4 syntax)
 #   /etc/dovecot/galbridge-e2e.passwd           passwd-file with the test users (SHA512-CRYPT)
 #   /var/lib/galbridge-e2e/mail                 maildirs of the test users
+#   /var/lib/galbridge-e2e/pre-install.state    whether Dovecot ran before the first install
 #   system user and group "galbridge-e2e"       owner of the maildirs (mail_uid / mail_gid)
+#
+# The service is managed with systemctl where systemd runs (/run/systemd/system), otherwise directly:
+# "dovecot" starts it and "doveadm stop" stops it (a container, the CI job "e2e").
 #
 # The configuration turns the local Dovecot into a test-only server: it listens on 127.0.0.1:143
 # only (no IMAPS, no other protocol), TLS is off, cleartext LOGIN is allowed (loopback only), the
@@ -31,6 +36,7 @@ CONF=/etc/dovecot/conf.d/99-galbridge-e2e.conf
 PASSWD=/etc/dovecot/galbridge-e2e.passwd
 DATA=/var/lib/galbridge-e2e
 MAIL="$DATA/mail"
+STATE="$DATA/pre-install.state"
 ACCOUNT=galbridge-e2e
 MARKER='# GAL Bridge E2E - TEST ONLY - managed by tests/e2e/dovecot.sh'
 USERS=(jan.kowalski@example.com zofia.zolkiewska@example.com lukasz.slowik@example.com anna.nowak@example.com bob@example.org)
@@ -83,6 +89,29 @@ if not line.startswith('a1 OK'):
 print('IMAP LOGIN %s: OK' % user)
 PY
 }
+
+# the Dovecot service, with or without systemd
+with_systemd() { [ -d /run/systemd/system ]; }
+running() {
+  if with_systemd; then
+    systemctl is-active --quiet dovecot
+  else
+    local base pid
+    base="$(doveconf -h base_dir 2>/dev/null || echo /run/dovecot)"
+    pid="$(cat "$base/master.pid" 2>/dev/null || true)"
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+  fi
+}
+service_start() { if with_systemd; then systemctl start dovecot; else dovecot; fi; }
+service_stop() {
+  if with_systemd; then
+    systemctl stop dovecot 2>/dev/null || true
+  elif running; then
+    doveadm stop 2>/dev/null || true
+    for _ in $(seq 1 50); do running || return 0; sleep 0.2; done
+  fi
+}
+service_restart() { if with_systemd; then systemctl restart dovecot; else service_stop; dovecot; fi; }
 
 wait_port() {
   for _ in $(seq 1 50); do
@@ -155,6 +184,12 @@ do_install() {
   fi
   install -d -m 0755 -o root -g root "$DATA"
   install -d -m 0750 -o "$ACCOUNT" -g "$ACCOUNT" "$MAIL"
+  # the state before the FIRST install only: a repeated install must not record its own server
+  if ! ours "$CONF" && [ ! -e "$STATE" ]; then
+    local before=no
+    if running; then before=yes; fi
+    (umask 077; printf 'active=%s\n' "$before" > "$STATE")
+  fi
 
   local tmp
   tmp="$(mktemp)"
@@ -173,7 +208,7 @@ do_install() {
     rm -f "$CONF"
     die "doveconf rejected the configuration (removed again)"
   fi
-  systemctl restart dovecot
+  service_restart
   wait_port
   for u in "${USERS[@]}"; do imap_login "$u"; done
   echo "Dovecot test server ready on 127.0.0.1:143 (users: ${USERS[*]}; password: $PASSWORD)"
@@ -184,7 +219,8 @@ do_status() {
     if [ -e "$f" ]; then echo "present: $f"; else echo "missing: $f"; fi
   done
   getent passwd "$ACCOUNT" >/dev/null && echo "present: user $ACCOUNT" || echo "missing: user $ACCOUNT"
-  echo "dovecot: $(systemctl is-active dovecot 2>/dev/null || true)"
+  if running; then echo "dovecot: running"; else echo "dovecot: not running"; fi
+  if [ -f "$STATE" ]; then echo "before the first install: $(cat "$STATE")"; fi
   local rc=0
   for u in "${USERS[@]}"; do imap_login "$u" || rc=1; done
   return $rc
@@ -195,12 +231,19 @@ do_remove() {
   owned "$CONF" || die "$CONF was not created by this script; not removed"
   owned "$PASSWD" || die "$PASSWD was not created by this script; not removed"
   if ours "$CONF"; then
-    # only a Dovecot that runs OUR test configuration is stopped: without that file the
-    # distribution default would listen on every interface. A Dovecot that this script never
-    # configured is left alone.
-    systemctl stop dovecot 2>/dev/null || true
+    # only a Dovecot that runs OUR test configuration is stopped; it is started again - now with
+    # its own configuration - only when it ran before the first install. A Dovecot that this script
+    # never configured is left alone.
+    service_stop
     rm -f "$CONF"
-    echo "removed the Dovecot test configuration; Dovecot stopped"
+    if [ "$(cat "$STATE" 2>/dev/null)" = 'active=yes' ]; then
+      service_start
+      echo "removed the Dovecot test configuration; Dovecot runs again with its own configuration, as before the install"
+    elif [ -f "$STATE" ]; then
+      echo "removed the Dovecot test configuration; Dovecot stopped, as before the install"
+    else
+      echo "removed the Dovecot test configuration; Dovecot stopped (no state was recorded before the install)"
+    fi
   else
     echo "the Dovecot test configuration is not installed: the Dovecot service was not touched"
   fi
@@ -208,6 +251,7 @@ do_remove() {
   # the maildirs and the account exist only when this script created them (the account name and
   # the directory are specific to it)
   if [ -d "$MAIL" ] && [ "$(stat -c %U "$MAIL" 2>/dev/null)" = "$ACCOUNT" ]; then rm -rf "$MAIL"; fi
+  rm -f "$STATE"
   rmdir "$DATA" 2>/dev/null || true
   if getent passwd "$ACCOUNT" >/dev/null; then userdel "$ACCOUNT"; fi
   if getent group "$ACCOUNT" >/dev/null; then groupdel "$ACCOUNT"; fi

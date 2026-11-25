@@ -28,8 +28,9 @@ final class Limits
 
     public function __construct(
         /**
-         * largest page size Roundcube's own lists use: max(core max_pagesize, addressbook_pagesize),
-         * bounded by HARD_PAGE_CAP (core clamps addressbook_pagesize only when a user saves it)
+         * largest page size Roundcube's own lists use: max(core max_pagesize, addressbook_pagesize -
+         * or pagesize without it), bounded by HARD_PAGE_CAP (core clamps addressbook_pagesize only
+         * when a user saves it). A larger page size of a list is served as a page of this size.
          */
         public readonly int $corePageCap,
         public readonly int $maxIds,
@@ -48,7 +49,12 @@ final class Limits
     {
         $corePageCap = $config->get('max_pagesize');
         $corePageCap = is_numeric($corePageCap) && (int) $corePageCap > 0 ? (int) $corePageCap : 200;
+        // the page size core's address-book lists use: addressbook_pagesize, else pagesize
+        // (rcmail_action_contacts_index, contacts/list ...)
         $listSize = $config->get('addressbook_pagesize');
+        if (!is_numeric($listSize)) {
+            $listSize = $config->get('pagesize');
+        }
         if (is_numeric($listSize) && (int) $listSize > $corePageCap) {
             $corePageCap = (int) $listSize;
         }

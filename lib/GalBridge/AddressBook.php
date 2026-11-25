@@ -20,6 +20,7 @@ use GalBridge\Directory\BookDefinition;
 use GalBridge\Directory\FieldMap;
 use GalBridge\Directory\IdCodec;
 use GalBridge\Directory\Limits;
+use GalBridge\Directory\LookupBudget;
 use GalBridge\Directory\QueryBuilder;
 use GalBridge\Directory\Repository;
 use GalBridge\Directory\SearchSpec;
@@ -32,10 +33,20 @@ use GalBridge\Directory\SearchSpec;
  *  - primary_key 'ID'; a search on 'ID' / primary_key is a strict ID search (compose-to-selected);
  *  - reset() clears filter and result but keeps the group; set_group(0|''|null) clears the group;
  *  - every method fails closed: on any error an empty result (or null / []) and set_error();
- *  - a recipient set or an export is complete or refused - never a truncated prefix (core asks for
- *    page sizes of 999/9999/99999 for group expansion, export and search lists). "Complete" is
- *    decided by the statement that fetches the set (Repository::fullSet(): the cap plus one row),
- *    never by a bounded count; a search LIST that is only looked at is capped with a notice.
+ *  - a recipient set or an export is complete or refused - never a truncated prefix. A full set is
+ *    recognised by the page sizes core uses for one (9999 for search lists and group expansion,
+ *    99999 for exports - CORE_FULL_SET_SIZES), by a search with a page size above the page bound,
+ *    and by the recipient actions of a group (compose to a group, group expansion: core passes
+ *    max_group_members or 999 there). "Complete" is decided by the statement that fetches the set
+ *    (Repository::fullSet(): the cap plus one row), never by a bounded count; a search LIST that is
+ *    only looked at is capped with a notice. A selection by IDs (compose to selected, export of
+ *    selected) is complete or refused as well: an ID that is malformed or finds no entry refuses it;
+ *  - a list page is bounded: a page size above the page bound is served as a page of the bound
+ *    (notice pagetoolarge), never as an export; a list total is capped at galbridge_max_count
+ *    (notice listcapped), a search result at the result cap of the book (notice toomanyresults),
+ *    and pages beyond them are empty; the page number is clamped (MAX_PAGE);
+ *  - contacts read one by one (get_record(), get_record_groups() - core's copy action calls it for
+ *    every ID of the request) are bounded per request by galbridge_max_ids (LookupBudget).
  */
 final class AddressBook extends \rcube_addressbook
 {
@@ -47,7 +58,27 @@ final class AddressBook extends \rcube_addressbook
     public $undelete = false;
     public $searchonly = false;
 
+    /** the page sizes core asks for when it wants a whole set (search lists / group expansion, exports) */
+    public const CORE_FULL_SET_SIZES = [9999, 99999];
+
+    /** the actions that use a set selected by IDs as a whole: compose to selected, export of selected */
+    public const SELECTION_ACTIONS = ['mailto', 'export'];
+
+    /**
+     * The highest page number honoured: with the largest page the offset stays below 10^9 (no
+     * float on any platform), and every offset beyond galbridge_max_count is an empty page anyway.
+     */
+    public const MAX_PAGE = 1000001;
+
+    /** the largest page size honoured (core asks for 99999 at most) */
+    public const MAX_PAGE_SIZE = 1000000;
+
     private ?SearchSpec $filter = null;
+
+    /** IDs of the current ID search that could not be decoded (buildSpec()) */
+    private int $rejectedIds = 0;
+
+    private readonly LookupBudget $budget;
 
     /** set_search_set() got a stored search that cannot be applied any more (see listRecords()) */
     private bool $staleSearchSet = false;
@@ -94,10 +125,14 @@ final class AddressBook extends \rcube_addressbook
         private readonly string $action,
         callable $label,
         ?\Closure $notify = null,
+        ?LookupBudget $budget = null,
     ) {
         $this->coltypes = $fields->coltypes($label);
         $this->groups = $repository->grouping() !== 'none';
         $this->notify = $notify;
+        // one budget per request, shared by the books of the request (Factory); a book on its own
+        // gets one of its own
+        $this->budget = $budget ?? new LookupBudget($limits->maxIds);
     }
 
     #[\Override]
@@ -113,6 +148,7 @@ final class AddressBook extends \rcube_addressbook
         // a search stored with another configuration (fingerprint) or by another version
         $this->staleSearchSet = $spec === null && $filter !== null && $filter !== [];
         $this->filter = $spec ?? SearchSpec::none($this->book->id, $this->fingerprint);
+        $this->rejectedIds = 0;
         $this->result = null;
     }
 
@@ -127,20 +163,37 @@ final class AddressBook extends \rcube_addressbook
     {
         $this->filter = null;
         $this->staleSearchSet = false;
+        $this->rejectedIds = 0;
         $this->result = null;
     }
 
+    /**
+     * The page number, clamped to 1..MAX_PAGE (compared as a float first, so that no value of the
+     * request is ever cast to an int out of range - PHP 8.5 warns about that).
+     */
     #[\Override]
     public function set_page($page): void
     {
-        $this->list_page = max(1, (int) $page);
+        $this->list_page = self::clamp($page, self::MAX_PAGE);
     }
 
     #[\Override]
     public function set_pagesize($size): void
     {
-        $this->requestedSize = max(1, (int) $size);
+        $this->requestedSize = self::clamp($size, self::MAX_PAGE_SIZE);
         $this->page_size = min($this->requestedSize, $this->limits->corePageCap);
+    }
+
+    /**
+     * A positive whole number from a request value: 1 when it is no number, at most $max.
+     */
+    private static function clamp(mixed $value, int $max): int
+    {
+        $n = is_int($value) ? (float) $value : (is_numeric($value) ? (float) $value : 1.0);
+        if (is_nan($n) || $n < 1.0) {
+            return 1;
+        }
+        return $n >= (float) $max ? $max : (int) $n;
     }
 
     /**
@@ -163,6 +216,10 @@ final class AddressBook extends \rcube_addressbook
             $this->staleSearchSet = false;
             $this->filter = $this->buildSpec($fields, $value, (int) $mode, $required);
             if (!$this->queries->canMatch($this->filter)) {
+                if ($this->rejectedIds > 0 && in_array($this->action, self::SELECTION_ACTIONS, true)) {
+                    // a selection none of whose IDs could be read: refused, never an empty set
+                    return $this->result = $this->refuse('incomplete', [], 'set_incomplete', ['missing' => $this->rejectedIds, 'dropped' => 0]);
+                }
                 return $this->result = new \rcube_result_set(0, 0);
             }
             return $select ? $this->list_records(null, 0, $nocount) : $this->count();
@@ -318,18 +375,26 @@ final class AddressBook extends \rcube_addressbook
                 return [];
             }
             $address = (string) ($record['email:work'][0] ?? '');
+            $domain = substr($address, (int) strrpos($address, '@') + 1);
             $domainGrouping = $this->repository->grouping() === 'domain';
-            $key = $domainGrouping
-                ? substr($address, (int) strrpos($address, '@') + 1)
-                : mb_strtolower(trim((string) ($record['department'] ?? '')));
+            // the department groups of the global book are per domain ("domain:department")
+            $perDomain = !$domainGrouping && $this->book->id === BookDefinition::GLOBAL;
+            $key = $domainGrouping ? $domain : mb_strtolower(trim((string) ($record['department'] ?? '')));
             if ($key === '') {
                 return []; // no department: member of no department group
             }
             foreach ($this->repository->groups() as $g) {
-                // A department key is the value as SQL computed it (LOWER(TRIM(department))), the
-                // record carries display text ('&' as U+FF06, collapsed whitespace, cut at an
-                // at-sign ...): the key is compared in that notation, case-insensitively in PHP as well
-                if ($domainGrouping ? $g['key'] === $key : mb_strtolower(Normalizer::cutAtSign(Normalizer::displayText($g['key']))) === $key) {
+                if ($domainGrouping) {
+                    $hit = $g['key'] === $key;
+                } else {
+                    // A department key is the value as SQL computed it (LOWER(TRIM(department))), the
+                    // record carries display text ('&' as U+FF06, collapsed whitespace, cut at an
+                    // at-sign ...): the key is compared in that notation, case-insensitively in PHP as
+                    // well - in the global book together with the domain of the entry
+                    [$groupDomain, $department] = $perDomain ? array_pad(explode(':', $g['key'], 2), 2, '') : [$domain, $g['key']];
+                    $hit = $groupDomain === $domain && mb_strtolower(Normalizer::cutAtSign(Normalizer::displayText($department))) === $key;
+                }
+                if ($hit) {
                     return [$g['id'] => $g['label']];
                 }
             }
@@ -358,10 +423,13 @@ final class AddressBook extends \rcube_addressbook
             // groups because it has more than galbridge_max_groups): nothing, like any unknown id
             return new \rcube_result_set(0, $first);
         }
-        // a full-set request: core asks for 999/9999/99999 rows; compose-to-group and group expansion
-        // are recipient sets whatever page size they use (core passes max_group_members for mailto)
+        // a full-set request: the page sizes core uses for one (9999: search lists, group expansion;
+        // 99999: exports), a search with a page size above the page bound, and compose-to-group and
+        // group expansion, which are recipient sets whatever page size they use (core passes
+        // max_group_members or 999 for mailto). Any other page size above the bound is a page.
         $fullSet = $this->list_page === 1 && (
-            $this->requestedSize > $this->limits->corePageCap
+            in_array($this->requestedSize, self::CORE_FULL_SET_SIZES, true)
+            || ($this->filter !== null && $this->requestedSize > $this->limits->corePageCap)
             || ($this->groupKey !== null && $this->filter === null && in_array($this->action, ['mailto', 'group-expand'], true))
         );
         if ($this->filter === null && $this->groupKey === null && $this->isSearchOnly()) {
@@ -375,9 +443,7 @@ final class AddressBook extends \rcube_addressbook
         }
 
         if ($this->filter !== null && $this->filter->type === SearchSpec::IDS) {
-            // search() already refused more than galbridge_max_ids IDs
-            $records = $this->page(0, $this->limits->maxIds);
-            return $this->resultSet($records, count($records), 0, $subset);
+            return $this->selection($subset);
         }
 
         if ($fullSet && $this->groupKey !== null && $this->filter === null) {
@@ -424,12 +490,63 @@ final class AddressBook extends \rcube_addressbook
                 : $this->complete($set, $subset);
         }
 
-        if ($first >= $this->limits->maxCount) {
+        // a page of a list: never more than the page bound, never beyond the bound of the list total
+        if ($this->requestedSize > $this->limits->corePageCap) {
+            $this->notice('pagetoolarge', ['max' => (string) $this->limits->corePageCap]);
+        }
+        [$cap, $capLabel] = $this->listCap();
+        if ($first >= $cap) {
+            $this->notice($capLabel, ['max' => (string) $cap]);
             return new \rcube_result_set(0, $first);
         }
-        $records = $this->page($first, $this->page_size);
-        $total = $nocount ? $first + count($records) : $this->total();
+        $records = $this->page($first, min($this->page_size, $cap - $first));
+        if ($nocount) {
+            return $this->resultSet($records, $first + count($records), $first, $subset);
+        }
+        [$total, $capped] = $this->boundedTotal();
+        if ($capped) {
+            $this->notice($capLabel, ['max' => (string) $cap]);
+        }
         return $this->resultSet($records, $total, $first, $subset);
+    }
+
+    /**
+     * The bound of the list a page belongs to, and the notice that tells a user about it: the
+     * result cap of the book for a search (toomanyresults), galbridge_max_count otherwise
+     * (listcapped). A search result is never longer than the bound of a list total either.
+     *
+     * @return array{0: int, 1: string}
+     */
+    private function listCap(): array
+    {
+        if ($this->filter !== null) {
+            return [min($this->book->maxResults, $this->limits->maxCount), 'toomanyresults'];
+        }
+        return [$this->limits->maxCount, 'listcapped'];
+    }
+
+    /**
+     * A set selected by IDs (compose to selected, export of selected, a contact by its ID): ONE
+     * statement for at most galbridge_max_ids rows (search() refused more IDs). In the recipient and
+     * export actions the selection is complete or refused: an ID that could not be decoded, that
+     * finds no entry this user may see (gone, foreign, forged) or whose row the re-check dropped
+     * refuses it (set_incomplete missing=N dropped=N) - a recipient set or a file never lacks a
+     * selected entry silently. Other actions show what was found.
+     */
+    private function selection(int $subset): \rcube_result_set
+    {
+        $requested = $this->filter !== null ? count($this->filter->ids) : 0;
+        $set = $this->fullSet($this->limits->maxIds);
+        if ($set === null) {
+            // more rows than IDs: cannot happen (one row per ID) - never a silently cut set
+            return $this->refuse('toomanyids', ['max' => (string) $this->limits->maxIds], 'too_many_ids');
+        }
+        [$records, $dropped] = $set;
+        $missing = $this->rejectedIds + $requested - count($records);
+        if (in_array($this->action, self::SELECTION_ACTIONS, true) && ($dropped > 0 || $missing > 0)) {
+            return $this->refuse('incomplete', [], 'set_incomplete', ['missing' => $missing, 'dropped' => $dropped]);
+        }
+        return $this->resultSet($records, count($records), 0, $subset);
     }
 
     /**
@@ -466,24 +583,36 @@ final class AddressBook extends \rcube_addressbook
     }
 
     /**
-     * List total for display, bounded by galbridge_max_count (never used to decide whether a
-     * recipient set or an export is complete).
+     * List total for display (count()), bounded like the list (listCap()) and silent; never used to
+     * decide whether a recipient set or an export is complete.
      */
     private function total(): int
     {
+        return $this->boundedTotal()[0];
+    }
+
+    /**
+     * The list total bounded by listCap(), and whether the bound cut it (counted up to the bound
+     * plus one; a group without a filter: the exact count of the group aggregate).
+     *
+     * @return array{0: int, 1: bool}
+     */
+    private function boundedTotal(): array
+    {
         if ($this->groupKey === false || ($this->filter !== null && !$this->queries->canMatch($this->filter))) {
-            return 0;
+            return [0, false];
         }
         if ($this->groupKey !== null && $this->selectedGroup() === null) {
-            return 0;
+            return [0, false];
         }
         if ($this->filter === null && $this->groupKey === null && $this->isSearchOnly()) {
-            return 0;
+            return [0, false];
         }
-        if ($this->filter === null && $this->groupKey !== null) {
-            return $this->groupCount();
-        }
-        return $this->repository->count($this->filter, $this->groupKey, $this->limits->maxCount);
+        [$cap] = $this->listCap();
+        $n = $this->filter === null && $this->groupKey !== null
+            ? $this->groupCount()
+            : $this->repository->count($this->filter, $this->groupKey, $cap + 1);
+        return [min($n, $cap), $n > $cap];
     }
 
     /**
@@ -553,6 +682,11 @@ final class AddressBook extends \rcube_addressbook
     }
 
     /**
+     * One contact by its ID (get_record(), get_record_groups()). Each lookup that would read the
+     * directory takes one unit of the request's LookupBudget (galbridge_max_ids): core's copy action
+     * reads every contact of the request this way, and beyond the budget the rest is refused with
+     * the message of too many IDs. An ID that cannot be decoded costs nothing.
+     *
      * @return null|array<string, mixed>
      */
     private function fetchRecord(mixed $id): ?array
@@ -564,6 +698,15 @@ final class AddressBook extends \rcube_addressbook
             }
             return null;
         }
+        if (!$this->budget->take()) {
+            $max = (string) $this->limits->maxIds;
+            Log::once('warning', 'limits', 'too_many_ids', 'request refused: more contacts read one by one than galbridge_max_ids', ['book' => $this->book->id, 'max' => $max]);
+            $this->set_error(self::ERROR_SEARCH, 'galbridge.toomanyids');
+            if ($this->budget->claimNotice()) {
+                $this->notice('toomanyids', ['max' => $max]);
+            }
+            return null;
+        }
         $spec = new SearchSpec(SearchSpec::IDS, $this->book->id, $this->fingerprint, ids: [$decoded]);
         $records = $this->repository->page($spec, null, 'name', 'ASC', 0, 1);
         return $records[0] ?? null;
@@ -571,6 +714,7 @@ final class AddressBook extends \rcube_addressbook
 
     private function buildSpec(mixed $fields, mixed $value, int $mode, mixed $required): SearchSpec
     {
+        $this->rejectedIds = 0;
         $none = SearchSpec::none($this->book->id, $this->fingerprint);
         if ($this->action === 'autocomplete' && !$this->book->autocomplete) {
             return $none;
@@ -590,6 +734,8 @@ final class AddressBook extends \rcube_addressbook
             }
             $rejected = 0;
             $ids = IdCodec::decodeContactList($items, $rejected);
+            // a selection with an ID that cannot be decoded is incomplete (selection())
+            $this->rejectedIds = $rejected;
             if ($rejected > 0) {
                 Log::once('warning', 'records', 'invalid_id', 'invalid contact ids in an ID search', ['book' => $this->book->id, 'count' => $rejected]);
             }

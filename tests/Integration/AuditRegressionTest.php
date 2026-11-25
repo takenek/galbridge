@@ -323,8 +323,10 @@ final class AuditRegressionTest extends TestCase
             ["DELETE FROM mailbox WHERE username = 'Hidden.Capitals@example.com'"],
         );
         $count = static fn (AddressBook $book): int => $book->search('*', 'Capitalshidden', 0, false)->count;
-        // the control: without a list the entry is found
-        self::assertSame(1, $count(self::book($dsn)));
+        // the control: without a list the entry is found where the engine compares addresses
+        // case-insensitively (MariaDB/MySQL: its ID finds the row); PostgreSQL and SQLite do not
+        // offer an address written with capitals at all (second verification pass, F-05)
+        self::assertSame(str_starts_with($dsn, 'mysql:') ? 1 : 0, $count(self::book($dsn)));
         foreach (['galbridge_hidden_addresses' => ['hidden.capitals@example.com'], 'galbridge_hidden_localparts' => ['hidden.capitals']] as $option => $list) {
             $book = self::book($dsn, [$option => $list]);
             self::assertSame(0, $count($book), $option . ': not counted');
@@ -444,8 +446,12 @@ final class AuditRegressionTest extends TestCase
     }
 
     /**
-     * A full set that lacks a row the statement returned - here a row whose address does not belong
-     * to its domain column, which the row re-check drops - is refused, not delivered short.
+     * A full set that lacked a row the statement returned - here a row whose address does not belong
+     * to its domain column, which the row re-check drops - was refused, for every user of the scope
+     * and as long as the row existed. Since the second verification pass (F-16) the SQL of the book
+     * applies the same rule as the re-check: such a row is not offered at all (not listed, counted
+     * or grouped), so full sets are complete. A row the re-check still drops (a defect, a race) is
+     * refused as before: Remediation2CanonicalRowsTest::testAGenuineDisagreementIsStillRefused.
      */
     #[DataProviderExternal(Env::class, 'engines')]
     public function testAFullSetThatLacksARowIsRefused(string $dsn): void
@@ -455,34 +461,28 @@ final class AuditRegressionTest extends TestCase
             ["INSERT INTO mailbox (username, name, domain, department, maildir) VALUES ('odd.row@example.org', 'Odd Row', 'example.com', 'Sprzedaż', 'example.org/o/d/d/odd.row')"],
             ["DELETE FROM mailbox WHERE username = 'odd.row@example.org'"],
         );
-        // an ordinary list simply does not show the row (and logs it)
+        // an ordinary list does not show the row - SQL left it out, nothing was dropped
         $book = self::book($dsn);
         $book->set_pagesize(200);
-        self::assertCount(self::BOOK_SIZE, $book->list_records()->records);
-        self::assertStringContainsString('row_invalid', self::log());
+        $listed = $book->list_records();
+        self::assertCount(self::BOOK_SIZE, $listed->records);
+        self::assertSame(self::BOOK_SIZE, $listed->count, 'the total counts what is listed');
+        self::assertStringNotContainsString('row_invalid', self::log());
 
         $sales = IdCodec::groupId('d', IdCodec::GROUP_DEPARTMENT, 'sprzedaż');
-        foreach ([['export', null], ['export', $sales], ['mailto', $sales], ['group-expand', $sales]] as [$action, $group]) {
+        foreach ([['export', null, self::BOOK_SIZE], ['export', $sales, 2], ['mailto', $sales, 2], ['group-expand', $sales, 2]] as [$action, $group, $size]) {
             self::newRequest();
             $GLOBALS['galbridge_test_log'] = [];
             Log::resetOnce();
             $book = self::book($dsn, [], self::JAN, $action, $notices);
             if ($group !== null) {
                 $book->set_group($group);
+                self::assertSame($size, $book->get_group($group) === null ? -1 : $book->count()->count, $action . ': the group count is what is delivered');
             }
-            self::assertSame([], self::fullSet($book)->records, $action . ': complete or nothing');
-            self::assertSame([['incomplete', []]], $notices, $action);
-            self::assertNotEmpty($book->get_error());
-            self::assertMatchesRegularExpression('/WARN limits: set_incomplete: request refused book=galbridge_domain dropped=1/', self::log(), $action);
+            self::assertCount($size, self::fullSet($book)->records, $action . ': complete');
+            self::assertSame([], $notices, $action);
+            self::assertStringNotContainsString('set_incomplete', self::log(), $action);
         }
-
-        // without the row: complete again
-        Fixture::restore();
-        self::newRequest();
-        $book = self::book($dsn, [], self::JAN, 'mailto', $notices);
-        $book->set_group($sales);
-        self::assertSame([self::ANNA, self::JAN], self::emails(self::fullSet($book)));
-        self::assertSame([], $notices);
     }
 
     // ------------------------------------------------------------------ I-10: a cached entitlement is confirmed

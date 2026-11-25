@@ -17,8 +17,18 @@ databases (tests/fixtures/vmail/load.sh), python3-requests. The cases that need 
 not have (31-35) change the fixture through the administrator access of load.sh (MYSQL_ADMIN /
 PSQL_ADMIN, tests/e2e/fixture_admin.py) and undo it; without that access they are skipped.
 
-Output: one "PASS|FAIL|SKIP <case>" line per case and "E2E: N passed, M failed, K skipped".
-Exit code 1 when any case failed. --only <regex> runs a subset (cases marked "always" still run).
+Output: one "PASS|FAIL|SKIP <case>" line per case and "E2E (<db>): N passed, M failed, K skipped".
+Exit code 1 when any case failed or was skipped (a skipped case proves nothing; --allow-skips accepts
+skips for a deliberately partial local run). --only <regex> runs a subset (cases marked "always"
+still run).
+
+Run it as an unprivileged user: it refuses root with exit code 2 (Roundcube runs with the caller's
+rights; GALBRIDGE_E2E_ALLOW_ROOT=1 in a disposable container only). The fixture changes then need
+the least-privilege access of docs/TESTING.md section 2 - the rows of the test database only
+(MYSQL_ADMIN=mariadb with a unix_socket account granted ON galbridge_vmail_test.*, PSQL_ADMIN=psql
+with a role that tests/fixtures/vmail/load.sh granted the test database: GALBRIDGE_FIXTURE_USER). At
+the end the PHP web server of the run is stopped - only that process - and the plugin link is put
+back as setup.sh found it (tests/e2e/harness.py; --keep leaves both).
 
 @license GPL-3.0-or-later
 """
@@ -37,6 +47,11 @@ import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+
+import harness  # noqa: E402
+
+if __name__ == '__main__':
+    harness.refuse_root()       # before anything else is loaded or started
 
 import requests  # noqa: E402
 
@@ -825,13 +840,14 @@ def c22():
     joined = ','.join(c for c in bad if re.fullmatch(r'[A-Za-z0-9_]+', c) and len(c) < 100)
     cards, _ = export_cards(JAN, _source=SRC, _cid=joined)
     eq(cards, [], 'export of foreign/hidden/crafted IDs')
-    cards, _ = export_cards(JAN, _source=SRC, _cid='%s,%s' % (cid(BOB), cid(ANNA)))
-    eq([c['emails'] for c in cards], [[ANNA]], 'export of one foreign and one own ID')
+    # a selection is complete or refused (second verification pass, F-31): one foreign ID refuses it
+    export_refused(JAN, 'export of one foreign and one own ID', _source=SRC, _cid='%s,%s' % (cid(BOB), cid(ANNA)))
     resp, to = s.mailto({'_cid': joined, '_source': SRC})
     eq(to, None, 'compose-to-selected with foreign/hidden/crafted IDs')
     check(any('No contacts found' in m for m, _ in Roundcube.resp_messages(resp)), 'mailto message: %r' % resp)
     resp, to = s.mailto({'_cid': '%s,%s' % (cid(BOB), cid(ANNA)), '_source': SRC})
-    eq(recipients(to), [ANNA], 'compose-to-selected with one foreign and one own ID')
+    eq(to, None, 'compose-to-selected with one foreign and one own ID: refused as a whole')
+    check(any('Not every entry' in m for m, _ in Roundcube.resp_messages(resp)), 'mailto refusal message: %r' % resp)
     resp, to = s.mailto({'_cid': '%s-%s' % (cid(BOB), SRC), '_source': ''})
     eq(to, None, 'compose-to-selected with a foreign ID in search mode (ID-source)')
 
@@ -840,12 +856,16 @@ def c22():
 def c23():
     s = session(JAN)
     resp, to = s.mailto([('_cid[%s][]' % SRC, cid(BOB)), ('_cid[%s][]' % SRC, cid(ANNA))])
+    eq(to, None, 'mailto with the array form and a foreign ID: refused as a whole (F-31)')
+    resp, to = s.mailto([('_cid[%s][]' % SRC, cid(ANNA))])
     eq(recipients(to), [ANNA], 'mailto with the array form')
     resp, to = s.mailto([('_cid[%s][]' % SRC, cid(BOB))])
     eq(to, None, 'mailto with the array form, foreign ID only')
     resp, to = s.mailto([('_cid[%s][]' % GLOBAL, cid(JAN))])
     eq(to, None, 'mailto with the array form and the disabled book')
     r = s.export(**{'_cid[%s][]' % SRC: [cid(BOB), cid('orglist@example.org', 'l'), cid(ZOFIA)]})
+    eq(r.status_code, 204, 'export with the array form and foreign IDs: refused as a whole (F-31)')
+    r = s.export(**{'_cid[%s][]' % SRC: [cid(ZOFIA)]})
     eq([c['emails'] for c in parse_vcards(r.text)], [[ZOFIA]], 'export with the array form')
     r = s.get(**{'_task': 'addressbook', '_action': 'show', '_cid[%s][]' % SRC: cid(BOB)})
     no_app_error(r.text, 'show with the array form')
@@ -906,8 +926,13 @@ def c25():
     eq(ac_gal(BOB, 'sprz'), [], 'bob autocompletes the department of example.com')
     cards, _ = export_cards(BOB, _source=SRC)
     eq(sorted(c['emails'][0] for c in cards), sorted(a for a, _ in EXPECTED[BOB].values()), 'export for bob')
+    # a selection is complete or refused (second verification pass, F-31): the IDs of tenant A refuse
+    # it as a whole - bob's own ID does not carry them through
     resp, to = s.mailto({'_cid': ','.join([cid(JAN), cid(ZOFIA), cid(BOB)]), '_source': SRC})
-    eq(recipients(to), [BOB], 'bob composes to tenant A IDs')
+    eq(to, None, 'bob composes to tenant A IDs: refused as a whole')
+    check(any('Not every entry' in m for m, _ in Roundcube.resp_messages(resp)), 'mailto refusal message: %r' % resp)
+    resp, to = s.mailto({'_cid': cid(BOB), '_source': SRC})
+    eq(recipients(to), [BOB], 'bob composes to his own ID')
     eq(sorted(row_ids(list_book(JAN))), sorted(EXPECTED[JAN]), 'tenant A unchanged for jan')
 
 
@@ -993,6 +1018,9 @@ def c28a():
         denied(JAN, session(JAN), 'placeholder in galbridge_imap_hosts')
     with plugin_config("$config['galbridge_domain_viewer_domains_exclude'] = 'example.com';"), expected_log('config_invalid'):
         denied(JAN, session(JAN), 'malformed deny-list (string instead of array)')
+    # second verification pass, F-07: a misspelt option would leave the option meant at its default
+    with plugin_config("$config['galbridge_hidden_adresses'] = [];"), expected_log('config_invalid'):
+        denied(JAN, session(JAN), 'unknown (misspelt) galbridge_* option')
         denied(BOB, session(BOB), 'malformed deny-list, other tenant')
     with plugin_config("$config['galbridge_domain_viewer_domains_exclude'] = ['example.com'];"):
         denied(JAN, session(JAN), 'viewer domain excluded')
@@ -1251,10 +1279,12 @@ def main():
     ap.add_argument('--db', default='mysql', choices=['mysql', 'pgsql'])
     ap.add_argument('--port', type=int, default=8181)
     ap.add_argument('--no-setup', action='store_true')
-    ap.add_argument('--keep', action='store_true', help='leave the PHP web server running')
+    ap.add_argument('--keep', action='store_true', help='leave the PHP web server running and the plugin link in place')
     ap.add_argument('--only', default='')
+    ap.add_argument('--allow-skips', action='store_true', help='a skipped case does not fail the run (partial local runs only)')
     ap.add_argument('-v', '--verbose', action='store_true')
     args = ap.parse_args()
+    harness.refuse_root()
     E = Env(args)
     Roundcube.response_observers.append(leak_observer)
     passed = failed = skipped = 0
@@ -1286,12 +1316,11 @@ def main():
             sys.stdout.flush()
     finally:
         if not args.keep:
-            pidfile = os.path.join(E.run, 'php-server.pid')
-            if os.path.exists(pidfile):
-                with contextlib.suppress(Exception), open(pidfile) as f:
-                    os.kill(int(f.read().strip()), 15)
+            harness.cleanup(E.run, E.rc_dir, args.port)
+    if skipped and not args.allow_skips:
+        print('E2E: %d case(s) skipped - a skipped case proves nothing, so the run fails (--allow-skips for a partial local run)' % skipped)
     print('E2E (%s): %d passed, %d failed, %d skipped (%.0fs)' % (args.db, passed, failed, skipped, time.time() - t0))
-    return 1 if failed else 0
+    return 1 if failed or (skipped and not args.allow_skips) else 0
 
 
 if __name__ == '__main__':

@@ -275,8 +275,16 @@ final class ConfigTest extends TestCase
 
     public function testLegacyDefaultHostIsHonouredOnlyWithoutImapHost(): void
     {
-        self::assertSame(['mail.example.com:143'], ViewerResolver::allowedImapHosts(self::merged(['default_host' => 'tls://mail.example.com:143'], [])));
-        self::assertNull(ViewerResolver::allowedImapHosts(self::merged(['default_host' => 'ssl://imap.%d'], [])));
+        // Roundcube maps default_host to imap_host when it loads a file (rcube_config::merge()), and
+        // the binding is derived from the imap_host Roundcube applies (second verification pass, F-06)
+        $loaded = static function (array $file): Config {
+            \rcube::get_instance();
+            $rc = new \rcube_config();
+            $rc->merge($file);
+            return new Config($rc, [], $file);
+        };
+        self::assertSame(['mail.example.com:143'], ViewerResolver::allowedImapHosts($loaded(['default_host' => 'tls://mail.example.com:143'])));
+        self::assertNull(ViewerResolver::allowedImapHosts($loaded(['default_host' => 'ssl://imap.%d'])));
         self::assertNull(ViewerResolver::allowedImapHosts(self::merged([], [])), 'no administrator host at all');
     }
 
@@ -423,7 +431,8 @@ final class ConfigTest extends TestCase
             self::assertSame([], self::factory($config, self::JAN, 'tls://127.0.0.1:143', 'IMAP.Evil.example')->books());
         }
         $lines = array_values(preg_grep('/host_mismatch/', $GLOBALS['galbridge_test_log']) ?: []);
-        self::assertSame(['WARN viewer: host_mismatch: session IMAP host is not an allowed directory host host=imap.evil.example:143 mail_host=127.0.0.1 allowed=127.0.0.1 mail.example.com'], $lines, 'once per request');
+        // a value with blanks is quoted (second verification pass, F-29): one pair, not two
+        self::assertSame(['WARN viewer: host_mismatch: session IMAP host is not an allowed directory host host=imap.evil.example:143 mail_host=127.0.0.1 allowed="127.0.0.1 mail.example.com"'], $lines, 'once per request');
         self::assertStringNotContainsString('kowalski', implode("\n", $GLOBALS['galbridge_test_log']), 'never the login');
     }
 
@@ -432,7 +441,8 @@ final class ConfigTest extends TestCase
     {
         $config = self::merged(['galbridge_db_dsn' => $dsn, 'imap_host' => 'ssl://imap.%d', 'galbridge_imap_hosts' => ['127.0.0.1', 'mail.example.com']], []);
         foreach ([['127.0.0.1', '127.0.0.1'], ['mail.example.com', 'MAIL.example.com'], ['ssl://mail.example.com:993', 'mail.example.com']] as [$mailHost, $storageHost]) {
-            $factory = self::factory($config, self::JAN, $mailHost, $storageHost);
+            // a server that is not local: a session over TLS (second verification pass, F-18)
+            $factory = self::factory($config, self::JAN, $mailHost, $storageHost, ssl: 'ssl');
             self::assertSame([BookDefinition::DOMAIN], array_keys($factory->books()), $mailHost . ' / ' . $storageHost);
         }
         $factory = self::factory($config, self::JAN, 'mail.example.org', 'mail.example.org');
@@ -893,7 +903,9 @@ final class ConfigTest extends TestCase
     {
         $config = self::merged(['galbridge_db_dsn' => $dsn, 'imap_host' => 'ssl://imap.%d', 'galbridge_imap_hosts' => ['127.0.0.1', 'mail.example.com:143', '[::1]', '::1']], []);
         $connects = 0;
-        $factory = self::factory($config, self::JAN, $mailHost, $storageHost, $connects, $port);
+        // sessions over TLS: what is compared here is the form of the host (the transport of a server
+        // that is not local is checked as well since the second verification pass, F-18)
+        $factory = self::factory($config, self::JAN, $mailHost, $storageHost, $connects, $port, 'ssl');
         $books = $factory->books();
         self::assertSame($status, $factory->resolver()->status());
         if ($status === 'ok') {
@@ -984,7 +996,7 @@ final class ConfigTest extends TestCase
             if ($expected === null) {
                 self::assertFalse($config->switchesValid(), $name);
                 self::assertTrue($config->booksDisabled(), $name);
-                self::assertSame(Config::DEFAULTS[$name], $config->bool($name), $name . ' reads as its (conservative) default');
+                self::assertSame(Config::RESTRICTIVE[$name], $config->bool($name), $name . ' reads as its restrictive value, never its default');
                 $problems = array_values(array_filter($config->problems(), static fn (array $p): bool => $p['option'] === $name));
                 self::assertCount(1, $problems, $name . ': reported once');
                 self::assertSame('fail', $problems[0]['level']);
@@ -1493,28 +1505,30 @@ final class ConfigTest extends TestCase
 
     // ------------------------------------------------------------------ other option types
 
-    public function testRefusedUsersOfTheWrongTypeKeepTheBuiltInList(): void
+    /**
+     * Second verification pass (F-30): a refused-roles list of the wrong type, or with an entry that
+     * is not a role name, refuses EVERY connection (it was: the built-in list, or the valid entries);
+     * the built-in names cannot be removed, the option adds names (Remediation2ConfigTest has the
+     * cases in full).
+     */
+    public function testAMalformedRefusedUsersListRefusesEveryConnection(): void
     {
-        foreach (['vmail', true, 0, 'vmail,roundcube'] as $value) {
+        foreach (['vmail', true, 0, 'vmail,roundcube', ['Vmail ', 7, '', ['root'], 'backup']] as $value) {
             $config = self::merged(['galbridge_db_refused_users' => $value], []);
-            self::assertSame(Config::DEFAULTS['galbridge_db_refused_users'], $config->refusedUsers());
+            self::assertNull($config->refusedUsers());
             $problems = $config->problems();
             self::assertSame(['fail', 'galbridge_db_refused_users'], [$problems[0]['level'], $problems[0]['option']]);
-            self::assertStringContainsString('the built-in list is used', $problems[0]['message']);
-            // the safety net is still there
+            self::assertStringContainsString('no database connection', $problems[0]['message']);
+            // not even the dedicated role connects
             try {
-                new Dsn('pgsql://vmail:x@127.0.0.1/vmail', $config);
-                self::fail('the vmail role was accepted');
+                new Dsn('pgsql://galbridge:x@127.0.0.1/vmail', $config);
+                self::fail('a connection was allowed with a malformed refused-roles list');
             } catch (\GalBridge\Exception\GalBridgeException $e) {
-                self::assertStringContainsString('refused database role', $e->getMessage());
+                self::assertStringContainsString('galbridge_db_refused_users is malformed', $e->getMessage());
             }
         }
-        // entries that are not role names are reported, the others still apply
-        $config = self::merged(['galbridge_db_refused_users' => ['Vmail ', 7, '', ['root'], 'backup']], []);
-        self::assertSame(['vmail', 'backup'], $config->refusedUsers());
-        self::assertSame(['error'], array_values(array_unique(array_column($config->problems(), 'level'))));
-        // an administrator may still shorten or extend the list
-        self::assertSame(['only_this'], self::merged(['galbridge_db_refused_users' => ['only_this']], [])->refusedUsers());
+        // the option adds names; the built-in ones stay
+        self::assertSame([...Config::DEFAULTS['galbridge_db_refused_users'], 'only_this'], self::merged(['galbridge_db_refused_users' => ['Only_This ']], [])->refusedUsers());
     }
 
     public function testNumbersAndStringsOfTheWrongTypeAreReported(): void
@@ -1524,12 +1538,13 @@ final class ConfigTest extends TestCase
         self::assertSame(500, $config->int('galbridge_max_results', 10, 5000), 'the default');
         self::assertSame(300, $config->int('galbridge_scope_ttl', 30, 3600));
         self::assertSame(200, $config->int('galbridge_max_ids', 1, 1000));
-        self::assertSame(300, $config->int('galbridge_max_export', 1, 100000), 'a numeric string is a number');
-        self::assertSame(250, $config->int('galbridge_max_count', 100, 1000000));
+        self::assertSame(300, $config->int('galbridge_max_export', 1, 100000), 'a string of digits is a number');
+        // second verification pass (F-30): a float is no whole number - the default, and reported
+        self::assertSame(10000, $config->int('galbridge_max_count', 100, 1000000));
         self::assertSame('', $config->string('galbridge_db_dsn'), 'a DSN that is not a string is no DSN (fail closed)');
         self::assertSame('', $config->string('galbridge_domain_book_name'));
         $reported = array_column($config->problems(), 'level', 'option');
-        self::assertSame(['galbridge_max_results' => 'error', 'galbridge_scope_ttl' => 'error', 'galbridge_max_ids' => 'error', 'galbridge_db_dsn' => 'error', 'galbridge_domain_book_name' => 'error'], $reported);
+        self::assertSame(['galbridge_max_results' => 'error', 'galbridge_scope_ttl' => 'error', 'galbridge_max_ids' => 'error', 'galbridge_max_count' => 'error', 'galbridge_db_dsn' => 'error', 'galbridge_domain_book_name' => 'error'], $reported);
 
         // validate() finds them without any other accessor having run (diag)
         $fresh = self::merged(['galbridge_max_results' => 'many', 'galbridge_db_dsn' => ['mysql://x'], 'galbridge_global_book' => 'false'], []);
@@ -1571,7 +1586,9 @@ final class ConfigTest extends TestCase
         self::assertSame(['acme.example'], $orgs['Acme'] ?? null);
         self::assertSame(['seven.example'], $orgs['7'] ?? null);
         self::assertCount(2, $orgs, 'the later duplicates are ignored: their domains fall back to themselves');
-        self::assertContains('organization ignored (duplicate label)', array_column($config->problems(), 'message'));
+        // named by its position, never by its label (second verification pass, F-29)
+        self::assertContains('organization 2 ignored (duplicate label)', array_column($config->problems(), 'message'));
+        self::assertContains('organization 4 ignored (duplicate label)', array_column($config->problems(), 'message'));
     }
 
     // ------------------------------------------------------------------ fingerprint (audit I-02)
@@ -1596,9 +1613,13 @@ final class ConfigTest extends TestCase
         $plain['include_host_config'] = null;
         self::assertNotSame(substr(hash('sha256', serialize($plain)), 0, 32), $a->fingerprint());
 
-        // every change of the configuration - the password included - still changes it at once
+        // every change of the configuration still changes it at once - except the database password,
+        // which no longer enters it (second verification pass, F-30): nothing in the session store
+        // depends on the password
         $changed = self::merged(['galbridge_db_dsn' => 'pgsql://galbridge:Secret-Two@127.0.0.1/vmail', 'imap_host' => 'tls://127.0.0.1:143', 'des_key' => 'server-key-AAAAAAAAAAAAAA'], []);
-        self::assertNotSame($a->fingerprint(), $changed->fingerprint());
+        self::assertSame($a->fingerprint(), $changed->fingerprint());
+        $otherRole = self::merged(['galbridge_db_dsn' => 'pgsql://galbridge2:Secret-One@127.0.0.1/vmail', 'imap_host' => 'tls://127.0.0.1:143', 'des_key' => 'server-key-AAAAAAAAAAAAAA'], []);
+        self::assertNotSame($a->fingerprint(), $otherRole->fingerprint());
         self::assertNotSame($a->fingerprint(), self::merged($values + ['des_key' => 'server-key-AAAAAAAAAAAAAA', 'galbridge_max_results' => 499], [])->fingerprint());
     }
 
@@ -1621,7 +1642,7 @@ final class ConfigTest extends TestCase
         return new Config($rc, $prefs, $admin);
     }
 
-    private static function factory(Config $config, string $login, string $mailHost, string $storageHost, int &$connects = 0, int $port = Env::IMAP_PORT): Factory
+    private static function factory(Config $config, string $login, string $mailHost, string $storageHost, int &$connects = 0, int $port = Env::IMAP_PORT, string $ssl = ''): Factory
     {
         $_SESSION = [];
         $connection = null;
@@ -1629,7 +1650,7 @@ final class ConfigTest extends TestCase
             $connects++;
             return $connection ??= new Connection(new Dsn($config->string('galbridge_db_dsn'), $config), 3);
         };
-        $resolver = new ViewerResolver($config, $connect, 1, $login, $mailHost, $storageHost, $port);
+        $resolver = new ViewerResolver($config, $connect, 1, $login, $mailHost, $storageHost, $port, $ssl);
         return new Factory($config, $resolver, $connect, static fn (string $l): string => $l);
     }
 

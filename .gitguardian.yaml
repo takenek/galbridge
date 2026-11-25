@@ -1,25 +1,22 @@
-# GitGuardian / ggshield configuration (format v2).
+# GitGuardian / ggshield configuration (format v2), kept for the GitGuardian app or a local
+# ggshield run; the scanner CI runs is gitleaks (.gitleaks.toml). Both name the same exceptions
+# (tests/Unit/Remediation2RepositoryHygieneTest.php compares them).
 # "version: 2" is required, otherwise ggshield treats the file as the deprecated v1 format.
 version: 2
 
 secret:
-  # tests/fixtures/vmail/ holds the TEST-ONLY iRedMail vmail fixture: the upstream schema, seed.sql
-  # (example.com, example.org and *.test tenants; mailbox.password, recovery_email and allow_nets
-  # hold obvious canary values such as {SSHA512}SECRET-HASH-1 that the suite proves are never
-  # readable) and load.sh, which carries the password of the throw-away read-only test role. Those
-  # values protect nothing and must stay in the repository for the test suite. The other entries
-  # are the E2E harness files that carry the credentials of the throw-away test databases and of
-  # the Dovecot test mailboxes created by tests/e2e/dovecot.sh - narrow, named exceptions instead
-  # of whole directories. Everything else, including the rest of tests/, is scanned.
+  # ONE named TEST-ONLY file: tests/fixtures/vmail/seed.sql, the seed of the iRedMail vmail fixture
+  # (example.com, example.org and *.test tenants), whose mailbox.password, recovery_email and
+  # allow_nets columns hold canary values such as {SSHA512}SECRET-HASH-1 that are meant to look like
+  # secrets - the suite proves they are never readable. Every other file, the rest of the fixture
+  # directory and the E2E harness included, is scanned (a new fixture file too).
   ignored_paths:
-    - 'tests/fixtures/vmail/**/*'
-    - 'tests/e2e/setup.sh'
-    - 'tests/e2e/dovecot.sh'
-    - 'tests/e2e/rc.py'
+    - 'tests/fixtures/vmail/seed.sql'
 
-  # The throw-away values of the CI and local test environments, ignored by EXACT value only: the
-  # files that mention them (.github/workflows/ci.yml, docs, tests) are still scanned for anything
-  # else. Any new harness file with other throw-away credentials must be named here explicitly.
+  # Ignored by EXACT value only: the throw-away values of the CI and local test environments and the
+  # public fingerprint of the release signing key. The files that mention them (.github/workflows/
+  # ci.yml, docs, tests) are still scanned for anything else. A new throw-away value or release key
+  # must be named here and in .gitleaks.toml.
   ignored_matches:
     - name: CI service container administrator password (TEST ONLY, .github/workflows/ci.yml)
       match: ci-throwaway
@@ -27,3 +24,5 @@ secret:
       match: testonly-ro
     - name: Dovecot E2E test mailbox password (TEST ONLY, tests/e2e/dovecot.sh)
       match: testpass
+    - name: fingerprint of the release signing key (public, .github/release-signers)
+      match: Dh488r7YcvACwpsZov0/TASb3v3FRjz4//bwoQCyPwU

@@ -16,8 +16,8 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * The real galbridge plugin class on Roundcube 1.7's plugin API (docs/ARCHITECTURE.md 3, 15):
- * init() registers only addressbooks_list and addressbook_get (plus addressbook_export for
- * addressbook/export) and never touches the database; the autocomplete options are wired for
+ * init() registers only addressbooks_list and addressbook_get (plus contact_exists in the mail task
+ * and addressbook_export in the addressbook task) and never touches the database; the autocomplete options are wired for
  * mail/compose, mail/bounce (the Redirect dialog) and mail/autocomplete only; addressbooks_list
  * appends safe, HTML-escaped, read-only entries; addressbook_get ALWAYS answers our IDs with an
  * instance (core dies with error 700 otherwise) and never touches foreign IDs. Core's own
@@ -91,7 +91,8 @@ final class PluginHooksTest extends TestCase
         self::assertSame('TaKeN.PL Usługi Informatyczne Marek Królikowski', $info['vendor'] ?? null);
         self::assertSame('GPL-3.0-or-later', $info['license'] ?? null);
         self::assertSame('https://github.com/takenek/galbridge', $info['uri'] ?? null);
-        self::assertSame('mail|addressbook', (new \ReflectionClass(\galbridge::class))->getDefaultProperties()['task'] ?? null);
+        // settings: for the preference guard only (second verification pass, F-09; Remediation2PreferencesTest)
+        self::assertSame('mail|addressbook|settings', (new \ReflectionClass(\galbridge::class))->getDefaultProperties()['task'] ?? null);
     }
 
     public function testAnonymousRequestsRegisterNothing(): void
@@ -124,13 +125,15 @@ final class PluginHooksTest extends TestCase
 
     /**
      * init() runs on every request of the two tasks: it must never connect (a refused DSN would be
-     * logged, an unreachable one memoised).
+     * logged, an unreachable one memoised). Besides the two address book hooks it registers
+     * contact_exists in the mail task and addressbook_export in the addressbook task, for every
+     * action (second verification pass, F-33).
      */
     #[DataProvider('requests')]
     public function testInitRegistersTwoHooksAndNeverTouchesTheDatabase(string $task, string $action): void
     {
         $plugin = $this->boot('pgsql://galbridge_ro:testonly-ro@127.0.0.1:1/galbridge_vmail_test', ['galbridge_global_book' => true], task: $task, action: $action);
-        self::assertSame(['addressbooks_list', 'addressbook_get'], array_keys($this->api->handlers));
+        self::assertSame(['addressbooks_list', 'addressbook_get', $task === 'mail' ? 'contact_exists' : 'addressbook_export'], array_keys($this->api->handlers));
         foreach ($this->api->handlers as $handlers) {
             self::assertCount(1, $handlers);
             self::assertSame($plugin, $handlers[0][0]);
@@ -147,7 +150,7 @@ final class PluginHooksTest extends TestCase
     public function testAutocompleteIsWiredOnlyForComposeAndAutocomplete(string $task, string $action): void
     {
         $this->boot(Env::sqliteDsn(), [], task: $task, action: $action);
-        // mail/bounce renders the same recipient inputs as compose (rcmail_sendmail::compose_headers)
+        // mail/bounce renders the same recipient inputs as compose (rcmail_sendmail::headers_output)
         $wired = $task === 'mail' && in_array($action, ['compose', 'bounce', 'autocomplete'], true);
         self::assertSame($wired ? ['sql', BookDefinition::DOMAIN] : ['sql'], $this->rc->config->get('autocomplete_addressbooks'));
         self::assertSame($wired ? 2 : 1, $this->rc->config->get('autocomplete_min_length'));
@@ -180,7 +183,7 @@ final class PluginHooksTest extends TestCase
     }
 
     /**
-     * The Redirect (bounce) dialog renders recipient inputs through rcmail_sendmail::compose_headers()
+     * The Redirect (bounce) dialog renders recipient inputs through rcmail_sendmail::headers_output()
      * like compose: the client minimum and the autocomplete sources are wired there as well.
      */
     public function testRedirectDialogGetsTheAutocompleteWiring(): void
@@ -188,13 +191,15 @@ final class PluginHooksTest extends TestCase
         $this->boot(Env::sqliteDsn(), ['galbridge_global_book' => true, 'galbridge_min_search_length' => 3, 'autocomplete_threads' => 2], action: 'bounce');
         self::assertSame(['sql', BookDefinition::DOMAIN, BookDefinition::GLOBAL], $this->rc->config->get('autocomplete_addressbooks'));
         self::assertSame(3, $this->rc->config->get('autocomplete_min_length'));
-        self::assertSame(['addressbooks_list', 'addressbook_get'], array_keys($this->api->handlers));
+        self::assertSame(['addressbooks_list', 'addressbook_get', 'contact_exists'], array_keys($this->api->handlers));
         self::assertArrayNotHasKey('galbridge', $_SESSION, 'wiring never touches the database');
     }
 
     /**
-     * addressbook_export is registered for addressbook/export only (a refused export must not
-     * download an empty file).
+     * addressbook_export (a refused export must not download an empty file) is registered for every
+     * action of the addressbook task - it acts only after a book refused an export of the request,
+     * so no spelling of the action and no plugin that changes it in the 'ready' hook can skip it
+     * (second verification pass, F-33) - and never in the mail task.
      *
      * @return array<string, array{string, string, bool}>
      */
@@ -203,9 +208,10 @@ final class PluginHooksTest extends TestCase
         return [
             'addressbook/export' => ['addressbook', 'export', true],
             'mail/export' => ['mail', 'export', false],
-            'addressbook/import' => ['addressbook', 'import', false],
-            'addressbook/list' => ['addressbook', 'list', false],
-            'addressbook/qrcode' => ['addressbook', 'qrcode', false],
+            'addressbook/import' => ['addressbook', 'import', true],
+            'addressbook/list' => ['addressbook', 'list', true],
+            'addressbook/qrcode' => ['addressbook', 'qrcode', true],
+            'addressbook/EXPORT' => ['addressbook', 'EXPORT', true],
         ];
     }
 
@@ -213,7 +219,7 @@ final class PluginHooksTest extends TestCase
     public function testExportHookIsRegisteredOnlyForTheExport(string $task, string $action, bool $registered): void
     {
         $plugin = $this->boot('pgsql://galbridge_ro:testonly-ro@127.0.0.1:1/galbridge_vmail_test', [], task: $task, action: $action);
-        self::assertSame($registered ? ['addressbooks_list', 'addressbook_get', 'addressbook_export'] : ['addressbooks_list', 'addressbook_get'], array_keys($this->api->handlers));
+        self::assertSame($registered ? ['addressbooks_list', 'addressbook_get', 'addressbook_export'] : ['addressbooks_list', 'addressbook_get', 'contact_exists'], array_keys($this->api->handlers));
         if ($registered) {
             self::assertSame([$plugin, 'addressbook_export'], $this->api->handlers['addressbook_export'][0]);
         }
@@ -791,6 +797,20 @@ final class PluginHooksTest extends TestCase
         $this->rc->action = $action;
         $this->rc->plugins = $this->api;
         $this->rc->output = $this->output;
+        // the IMAP connection of the request is open (as in a mail request): the IMAP check of a
+        // renewed Viewer (second verification pass, F-17) asks nothing more - Remediation2RevocationTest
+        // covers the other answers
+        $this->rc->storage = new class () extends \rcube_imap {
+            public function __construct()
+            {
+            }
+
+            #[\Override]
+            public function is_connected()
+            {
+                return true;
+            }
+        };
         if ($userId !== null) {
             $user = (new \ReflectionClass(\rcube_user::class))->newInstanceWithoutConstructor();
             $user->ID = $userId;

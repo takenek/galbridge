@@ -118,9 +118,11 @@ final class AccessPolicy
      */
     private function membersExist(array $v): Sql
     {
+        // uncorrelated (Sql::inSelect()): the view is built once per statement, not per alias row
         $who = Sql::in('fm.forwarding', $v);
-        return Sql::exists(
-            'SELECT 1 FROM `' . Schema::FORWARDINGS . '` fm WHERE fm.address = a.address AND fm.is_list = 1 AND fm.active = 1 AND ' . $who->sql,
+        return Sql::inSelect(
+            'a.address',
+            'SELECT fm.address FROM `' . Schema::FORWARDINGS . '` fm WHERE fm.is_list = 1 AND fm.active = 1 AND ' . $who->sql,
             $who->params,
         );
     }

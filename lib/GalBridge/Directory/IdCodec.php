@@ -95,10 +95,21 @@ final class IdCodec
         $key = self::decode($m[3]);
         // group keys are LOWER(TRIM(value)) as computed by the database: never edge spaces or ASCII
         // upper case (non-ASCII letters may stay upper case where LOWER() does not fold them)
-        if ($key === null || trim($key) === '' || $key !== trim($key, ' ') || preg_match('/[A-Z]/', $key)) {
+        if ($key === null || trim($key) === '' || $key !== trim($key, ' ') || preg_match('/[A-Z]/', $key) || !self::usableGroupKey($key)) {
             return null;
         }
         return ['book' => $m[1], 'kind' => $m[2], 'key' => $key];
+    }
+
+    /**
+     * A group key that may be bound into a statement: valid UTF-8 without a control character (C0,
+     * DEL, C1) or a backslash. rcube_db inlines bound values and PDO scans the statement text again,
+     * so such a value is never bound (a department with one is not offered as a group, and a
+     * forged group ID with one matches nothing).
+     */
+    public static function usableGroupKey(string $key): bool
+    {
+        return preg_match('//u', $key) === 1 && preg_match('/[\x00-\x1F\x7F\x{0080}-\x{009F}\\\\]/u', $key) !== 1;
     }
 
     /**
