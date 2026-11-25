@@ -287,6 +287,11 @@ final class Remediation2CiTest extends TestCase
         self::assertStringContainsString("if: matrix.php == '8.4'", $step);
         self::assertStringContainsString('sudo --preserve-env=GALBRIDGE_TEST_MYSQL_DSN,GALBRIDGE_TEST_PGSQL_DSN,MYSQL_ADMIN,PSQL_ADMIN', $step);
         self::assertStringContainsString('vendor/bin/phpunit --fail-on-skipped --group root-aware', $step);
+        // the copy lies below a parent root alone can change, and PHP's include_path names no
+        // directory others may write (GitHub's /opt and setup-php's /usr/share/php/<version> are 0777)
+        self::assertStringContainsString('r="$(sudo mktemp -d /srv/galbridge-root.XXXXXX)"', $step);
+        self::assertStringContainsString("echo 'include_path = \".\"' | sudo tee \"\$ini/zz-galbridge.ini\"", $step);
+        self::assertStringContainsString('PHP_INI_SCAN_DIR=":$ini"', $step);
         // PHPUnit 13 selects NOTHING for "--group a,b" (10.5 warns on a repeated --group): one group
         foreach ($calls[0] as $call) {
             self::assertStringNotContainsString(',root', $call);

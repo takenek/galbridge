@@ -281,9 +281,17 @@ jobs:
             sudo ln -s "$r/vendor/roundcube/roundcubemail/$d" "$rc/$d"
           done
           sudo ln -s "$r/vendor" "$rc/vendor"
+          # PHP's include_path names only directories root alone can change, as on a mail server:
+          # the runner's PHP has a world-writable one (/usr/share/php/<version>), which --allow-root
+          # refuses. An extra ini file - read after the runner's own - keeps only "." (dropped by
+          # galbridge.sh); tests that need an include_path pass their own with -d.
+          ini="$(sudo mktemp -d /srv/galbridge-ini.XXXXXX)"
+          echo 'include_path = "."' | sudo tee "$ini/zz-galbridge.ini" > /dev/null
+          sudo chmod 0755 "$ini"
+          sudo chmod 0644 "$ini/zz-galbridge.ini"
           cd "$r"
           sudo --preserve-env=GALBRIDGE_TEST_MYSQL_DSN,GALBRIDGE_TEST_PGSQL_DSN,MYSQL_ADMIN,PSQL_ADMIN \
-            env GALBRIDGE_RC="$rc" "$(command -v php)" vendor/bin/phpunit --fail-on-skipped --group root-aware
+            env GALBRIDGE_RC="$rc" PHP_INI_SCAN_DIR=":$ini" "$(command -v php)" vendor/bin/phpunit --fail-on-skipped --group root-aware
 
       - name: PHP syntax check
         run: |
