@@ -438,16 +438,24 @@ and 1.7.7; MariaDB 11.8.9, PostgreSQL 17.12, Dovecot 2.4.1, Chromium 156; PHPSta
 This run took place on the development machine, not in the disposable container that section 1 of
 docs/RELEASING.md asks for; the CI run of the release commit repeats the suites on GitHub's runners.
 
+### CI runs of 1.0.2 (2026-11-25)
+
+The first GitHub runs of the jobs added in 1.0.2 found four problems of the CI environment, none of
+the plugin; each was fixed in the test harness or the workflow and the next run proved it:
+
+| Run | Found | Fix |
+|---|---|---|
+| 1 | the `mysql` client of the MySQL images and the client in the Debian container of job `e2e` have no UTF-8 locale and stored the UTF-8 fixture as latin1; three tests assumed a root run (CI runs PHPUnit as the runner user); one test read the runner-local `composer.json` edit of the 1.7.0 legs; Dovecot's master stayed a zombie in the container (PID 1 reaped nothing) and counted as running | `--default-character-set=utf8mb4` in `load.sh` and every administrator helper of the tests; the tests take the non-root case into account; the committed manifest is read with `git show`; job `e2e` runs its container with `--init` and ignores a zombie |
+| 2, 3 | the root step of the PHP 8.4 legs: `--allow-root` refused the copy below `/opt` (mode 0777 on the runners), then the entry `/usr/share/php/<version>` (0777) of the runner's `include_path` | the copy lies below `/srv`, and an extra ini file of the step keeps only `.` in `include_path` - the refusals show that the checks work |
+| 4 (commit `126a58e`) | – | **every job green**: PHPUnit on PHP 8.1 – 8.5 (newest 1.7.x and 1.7.0) with the root step, the seven server pairs of job `databases`, job `e2e` (four legs, unprivileged, PostgreSQL access scoped to the test database), PHPStan, PHP-CS-Fixer, the secret scan with its controls |
+
 ## 7. Not available / not tested
 
 * Database servers outside the matrix of section 6: MariaDB 10.2 – 10.4, MySQL 8.0 before 8.0.19
   (no `information_schema.APPLICABLE_ROLES`: `diag` WARNs that it could not check the role
   memberships), PostgreSQL 12 and earlier, and MySQL 8.4 or later with `mysql_native_password`
   loaded by the administrator (the verifier form is tested on MariaDB and MySQL 8.0, the clear-text
-  form on MySQL 8.4, 9.7 and 26.10). The CI job `databases` has not run yet: its steps were checked
-  with ShellCheck and `Remediation2CiTest`, its server pairs locally (section 6); the health
-  commands and entry points of the Docker images and the `mysql` client inside the MySQL images are
-  proven by its first run on GitHub.
+  form on MySQL 8.4, 9.7 and 26.10). The CI job `databases` ran green on GitHub with the 1.0.2 commits (section 6, "CI runs of 1.0.2").
 * PostgreSQL before 15 (CREATE on schema `public` for `PUBLIC`): the grant set's `REVOKE` ran
   against the real default of PostgreSQL 13 and 14 (database matrix); the reaction of `diag` and of
   the plugin to the privilege is tested by granting it, on every version; `pg_stat_statements` is
@@ -467,9 +475,9 @@ docs/RELEASING.md asks for; the CI run of the release commit repeats the suites 
   GitHub API part - the tag object rebuilt from `verification.payload` and `signature` when the
   checkout stored a reference - and the `jq` filter were linted, not run); the job `e2e` (Debian 13
   container), the root step of the PHPUnit job and the artifacts of the resolved sets were checked
-  with ShellCheck and by `Remediation2CiTest`; their first run on GitHub is the evidence, and the pins
-  they use (`actions/upload-artifact`, the `debian:13-slim` digest, Composer 2.10.3 with its SHA-256,
-  the Roundcube tarball SHA-256s) are proven by it.
+  with ShellCheck and by `Remediation2CiTest`; they ran green on GitHub with the 1.0.2 commits, and
+  so did the pins they use (`actions/upload-artifact`, the `debian:13-slim` digest, Composer 2.10.3
+  with its SHA-256, the Roundcube tarball SHA-256s) - section 6, "CI runs of 1.0.2".
 * A `pdo_mysql` that is not built on `mysqlnd`: host-name verification with `verify_server_cert=1`
   was verified for `mysqlnd` only (`diag` warns for other builds).
 * A live iRedMail nginx configuration (the `static.php` deny rule in README 2.6 comes from the
