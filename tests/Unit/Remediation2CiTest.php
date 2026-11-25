@@ -324,7 +324,7 @@ final class Remediation2CiTest extends TestCase
         // and after the removal ignore a zombie (the first CI run counted Dovecot's unreaped master)
         self::assertMatchesRegularExpression('/^    container:\n      image: debian:13-slim@sha256:[0-9a-f]{64}\n(?:      #[^\n]*\n)*      options: --init$/m', $block);
         self::assertStringNotContainsString('pgrep -x dovecot', $code);
-        self::assertSame(2, substr_count($code, "if ps -C dovecot -o stat= | grep -q '^[^Z]'; then"));
+        self::assertSame(2, substr_count($code, 'if pgrep -x -r D,I,R,S,T,t,W dovecot > /dev/null; then'), 'every run state but Z');
         self::assertStringContainsString("grep -q 'refusing to run Roundcube and Chromium as root'", $code);
         // the local matrix covers the same cores (OldPluginRegressionTest checks its entries)
         $matrix = (string) file_get_contents(dirname(__DIR__) . '/e2e/matrix.sh');

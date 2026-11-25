@@ -2943,6 +2943,10 @@ final class CliToolTest extends TestCase
         self::$adminCommand[$engine] = null;
         foreach ($candidates as $candidate) {
             $cmd = preg_split('/\s+/', trim($candidate)) ?: [];
+            if ($engine !== 'pgsql') {
+                // UTF-8 statements stay UTF-8 whatever the locale of the client (load.sh, DbAdmin)
+                $cmd[] = '--default-character-set=utf8mb4';
+            }
             $probe = $engine === 'pgsql' ? [...$cmd, '-X', '-q', '-t', '-d', 'postgres', '-c', 'SELECT 1'] : [...$cmd, '-N', '-e', 'SELECT 1'];
             [$code, $out] = self::exec($probe);
             if ($code === 0 && trim($out) === '1') {

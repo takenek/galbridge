@@ -267,7 +267,10 @@ jobs:
       - name: PHPUnit as root (the refusal and the --allow-root checks of bin/galbridge.sh)
         if: matrix.php == '8.4'
         run: |
-          r="$(sudo mktemp -d /opt/galbridge-root.XXXXXX)"
+          # under a parent that root alone can change, like every ancestor: --allow-root refuses a
+          # tree below a directory others may write (/opt of the GitHub runner is 0777)
+          sudo install -d -m 0755 -o root -g root /srv
+          r="$(sudo mktemp -d /srv/galbridge-root.XXXXXX)"
           sudo cp -a "$GITHUB_WORKSPACE/." "$r/"
           sudo chown -R root:root "$r"
           sudo chmod -R go-w "$r"
@@ -778,7 +781,7 @@ jobs:
           mariadb -e "CREATE USER 'e2e'@'localhost' IDENTIFIED VIA unix_socket; GRANT SELECT, INSERT, UPDATE, DELETE ON galbridge_vmail_test.* TO 'e2e'@'localhost';"
           runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 -c 'CREATE ROLE e2e LOGIN'
           PSQL_ADMIN="runuser -u postgres -- psql" GALBRIDGE_FIXTURE_USER=e2e tests/fixtures/vmail/load.sh pgsql
-          if ps -C dovecot -o stat= | grep -q '^[^Z]'; then echo "Dovecot runs before the install" >&2; exit 1; fi
+          if pgrep -x -r D,I,R,S,T,t,W dovecot > /dev/null; then echo "Dovecot runs before the install" >&2; exit 1; fi
           tests/e2e/dovecot.sh install
 
       - name: Control - the harness refuses to run Roundcube and Chromium as root
@@ -811,7 +814,7 @@ jobs:
         if: always()
         run: |
           tests/e2e/dovecot.sh remove
-          if ps -C dovecot -o stat= | grep -q '^[^Z]'; then echo "Dovecot still runs although it did not before the install" >&2; ps -C dovecot -o pid,ppid,stat,args >&2; exit 1; fi
+          if pgrep -x -r D,I,R,S,T,t,W dovecot > /dev/null; then echo "Dovecot still runs although it did not before the install" >&2; ps -C dovecot -o pid,ppid,stat,args >&2; exit 1; fi
 
   release:
     name: Release checks (signed tag, versions, archive)
