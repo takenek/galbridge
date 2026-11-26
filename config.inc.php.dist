@@ -75,6 +75,9 @@
  *   sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --user=jan.kowalski@example.com
  *   sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --url=https://mail.example.com/mail/
  *   sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --strict
+ * Without sudo (iRedMail does not install it), as root: runuser -u www-data -- plugins/galbridge/bin/galbridge.sh diag ...
+ * With iRedMail's self-signed certificate: add --cafile=/etc/ssl/certs/iRedMail.crt to --url, and
+ * use the host name of the certificate in the URL (not 127.0.0.1 or localhost).
  */
 
 // ---------------------------------------------------------------------------------------------
@@ -96,7 +99,8 @@
 //
 // Create the role from the reference grant set. Either print it, as ROOT from the Roundcube
 // directory, with a fresh random password - the SQL on standard output, the matching DSN line on
-// standard error (the terminal), nothing written to disk:
+// standard error (the terminal; it is printed as an SQL comment -
+// paste it here WITHOUT the leading "-- ", then check this file with "php -l"), nothing written to disk:
 //   umask 077; plugins/galbridge/bin/galbridge.sh grants --allow-root --driver=mysql [--host=localhost]
 //       [--port=N] [--account-host=localhost] [--db=vmail] [--role=galbridge] [--connection-limit=25] > /root/galbridge-grants.sql
 //   umask 077; plugins/galbridge/bin/galbridge.sh grants --allow-root --driver=pgsql [--host=127.0.0.1]
@@ -180,11 +184,14 @@
 //     &cert=/etc/roundcube/galbridge-client.pem&key=/etc/roundcube/galbridge-client.key
 //
 // PostgreSQL (iRedMail PostgreSQL edition; its pg_hba.conf accepts md5 password logins over the
-// local socket and, through the catch-all line "host all all 0.0.0.0/0 md5", over TCP from any IPv4
-// address that listen_addresses lets in):
-//   TCP on the same host (as iRedMail configures Roundcube itself):
+// local socket - "local all all md5" - and, through the catch-all line "host all all 0.0.0.0/0 md5",
+// over TCP from any IPv4 address that listen_addresses lets in, for EVERY database: insert the four
+// lines of README 2.2 - "local all galbridge reject" and the three host lines - BEFORE iRedMail's
+// "local all all md5" line):
+//   TCP on the same host (as iRedMail configures Roundcube itself; the lines of README 2.2):
 //     'pgsql://galbridge:PASSWORD@127.0.0.1/vmail'
-//   unix socket (give the socket DIRECTORY):
+//   unix socket (give the socket DIRECTORY; pg_hba.conf then needs
+//   "local vmail galbridge scram-sha-256" on the line before "local all galbridge reject"):
 //     'pgsql://galbridge:PASSWORD@unix(/var/run/postgresql)/vmail'
 //   Remote server with verified TLS (pg_hba.conf needs "hostssl vmail galbridge 192.0.2.10/32
 //   scram-sha-256" and "hostnossl vmail galbridge 0.0.0.0/0 reject" inserted BEFORE iRedMail's
@@ -221,7 +228,9 @@ $config['galbridge_db_connect_timeout'] = 2;
 // max_execution_time, PostgreSQL statement_timeout. It bounds what one slow or abusive search can
 // cost the database. This value - not the role - bounds the plugin's statements: the reference
 // grants give the role 25 connections on BOTH engines (a hard limit; "grants --connection-limit=N",
-// size it to the PHP-FPM pm.max_children of Roundcube) and a statement time of 5 seconds as its
+// size it to at most the PHP-FPM pm.max_children of Roundcube AND what the database server can
+// spare - iRedMail: keep 25, its MariaDB keeps max_connections = 151 and its PostgreSQL 100 on
+// Debian/Ubuntu for every service, README 2.2) and a statement time of 5 seconds as its
 // DEFAULT (PostgreSQL and MariaDB; MySQL 8 has none), which every session - this one too - may
 // change for itself. A server that refuses this statement timeout or the read-only mode is not
 // used: the books are unavailable (log reasons "session_limit_refused" and "db_down", diag FAIL
@@ -398,7 +407,9 @@ $config['galbridge_domain_autocomplete'] = true;
 // galbridge_max_export entries; false refuses it. A refused export downloads nothing (the server
 // answers 204 No Content and logs the reason; an export is a file download and cannot show a
 // message). Exporting selected contacts, a search result or a group stays possible within their own
-// limits (it shows nothing the user cannot already see on screen).
+// limits (it shows nothing the user cannot already see on screen). The whole of a SEARCH-ONLY book
+// (galbridge_domain_searchonly = true, or 'auto' above galbridge_searchonly_threshold) is refused
+// whatever this option says.
 // EVERY export is complete or refused, never cut: a search result with more matches than the
 // result cap (galbridge_max_results), a set of which an entry could not be read, or a directory
 // that fails during the export all answer 204 instead of a file that silently lacks entries.
@@ -487,7 +498,9 @@ $config['galbridge_global_searchonly'] = true;
 $config['galbridge_global_autocomplete'] = true;
 
 // Allow exporting the WHOLE global book as vCard. Default false: a bulk export of other domains'
-// people is refused; selected contacts, search results and groups stay exportable.
+// people is refused; selected contacts, search results and groups stay exportable. A search-only
+// global book (galbridge_global_searchonly = true, the default, or 'auto' above the threshold) is
+// never exported as a whole, whatever this option says.
 $config['galbridge_global_export'] = false;
 
 // Entries (persons + alias accounts + lists) above which a book with searchonly = 'auto' becomes

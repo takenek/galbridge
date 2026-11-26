@@ -543,7 +543,7 @@ final class CliToolTest extends TestCase
         self::assertSame(rtrim(implode("\n", $expected)), self::body($out));
 
         self::assertSame($driver === 'mysql' ? "mysql://galbridge:{$password}@localhost/vmail" : "pgsql://galbridge:{$password}@127.0.0.1/vmail", self::dsnOf($out));
-        self::assertStringContainsString("\n-- Put this line into config/galbridge.inc.php (or plugins/galbridge/config.inc.php if you keep the configuration there; owner root:<web server group>, mode 0640):\n", $out);
+        self::assertStringContainsString("\n-- Put this line into config/galbridge.inc.php (or plugins/galbridge/config.inc.php if you keep the configuration there; owner root:<web server group>, mode 0640) WITHOUT its leading \"-- \", then check the file with php -l:\n", $out);
         self::assertStringNotContainsString('Remote database', $out, 'a local server needs no TLS hint');
         self::assertStringNotContainsString('REQUIRE SSL;', $out);
         foreach (self::statements($out) as $statement) {
@@ -1499,6 +1499,8 @@ final class CliToolTest extends TestCase
             self::assertSame('', $out, 'no statement, no password, no check');
             self::assertStringStartsWith('galbridge.sh must not run as root: it loads PHP code from the plugin and the Roundcube directory.', $err);
             self::assertStringContainsString('sudo -u www-data', $err);
+            // 1.0.4: iRedMail does not install sudo - the message names the form without it
+            self::assertStringContainsString('runuser -u www-data -- plugins/galbridge/bin/galbridge.sh diag', $err);
         }
         // grants is meant to run as root - with --allow-root, which checks the code first (second
         // verification pass, F-02): the refusal says how
@@ -1783,7 +1785,7 @@ final class CliToolTest extends TestCase
 
         [$code, $out] = $this->diag(['galbridge_db_dsn' => self::dsnOf($grants)]);
         self::assertSame(0, $code, $out);
-        self::assertLine($out, 'OK', 'connection limit', '25 (size it to the PHP-FPM pm.max_children of Roundcube)');
+        self::assertLine($out, 'OK', 'connection limit', '25 (at most the PHP-FPM pm.max_children of Roundcube and what the server\'s max_connections can spare - README 2.2)');
         self::assertLine($out, 'OK', 'table forwardings', 'not readable');
         self::assertStringNotContainsString('[WARN] connection limit', $out);
         if ($engine === 'pgsql') {
@@ -2384,6 +2386,15 @@ final class CliToolTest extends TestCase
         self::assertSame(2, $code, $out);
         self::assertLine($out, 'FAIL', 'directory hosts', 'plugin disabled: imap_host is templated');
 
+        // 1.0.4: every stored host covered - the check that ran says so instead of printing nothing
+        $pdo = new \PDO('sqlite:' . $this->roundcubeDb());
+        $pdo->exec("INSERT INTO users (username, mail_host, created) VALUES ('k@example.com', '127.0.0.1', '2024-01-01 00:00:00'), ('l@example.com', '', '2024-01-01 00:00:00')");
+        $pdo = null;
+        [$code, $out] = $this->diag(['galbridge_db_dsn' => $dsn]);
+        self::assertSame(0, $code, $out);
+        self::assertLine($out, 'OK', 'stored IMAP hosts', ' 1 account(s) with a stored IMAP host, all covered by the directory hosts');
+        self::assertStringNotContainsString('k@example.com', $out, 'counts only, never user names');
+
         // Roundcube users stored with another IMAP host
         $pdo = new \PDO('sqlite:' . $this->roundcubeDb());
         $pdo->exec("INSERT INTO users (username, mail_host, created) VALUES ('a@example.com', 'imap.old.example', '2024-01-01 00:00:00'),"
@@ -2393,6 +2404,7 @@ final class CliToolTest extends TestCase
         self::assertSame(0, $code, $out);
         self::assertLine($out, 'WARN', 'users on imap.old.example', '2 Roundcube users on this IMAP host get no directory');
         self::assertStringNotContainsString('users on 127.0.0.1', $out);
+        self::assertStringNotContainsString('stored IMAP hosts', $out, 'no OK line next to a WARN of the same check');
         self::assertStringNotContainsString('a@example.com', $out, 'counts only, never user names');
 
         // a stored host that is not in the form of a regular login is counted, never printed - it may

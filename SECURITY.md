@@ -62,9 +62,11 @@ installing):
 for a release. The file comes from the same clone as the tag, so it proves nothing by itself:
 compare the fingerprint in that line with this section as published on GitHub
 (<https://github.com/takenek/galbridge/blob/main/SECURITY.md>) and with the SSH **signing** keys of the
-maintainer's GitHub account, <https://api.github.com/users/takenek/ssh_signing_keys> (save the
-`key` value of the list to a file and run `ssh-keygen -lf` on it; `https://github.com/takenek.keys`
-lists authentication keys, not signing keys). Both sources are on GitHub: whoever took over the
+maintainer's GitHub account, <https://api.github.com/users/takenek/ssh_signing_keys> (README 2.1
+gives the two commands, which need only `python3`: the second one pipes the `key` values of that
+list into `ssh-keygen -lf -`; `https://github.com/takenek.keys` lists authentication keys, not
+signing keys). On GitHub the key is titled "MIME Shield release signing": the maintainer signs the
+releases of GAL Bridge and of MIME Shield with the same key. Both sources are on GitHub: whoever took over the
 maintainer's account could change them too. The maintainer therefore also publishes the fingerprint
 on a channel outside GitHub (docs/RELEASING.md section 0; this section names it once it exists), and
 when the key changes, compare with the `SECURITY.md` of a release you verified before as well. CI refuses a tag that a key of the file on `main` did
@@ -238,12 +240,14 @@ See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the full threat model and
 * **Install a release, not a clone** (README 2.1): verify the signed tag against the release signing
   key above (compare its fingerprint) and unpack its archive. A git clone brings `tests/` – scripts
   that drop databases and reconfigure Dovecot – and the repository history onto the mail server;
-  `diag` reports such a tree. Composer does not verify tag signatures: compare the commit it
-  installed with the one of the verified tag (README 2.1).
+  `diag` reports such a tree. Composer does not verify tag signatures, and Packagist publishes no
+  checksum of its archive: compare the installed files with `git archive` of the verified tag
+  (`diff -r`) and the commit Composer names with the tag's (README 2.1).
 * **Dedicated role, generated as root** (README 2.2): the database administrator runs what
   `grants` prints, so check the plugin files with the system's tools first (`find -L
   plugins/galbridge \( ! -user root -o -perm /022 \) -print` prints nothing, `namei -l` on the
-  script shows root-owned directories without group/other write), then run
+  absolute path of the script (`"$PWD/plugins/galbridge/bin/galbridge.sh"`) shows root-owned
+  directories from `/` down without group/other write, symbolic links excepted), then run
   `plugins/galbridge/bin/galbridge.sh grants --allow-root ... > /root/galbridge-grants.sql` as root
   under `umask 077` (`--allow-root` refuses code that root does not own alone; `grants` refuses to
   run as the web server user, and any non-root run refuses code another account can change).
@@ -279,14 +283,18 @@ See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the full threat model and
   to use.
 * **Read `diag` with its scope in mind**: it runs in the command line PHP – the PHP version,
   extensions and `ROUNDCUBE_*` / `PG*` variables it reports are those of that process (it says so);
-  check the PHP-FPM pool of Roundcube separately (`php-fpm -m`, `env[...]`, `clear_env`), and the
+  check the PHP-FPM pool of Roundcube separately (`php-fpm -m` – on Debian and Ubuntu
+  `php-fpm8.4 -m` and so on –, `env[...]`, `clear_env`), and the
   log line `env_override` for the `ROUNDCUBE_GALBRIDGE_*` variables the web server applies. For
   automated checks use `diag --strict` (a WARN line gives exit code 2, like a FAIL); a run that
   aborts – also a PHP fatal error during Roundcube's start – ends with `Result: aborted` and exit
   code 2. Output and standard error of `diag` are neutralised (no terminal control sequence from a
   database server, an exception or a file name reaches the terminal raw).
-* **Account limits** sized to the PHP-FPM pool, set by the grant set on both engines
-  (`grants --connection-limit=`, default 25; `diag` shows the limit and warns when there is none):
+* **Account limits** sized to at most the PHP-FPM pool and to what the database server can spare
+  (iRedMail: the default 25 – its MariaDB keeps `max_connections = 151` and its PostgreSQL 100 on
+  Debian and Ubuntu, shared by every service; README 2.2), set by the grant set on both
+  engines (`grants --connection-limit=`, default 25; `diag` shows the limit and warns when there is
+  none):
   the connection limit is a limit the server enforces – PostgreSQL `CONNECTION LIMIT`, MariaDB/MySQL
   `MAX_USER_CONNECTIONS`. `statement_timeout`, `idle_in_transaction_session_timeout` and
   `default_transaction_read_only` (PostgreSQL) and MariaDB's `MAX_STATEMENT_TIME` are role
@@ -300,10 +308,12 @@ See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the full threat model and
   fails while the role may create objects – in its own schema, schema `public`, any other schema or
   the database – or owns any, and the plugin refuses a role with `CREATE` on another schema (a
   privilege outside, like any other privilege granted to it in the database). Limit the role to the `vmail` database in
-  `pg_hba.conf`, before iRedMail's catch-all line (README 2.2): `PUBLIC` holds `CONNECT` on the
-  other databases (`diag` lists them as INFO).
+  `pg_hba.conf` – over TCP **and** over the unix socket: the four lines of README 2.2, inserted
+  before iRedMail's `local all all md5` line – and test it as README 2.2 shows: `PUBLIC` holds
+  `CONNECT` on the other databases (`diag` lists them as INFO; it cannot read `pg_hba.conf`).
 * **Bound the PHP worker**: set PHP-FPM's `request_terminate_timeout` for the Roundcube pool (e.g.
-  `60s`). On PostgreSQL it is the only bound against a database server or proxy that stops
+  `60s`; iRedMail 1.8.11 already sets `request_terminate_timeout = 60s` in
+  `/etc/php/8.4/fpm/pool.d/www.conf`). On PostgreSQL it is the only bound against a database server or proxy that stops
   answering after the connection is set up (libpq has no read timeout), and so it is on
   MariaDB/MySQL with a `pdo_mysql` not built on `mysqlnd` (`diag` WARN `read timeout`); otherwise
   the plugin's MariaDB/MySQL connection gives up after its read timeout (README 3.9). Do not raise
@@ -411,14 +421,29 @@ See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the full threat model and
 
   Size the rate to normal use (Roundcube sends one autocomplete request per keystroke pause, and
   one per book with `autocomplete_threads`) and the concurrency limit to a fraction of the role's
-  connection limit. Behind a load balancer or another proxy, key on the real client address
+  connection limit. The limits apply per client address: every user behind one NAT address (an
+  office, a VPN exit) shares them – size them for the busiest such address (still well below the
+  role's connection limit), or exempt trusted ranges with a key of their own, e.g.
+  `geo $rc_limit_key { default $binary_remote_addr; 203.0.113.0/24 ""; }` and `$rc_limit_key` in
+  both `*_zone` lines (a request with an empty key is not limited). nginx answers a request beyond
+  the limits with 503; `limit_req_status 429; limit_conn_status 429;` tells them apart in the logs. Behind a load balancer or another proxy, key on the real client address
   (`set_real_ip_from` / `real_ip_header`), not on the proxy's. A tighter limit for autocomplete
   alone is optional, but cannot replace the limits above: a key such as
   `map $arg__action $key { autocomplete $binary_remote_addr; }` sees only the literal query
   parameter, while Roundcube takes `_action` from the query string, the POST body or a cookie (the
   cookie wins), URL-decodes it and drops every character outside `[A-Za-z0-9_.-]` – a request that
   spells it any other way passes such a limit.
-* Run `plugins/galbridge/bin/galbridge.sh diag` after every Roundcube, iRedMail or plugin upgrade.
+
+  **iRedMail:** its `nginx.conf` includes `/etc/nginx/conf-enabled/*.conf` inside `http {}`: put the
+  two `*_zone` lines into a new file `/etc/nginx/conf-enabled/roundcube-limits.conf`, and the
+  `limit_req` / `limit_conn` lines at the top of `location ~ ^/mail/(.*\.php)$` in
+  `/etc/nginx/templates/roundcube.tmpl` (`location ~ ^/(.*\.php)$` in `roundcube-subdomain.tmpl`),
+  not at server level, where they would also count static files and iRedAdmin; `nginx -t &&
+  systemctl reload nginx`. iRedMail upgrades that replace those templates remove the two lines: add
+  them again (README 5).
+* Run `sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --url=<webmail URL>` from the
+  Roundcube directory (README 2.6 and 2.7; without sudo `runuser -u www-data -- ...`) after every
+  Roundcube, iRedMail or plugin upgrade – `--url` checks that the web server rule is still there.
 
 ## Logs
 

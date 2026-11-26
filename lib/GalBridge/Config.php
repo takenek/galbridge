@@ -587,7 +587,7 @@ final class Config
                 }
             }
             foreach ($out as $name) {
-                $this->problem('fail', $name, 'differs from the host-independent configuration: it is set in a per-host configuration file (include_host_config - the Host header of the request, chosen by the client, selects that file) or in a file the configuration includes only once (include_once/require_once); keep every galbridge_* option in plugins/galbridge/config.inc.php - all books are disabled');
+                $this->problem('fail', $name, 'differs from the host-independent configuration - all books are disabled; keep every galbridge_* option in config/galbridge.inc.php or plugins/galbridge/config.inc.php (never both), not in a per-host file (include_host_config) or one included with include_once/require_once');
             }
             $this->memo['host_dependent'] = $out;
         }

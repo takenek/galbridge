@@ -282,7 +282,7 @@ final class Remediation2ResidualRiskTest extends TestCase
         self::assertSame(0, (new Tool(null, CliRun::pluginDir(), $out, $err))->run(['grants', 'driver' => 'mysql']));
         rewind($err);
         $errors = (string) stream_get_contents($err);
-        self::assertStringStartsWith("\n-- Put this line into config/galbridge.inc.php (or plugins/galbridge/config.inc.php if you keep the configuration there; owner root:<web server group>, mode 0640):\n", $errors);
+        self::assertStringStartsWith("\n-- Put this line into config/galbridge.inc.php (or plugins/galbridge/config.inc.php if you keep the configuration there; owner root:<web server group>, mode 0640) WITHOUT its leading \"-- \", then check the file with php -l:\n", $errors);
     }
 
     // ------------------------------------------------------------------ (f)

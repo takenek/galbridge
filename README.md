@@ -1,7 +1,7 @@
 # GAL Bridge (`galbridge`) – Global Address List for Roundcube 1.7
 
 [![CI](https://github.com/takenek/galbridge/actions/workflows/ci.yml/badge.svg)](https://github.com/takenek/galbridge/actions/workflows/ci.yml)
-[![Packagist](https://raw.githubusercontent.com/takenek/galbridge/main/.github/badges/packagist.svg)](https://packagist.org/packages/takenek/galbridge)
+[![Packagist](https://raw.githubusercontent.com/takenek/galbridge/main/.github/badges/packagist-v1.0.4.svg)](https://packagist.org/packages/takenek/galbridge)
 [![License](https://raw.githubusercontent.com/takenek/galbridge/main/.github/badges/license.svg)](LICENSE)
 
 GAL Bridge gives Roundcube Webmail **1.7** (every 1.7.x release) a read-only **Global Address
@@ -101,12 +101,56 @@ All commands are run in the Roundcube installation directory: `/opt/www/roundcub
 `/var/www/roundcube` elsewhere. `www-data` below is the PHP-FPM / web server user: `www-data` on
 Debian and Ubuntu, `nginx` on the RHEL family, `www` on FreeBSD and OpenBSD.
 
+`sudo` and `curl` are not part of iRedMail, and a Debian server installed with a root password has
+neither. `curl` is needed for the check of 2.6: `apt install curl`. For `sudo` either `apt install
+sudo`, or write each `sudo -u www-data ...` command of this document as `runuser -u www-data -- ...`
+(util-linux, always installed), run as root from the same directory – e.g. `runuser -u www-data --
+plugins/galbridge/bin/galbridge.sh diag`. `runuser` keeps root's
+environment apart from `HOME`, `SHELL`, `USER` and `LOGNAME`, so run it from a plain root shell (no
+`ROUNDCUBE_*` or `PG*` variables set). `su www-data -c ...` does not work: `www-data` has no login
+shell.
+
+**Checklist for a standard iRedMail 1.8 server** (Debian or Ubuntu, nginx, Roundcube in
+`/opt/www/roundcubemail`, MariaDB/MySQL or PostgreSQL edition). Each step links to the subsection
+with the exact commands and the reasons for them – read it before you run them:
+
+1. [2.1](#21-install-the-plugin-files) – install the files as root: from the signed tag
+   (`apt install git openssh-client`, `verify-tag`, compare the fingerprint, `git archive` into
+   `plugins/galbridge`), or with Composer (`apt install composer git openssh-client` – git and
+   `ssh-keygen` for the comparison with the signed tag; give `config/config.inc.php` to
+   root and create an empty `config/galbridge.inc.php` first; `composer require` with
+   `--ignore-platform-req=ext-ldap` in an interactive root shell, answer `n` when the installer asks
+   whether to activate the plugin; compare the installed files with the signed tag).
+2. [2.2](#22-create-the-dedicated-read-only-database-role) – check the plugin files with `find` and
+   `namei`, generate the grant set with `grants --allow-root` for your edition (`--driver=mysql` or
+   `--driver=pgsql`; the SQL into `/root/galbridge-grants.sql`, the DSN line into
+   `/root/galbridge-dsn.txt`; on iRedMail the default connection limit 25), review it and apply it as
+   the database administrator. **PostgreSQL edition:** the four `pg_hba.conf` lines, inserted
+   **before** iRedMail's `local all all md5` line; check the file, reload PostgreSQL, and test that
+   both `psql ... -d roundcubemail` logins of 2.2 are rejected.
+3. [2.3](#23-configure-the-plugin) – `config/galbridge.inc.php` (owner root, group `www-data`, mode
+   0640) from `config.inc.php.dist`, with the DSN line of `/root/galbridge-dsn.txt` – **without** its
+   leading `-- `; `php -l` the file.
+4. [2.4](#24-enable-the-plugin) – add `'galbridge'` to `$config['plugins']` and give
+   `config/config.inc.php` to root (group `www-data`, mode 0640).
+5. [2.5](#25-recommended-roundcube-settings) – uncomment iRedMail's
+   `//$config['addressbook_sort_col'] = 'name';`.
+6. [2.6](#26-web-server-keep-the-plugin-directory-unreachable) – the nginx deny rule in both Roundcube
+   templates; for a webmail reachable from the Internet also the per-client limits; `nginx -t &&
+   systemctl reload nginx`, then check with the two `curl` requests of 2.6 that the plugin source
+   answers 403.
+7. [2.7](#27-test-the-installation) – `diag`, `diag --user=<a login>` and `diag
+   --url=https://<the host name of the certificate>/mail/ --cafile=/etc/ssl/certs/iRedMail.crt`: on a
+   standard iRedMail server set up like this all three end with `Result: OK` – no FAIL, no WARN;
+   look into any WARN. Then log in to the webmail and open the address book.
+
 ### 2.1 Install the plugin files
 
 **Release archive** (from the signed tag)
 
 ```sh
-v=1.0.3   # the release to install: https://github.com/takenek/galbridge/releases (only the latest is supported)
+apt install git openssh-client   # Debian/Ubuntu: a minimal server (and iRedMail) may have neither
+v=1.0.4   # the release to install: https://github.com/takenek/galbridge/releases (only the latest is supported)
 git clone --branch "v$v" https://github.com/takenek/galbridge.git /root/galbridge-src   # NOT below the web root
 git -C /root/galbridge-src -c gpg.ssh.allowedSignersFile=/root/galbridge-src/.github/release-signers verify-tag "v$v"
 git -C /root/galbridge-src -c tar.umask=0022 archive --prefix=galbridge/ "v$v" | tar -x -C /opt/www/roundcubemail/plugins
@@ -114,13 +158,23 @@ rm -rf /root/galbridge-src
 ```
 
 The commands need `git` 2.34 or later and `ssh-keygen`, which git runs to check the SSH signature
-(Debian/Ubuntu: `apt install git openssh-client`; a minimal server may have neither – without
-`ssh-keygen` `verify-tag` fails with `cannot run ssh-keygen`).
+(the first line installs both; without `ssh-keygen` `verify-tag` fails with `cannot run
+ssh-keygen`).
 `verify-tag` must succeed and print
 `Good "git" signature for galbridge-release with RSA key SHA256:Dh488r7YcvACwpsZov0/TASb3v3FRjz4//bwoQCyPwU`.
 The allowed-signers file comes from the same clone as the tag, so it proves nothing by itself:
 **compare the fingerprint** with SECURITY.md section "Release signing key" as GitHub shows it and
-with the SSH signing keys of the maintainer's GitHub account (how: that section). If the tag does not
+with the SSH signing keys of the maintainer's GitHub account – both commands must print the same
+`SHA256:` value as `verify-tag` (they need only `python3`, which iRedMail has):
+
+```sh
+python3 -c 'import urllib.request as u; print([l for l in u.urlopen("https://raw.githubusercontent.com/takenek/galbridge/main/SECURITY.md").read().decode().splitlines() if l.startswith("| Fingerprint")][0])'
+python3 -c 'import json, urllib.request as u; [print(k["key"]) for k in json.load(u.urlopen("https://api.github.com/users/takenek/ssh_signing_keys"))]' | ssh-keygen -lf -
+```
+
+The second command lists the account's signing key as `8192 SHA256:... no comment (RSA)`; on GitHub
+its title is "MIME Shield release signing": the maintainer signs the releases of GAL Bridge and of
+MIME Shield with the same key. If the tag does not
 exist, `verify-tag` fails or the fingerprint differs, do not install. GitHub's "Source code"
 downloads of a release page are generated by GitHub and carry no signature: they are no
 installation method.
@@ -135,37 +189,71 @@ on a mail server (`diag` warns about such a tree).
 
 **Composer** (Roundcube's plugin installer)
 
-Create the configuration **outside** the package first – `config/galbridge.inc.php`, owner root,
-group of the PHP user, mode `0640` (section 2.3) – then install from the release archive:
+Composer is not part of iRedMail or of a minimal Debian: `apt install composer` (Debian 13: Composer
+2.8). On iRedMail run it as **root** – the Roundcube tree, `vendor/` included, belongs to root and
+`composer.json` / `composer.lock` have mode 0000, so no other account can use Composer there – and in
+an **interactive** shell: Composer warns `Do not run Composer as root/super user!` and asks
+`Continue as root/super user [yes]?` – answer `yes`. Run as root without a terminal (a script,
+`ssh host '...'`, cron, a configuration-management tool), Composer disables its plugins: Roundcube's
+plugin installer then never runs, and `composer require` succeeds but puts the package into
+`vendor/takenek/galbridge` instead of `plugins/galbridge` (check: `ls -d plugins/galbridge`); Composer
+says so with `Composer plugins have been disabled for safety in this non-interactive session.` A
+script sets `COMPOSER_ALLOW_SUPERUSER=1` – the installer then also activates the plugin (the default
+answer of its question, below). The same holds for **every** later `composer update`, `composer
+install` and `composer remove` in this tree: without a terminal (and without
+`COMPOSER_ALLOW_SUPERUSER=1`) `update` and `install` put a second copy into `vendor/takenek/galbridge`
+and leave `plugins/galbridge` as it was, and `remove` leaves `plugins/galbridge` in place (sections
+5 to 7; `diag` warns about such a copy, "composer copy").
+
+Before the first Composer run give `config/config.inc.php` to root (the ownership step of 2.4): the
+plugin installer loads that file inside the root Composer process, and iRedMail leaves it to the PHP
+user. Create the plugin's configuration **outside** the package – `config/galbridge.inc.php`, owner
+root, group of the PHP user, mode `0640` (section 2.3; it stays empty until then, the DSN comes from
+`grants`, 2.2) – then install the release:
 
 ```sh
 cd /opt/www/roundcubemail
-install -o root -g www-data -m 0640 /dev/null config/galbridge.inc.php   # fill it in as in 2.3
-composer require --prefer-dist "takenek/galbridge:^1.0"    # a tagged release; never dev-main in production
+chown root:www-data config/config.inc.php && chmod 0640 config/config.inc.php   # iRedMail, as in 2.4
+install -o root -g www-data -m 0640 /dev/null config/galbridge.inc.php        # filled in in 2.3
+composer require --prefer-dist --ignore-platform-req=ext-ldap "takenek/galbridge:^1.0"   # a tagged release; never dev-main in production
 ```
 
-**iRedMail (MariaDB/MySQL and PostgreSQL editions):** this `composer require` stops with
+`--ignore-platform-req=ext-ldap` is needed on iRedMail's MariaDB/MySQL and PostgreSQL editions (and
+on any server without the PHP `ldap` extension): without it this `composer require` stops with
 `pear/net_ldap2 ... requires ext-ldap * -> it is missing from your system` and changes nothing.
 Roundcube's own `composer.lock` holds its LDAP libraries (`kolab/net_ldap3`, `pear/net_ldap2`),
 which declare the PHP `ldap` extension, and iRedMail installs that extension only for its OpenLDAP
-edition. Exempt that one requirement – the LDAP libraries are not touched, and nothing of GAL Bridge
-needs `ldap` – with `--ignore-platform-req=ext-ldap` (never `--ignore-platform-reqs`, which drops
-every requirement, the PHP version included), on `composer require` and on every later
-`composer update`; installing the extension (`apt install php-ldap`) works as well:
+edition. The option exempts that one requirement – the LDAP libraries are not touched, and nothing of
+GAL Bridge needs `ldap` (never `--ignore-platform-reqs`, which drops every requirement, the PHP
+version included). Give it to every later `composer update` and `composer remove` as well – or
+install the extension (`apt install php-ldap`) and leave it out.
 
-```sh
-composer require --prefer-dist --ignore-platform-req=ext-ldap "takenek/galbridge:^1.0"
-```
+The installer then asks `Do you want to activate the plugin galbridge? [Y|n]` (Enter means yes):
+answer `n` and enable the plugin in 2.4, once 2.2 and 2.3 are done. Activated now, it runs with the
+empty configuration file – every book disabled, and `config_invalid` in its log – until 2.3.
 
 The package is listed on Packagist ([takenek/galbridge](https://packagist.org/packages/takenek/galbridge),
 updated from GitHub at every push). Production installations take a tagged release by version
 constraint – but
-**Composer does not verify tag signatures**: check what it installed against a verified clone (the
-first three commands of the release archive above, without the archive step). `composer show
-takenek/galbridge` must name the source `https://github.com/takenek/galbridge` and, as its source
-reference, the commit that `git -C /root/galbridge-src rev-parse "v$v^{commit}"` prints; then remove
-the clone (see [docs/RELEASING.md](docs/RELEASING.md), section 2 for installation, section 3 for the
-tag signature).
+**Composer does not verify tag signatures**, and Packagist publishes no checksum of the archive it
+installs: compare the installed files with a verified clone. Run the commands of the release archive
+above up to `verify-tag` (with its fingerprint comparison), with `v` set to the version on the
+`versions` line of `composer show takenek/galbridge` without the `*` and the leading `v`
+(`versions : * vX.Y.Z` gives `v=X.Y.Z`), then, in the Roundcube directory:
+
+```sh
+mkdir -m 0700 /root/galbridge-check
+git -C /root/galbridge-src archive "v$v" | tar -x -C /root/galbridge-check
+diff -r /root/galbridge-check/ plugins/galbridge/ && echo identical   # must print only "identical"
+git -C /root/galbridge-src rev-parse "v$v^{commit}"                  # must be the <commit> on the "source" line of: composer show takenek/galbridge
+rm -rf /root/galbridge-check /root/galbridge-src
+```
+
+With the configuration in the plugin directory `diff` also reports `Only in plugins/galbridge/:
+config.inc.php`; nothing else may differ. `composer show takenek/galbridge` names the source as
+`source   : [git] https://github.com/takenek/galbridge.git <commit>`: the commit checks Packagist's
+metadata, the `diff` checks the files (see [docs/RELEASING.md](docs/RELEASING.md), section 2 for
+installation, section 3 for the tag signature).
 For deliberate testing of unreleased code only, add the repository as a Composer VCS repository and
 pin an explicitly reviewed commit:
 
@@ -175,7 +263,8 @@ composer require "takenek/galbridge:dev-main#<commit-sha>"
 ```
 
 The installer (roundcube/plugin-installer) checks the Roundcube version against `min-version` /
-`max-version`, asks whether to enable the plugin (then skip 2.4) and copies `config.inc.php.dist` to
+`max-version`, asks whether to activate the plugin (above: answered yes, it has added `'galbridge'`
+to `$config['plugins']` and nothing else – do the rest of 2.4 all the same) and copies `config.inc.php.dist` to
 `plugins/galbridge/config.inc.php` unless that file or `config/galbridge.inc.php` already exists –
 with `config/galbridge.inc.php` in place it creates nothing in the plugin directory. GAL Bridge has
 no database tables, so nothing is initialised. **Keep the configuration in
@@ -193,7 +282,8 @@ put a git clone with `tests/` into `plugins/galbridge`).
 **The plugin code belongs to root** – whichever way it is installed. Composer writes the package with
 the owner and umask of the account that runs it; files of the web server user are files a compromised
 web application can change, and both `grants` and `--allow-root` refuse to run from them (section
-2.2; `diag` names them on its "plugin code" line). Run Composer as root, or follow every `composer
+2.2; `diag` names them on its "plugin code" line). Run Composer as root (on iRedMail the only
+account that can), or follow every `composer
 require` / `composer update` with `chown -R root plugins/galbridge && chmod -R go-w
 plugins/galbridge` (the web server needs read access only). It changes the owner only: a
 configuration kept in `plugins/galbridge/config.inc.php` keeps its group – the PHP group, e.g.
@@ -237,15 +327,34 @@ clean – then generate the statements as root:
 ```sh
 cd /opt/www/roundcubemail
 find -L plugins/galbridge \( ! -user root -o -perm /022 \) -print   # must print nothing (GNU find)
-namei -l plugins/galbridge/bin/galbridge.sh    # every line: owner root, no "w" in the group or other columns (/tmp-style "t" excepted)
+namei -l "$PWD/plugins/galbridge/bin/galbridge.sh"   # every line from / down: owner root, no "w" in the group or other columns (excepted: /tmp-style "t", and symbolic links such as roundcubemail -> roundcubemail-1.7.7, always lrwxrwxrwx)
 umask 077     # the SQL file must be readable by root only
-plugins/galbridge/bin/galbridge.sh grants --allow-root --driver=mysql > /root/galbridge-grants.sql   # MariaDB/MySQL edition
-plugins/galbridge/bin/galbridge.sh grants --allow-root --driver=pgsql > /root/galbridge-grants.sql   # PostgreSQL edition
+plugins/galbridge/bin/galbridge.sh grants --allow-root --driver=mysql > /root/galbridge-grants.sql 2> /root/galbridge-dsn.txt   # MariaDB/MySQL edition
+plugins/galbridge/bin/galbridge.sh grants --allow-root --driver=pgsql > /root/galbridge-grants.sql 2> /root/galbridge-dsn.txt   # PostgreSQL edition
 ```
 
-The SQL goes into the file; the DSN line with the password appears on the terminal (standard
-error) and never in the file. Copy it into the configuration (2.3) – or keep it in a file only root
-can read, `2> /root/galbridge-dsn.txt` under the same `umask 077`, and `shred -u` that file after use.
+**The connection limit** (`--connection-limit`, default 25) bounds the role's simultaneous
+connections; a request opens at most one. Size it to **at most** the PHP-FPM pool of Roundcube
+(`pm.max_children`) **and** to what the database server can spare. iRedMail runs Roundcube in a pool
+of `pm.max_children = 100` (`/etc/php/8.4/fpm/pool.d/www.conf` on Debian 13), while both of its
+database servers keep their small defaults on Debian and Ubuntu – MariaDB `max_connections = 151`,
+PostgreSQL 100 (three of them reserved for superusers) –, shared with Roundcube's own connection of
+every request, Dovecot, Postfix, iRedAPD, Amavisd and iRedAdmin. **Keep the default 25 on iRedMail**;
+a larger limit only after raising `max_connections` (MariaDB: a file in `/etc/mysql/mariadb.conf.d/`,
+PostgreSQL: `/etc/postgresql/17/main/postgresql.conf`; then restart the server) – otherwise logins of
+those services can fail under load ("Too many connections", "too many clients already"). The current
+value: `mysql -Ne 'SELECT @@max_connections'` or `runuser -u postgres -- psql -XAtc 'SHOW
+max_connections'`. Change the limit later with `grants --grants-only --connection-limit=N` (below) –
+and give every later `--grants-only` run the same `--connection-limit`, or the limit goes back to 25
+(the second line of the output says which it applies).
+
+The SQL goes into the first file; the DSN line with the password goes to standard error – here into
+`/root/galbridge-dsn.txt`, readable by root only under the same `umask 077` (without `2>` it appears
+on the terminal) – and never into the SQL file. It is printed as an SQL comment, after an empty line
+and an instruction line: the line that starts with `-- $config['galbridge_db_dsn']` goes into the
+configuration (2.3) **without the leading `-- `** – with it, `config/galbridge.inc.php` is no PHP
+file that parses, and once the plugin is enabled every webmail request of a logged-in user stops with
+a parse error. 2.3 puts it in place without showing it and `shred`s the file.
 Keep both files outside the plugin directory and outside any git checkout of the plugin (above:
 `/root`): some web servers serve the plugin directory (2.6), and a file in a checkout is one `git add`
 away from a commit (the repository's `.gitignore` covers `/*.sql` and copies of the configuration as
@@ -291,7 +400,9 @@ host and database. Keep the output private.
 **Review the output before you apply it** – it is a script for the database administrator:
 
 1. the second line names the role and the form you asked for (creates the role / NEW PASSWORD /
-   re-applies ... to the EXISTING role);
+   re-applies ... to the EXISTING role – that form also names the connection limit it applies); the
+   comments of the template further down keep the default of 25, the statements carry your
+   `--connection-limit`;
 2. `grep -n '\\' /root/galbridge-grants.sql` prints nothing: the output holds no backslash, so no
    psql meta-command and no short-form mysql command (`grants` refuses to print one, and any line
    that starts with a long-form command of the mysql client such as `system` or `source`);
@@ -299,7 +410,11 @@ host and database. Keep the output private.
    limit, password verifier and the `[role]` block:
    `diff <(grep -v -e '^--' -e '^$' plugins/galbridge/SQL/grants.mysql.sql) <(grep -v -e '^--' -e '^$' /root/galbridge-grants.sql)`
    (`grants.postgres.sql` for PostgreSQL) shows nothing else – compare with the template of the
-   verified release archive when the plugin files did not pass the check above.
+   verified release archive when the plugin files did not pass the check above. The account line
+   of the difference carries the password **verifier** (`CREATE USER ... IDENTIFIED WITH
+   mysql_native_password AS '*...'` or `CREATE ROLE ... PASSWORD 'SCRAM-SHA-256$...'`), which counts
+   as a secret: run the
+   `diff` where nobody watches the terminal, and do not paste its output anywhere.
 
 Apply it as the database administrator, with the client commands switched off:
 
@@ -435,8 +550,9 @@ What the role gets:
   schema (or on schema `public` granted to the role by name, when its own schema is another one) is
   a privilege outside, which the plugin refuses.
 
-Size the connection limit to the PHP-FPM pool of Roundcube (`pm.max_children`, e.g.
-`--connection-limit=100` for a pool of 100 children): a request opens at most one directory
+Size the connection limit as described after the `grants` commands above (at most the PHP-FPM pool
+of Roundcube, `pm.max_children`, and what the database server can spare – on iRedMail the default
+25): a request opens at most one directory
 connection, and only when it actually reads the directory. A request beyond the limit gets "The
 directory is temporarily unavailable." for that request only (log `db_busy`; the next request tries
 again, section 3.9). `diag` shows the limit of the account on both engines and warns when it is
@@ -456,22 +572,53 @@ all connections of the role.
 * In both cases add certificate verification to the printed DSN (section 3.9); the DSN host name
   must match the server certificate.
 
-**PostgreSQL: keep the role to the vmail database** in `pg_hba.conf`. iRedMail's `pg_hba.conf` ends
-with the catch-all line `host all all 0.0.0.0/0 md5`, which accepts a password login from every
-address `listen_addresses` lets in, for **every** database – `PUBLIC` holds `CONNECT` on the others
-(`roundcubemail`, `amavisd`, `iredadmin`, ...), where on PostgreSQL 14 and older it may create objects
-as well. PostgreSQL uses the **first** matching line: a line appended after the catch-all never
-applies. Insert these lines **before** it, then reload PostgreSQL (`diag` lists the other databases
-the role may connect to as INFO "other databases"):
+**PostgreSQL: keep the role to the vmail database** in `pg_hba.conf` – on Debian 13 (iRedMail
+1.8.11) `/etc/postgresql/17/main/pg_hba.conf`; `runuser -u postgres -- psql -XAtc 'SHOW hba_file'`
+names it on any system. iRedMail comments out the distribution's lines and ends the file with three
+of its own (written with several spaces between the fields – find them with `grep -nE
+'^(local|host)[[:space:]]+all[[:space:]]+all' /etc/postgresql/17/main/pg_hba.conf`, not by searching
+for the text below):
 
 ```
+local all     postgres   peer
+local all     all                 md5
+host  all     all     0.0.0.0/0   md5
+```
+
+`local all all md5` accepts a password login over the unix socket (`/var/run/postgresql`), the
+catch-all `host` line one from every address `listen_addresses` lets in – both for **every**
+database: `PUBLIC` holds `CONNECT` on the others (`roundcubemail`, `amavisd`, `iredadmin`, ...), where
+on PostgreSQL 14 and older the role may create objects as well. PostgreSQL uses the **first** line
+that matches the connection type, database and role: a `host` line never applies to a socket
+connection, and a line after a matching one never applies. Insert these four lines directly
+**before** iRedMail's `local all all md5` line (and so also before its catch-all):
+
+```
+local      all    galbridge                                       reject          # no login over the unix socket
 host       vmail  galbridge  127.0.0.1/32                         scram-sha-256   # Roundcube on this host
 host       all    galbridge  0.0.0.0/0                            reject          # no other database, no other address
 host       all    galbridge  ::/0                                 reject
 ```
 
-For a remote Roundcube host replace the first line by these two (the server must also listen on
-that interface, `listen_addresses`, and have `ssl = on`):
+With the socket DSN `unix(/var/run/postgresql)` (config.inc.php.dist) instead of `127.0.0.1`, put
+`local vmail galbridge scram-sha-256` on the line before the `local ... reject` line. A file with an
+error is not loaded – PostgreSQL keeps the old rules and only writes a log line –, so check it, then
+reload and test as root:
+
+```sh
+runuser -u postgres -- psql -X -c "SELECT line_number, type, database, user_name, address, auth_method, error FROM pg_hba_file_rules WHERE error IS NOT NULL OR 'galbridge' = ANY(user_name)"   # your four lines, no error
+systemctl reload postgresql
+psql -X -w -h 127.0.0.1 -U galbridge -d roundcubemail -c ''   # must fail: pg_hba.conf rejects connection for host "127.0.0.1", user "galbridge" ...
+psql -X -w -U galbridge -d roundcubemail -c ''                 # must fail: pg_hba.conf rejects connection for host "[local]", user "galbridge" ...
+```
+
+`fe_sendauth: no password supplied` instead means that the `reject` line does not apply: it is not
+loaded, or it sits below iRedMail's lines. `diag` cannot read `pg_hba.conf`: its INFO "other
+databases" comes from the `CONNECT` privilege and stays after this change – the test above is the
+check.
+
+For a remote Roundcube host replace the `host vmail ... 127.0.0.1/32` line by these two (the server
+must also listen on that interface, `listen_addresses`, and have `ssl = on`):
 
 ```
 hostssl    vmail  galbridge  <address of the Roundcube host>/32  scram-sha-256
@@ -482,9 +629,25 @@ hostnossl  vmail  galbridge  0.0.0.0/0                           reject
 
 ```sh
 cd /opt/www/roundcubemail
-# after a Composer install that already created config/galbridge.inc.php (section 2.1): fill that file in instead
+# also after a Composer install: it replaces the still empty config/galbridge.inc.php of 2.1
 install -o root -g www-data -m 0640 plugins/galbridge/config.inc.php.dist config/galbridge.inc.php
 ```
+
+In the copied file replace the line `$config['galbridge_db_dsn'] = '';` by the DSN line that
+`grants` printed (2.2) – **without** its leading `-- ` – and leave everything else at its default.
+From `/root/galbridge-dsn.txt` (2.2) the line goes in without showing the password (the password is
+hexadecimal, `sed` needs no escaping; nothing is changed when the file holds no DSN line), and
+`php -l` checks the result without printing it:
+
+```sh
+grep -q "^-- \$config\['galbridge_db_dsn'\] = '" /root/galbridge-dsn.txt && sed -i "s|^\$config\['galbridge_db_dsn'\] = '';\$|$(grep -o "\$config\['galbridge_db_dsn'\] = '[^']*';" /root/galbridge-dsn.txt)|" config/galbridge.inc.php
+grep -c "^\$config\['galbridge_db_dsn'\] = '[a-z]*://" config/galbridge.inc.php   # must print 1 (0: no DSN line in the file - paste it by hand)
+php -l config/galbridge.inc.php                                                  # must print "No syntax errors detected ..."
+shred -u /root/galbridge-dsn.txt
+```
+
+A parse error in this file stops every webmail page of a logged-in user once the plugin is enabled,
+not just the address books: run `php -l` after every edit.
 
 The file holds the database password and the directory policy: owner root, group = the PHP-FPM
 user, mode `0640`. `diag` fails when others can access it, and warns when its group can write it,
@@ -546,11 +709,15 @@ environment overrides (`ROUNDCUBE_GALBRIDGE_...`, section 3): there the value mu
 
 ### 2.4 Enable the plugin
 
-In `config/config.inc.php` (iRedMail's default list is `['managesieve', 'password', 'zipdownload']`):
+In `config/config.inc.php` add `'galbridge'` to the plugin list – on iRedMail 1.8.11 the line
+becomes:
 
 ```php
-$config['plugins'] = [ /* ... */ 'galbridge'];
+$config['plugins'] = array('managesieve', 'password', 'zipdownload', 'galbridge');
 ```
+
+(a Composer install whose activation question was answered with yes has done this already; the rest
+of this section still applies).
 
 Remove `sql_global_addressbooks` from the list if it is still there
 ([docs/MIGRATION.md](docs/MIGRATION.md)). GAL Bridge adds its books to `autocomplete_addressbooks`
@@ -564,6 +731,7 @@ application could rewrite the directory policy; `diag` warns (`core config file 
 
 ```sh
 chown root:www-data config/config.inc.php && chmod 0640 config/config.inc.php
+php -l config/config.inc.php
 ```
 
 ### 2.5 Recommended Roundcube settings
@@ -572,7 +740,9 @@ chown root:www-data config/config.inc.php && chmod 0640 config/config.inc.php
 $config['addressbook_sort_col'] = 'name';
 ```
 
-Roundcube's default is `'surname'`, iRedMail does not change it, and open-source iRedAdmin fills only
+iRedMail ships this line commented out in `config/config.inc.php`
+(`//$config['addressbook_sort_col'] = 'name';`): remove the leading `//` rather than adding a second
+line. Roundcube's default is `'surname'`, and open-source iRedAdmin fills only
 `mailbox.name`. GAL Bridge sorts its own lists with fallbacks (surname, then name, then address), but
 Roundcube re-sorts every search result in PHP by `addressbook_sort_col` (address-book search,
 compose contact list and compose search); with empty last names the results then come out in
@@ -602,16 +772,26 @@ GAL Bridge serves nothing over HTTP; Roundcube reads it from disk. Nothing under
   directory allows it (`AllowOverride AuthConfig` or `All`); otherwise deny `plugins/galbridge/` in
   the server configuration.
 * **iRedMail nginx**: the templates `roundcube.tmpl` (webmail under `/mail/`) and
-  `roundcube-subdomain.tmpl` (in `/etc/nginx/templates/` on Linux) contain a location for
-  `^/static.php/(.*)` that `alias`es the request straight to the Roundcube directory. That bypasses
+  `roundcube-subdomain.tmpl` (in `/etc/nginx/templates/` on Linux) contain a location –
+  `^/mail/static.php/(.*)` in `roundcube.tmpl`, `^/static.php/(.*)` in `roundcube-subdomain.tmpl` –
+  that `alias`es the request straight to the Roundcube directory. That bypasses
   the type filter of core `static.php`; the templates deny `plugins/*/config.inc.php*` and a few
   top-level directories, but not other plugin files. The PHP source of the plugin, the SQL templates
   and any file an administrator leaves in `plugins/galbridge/` can then be downloaded. Add this rule
-  to both templates **before** the `static.php` location (nginx uses the first matching
-  regular-expression location in the order they appear):
+  to both templates **before** every `static.php` location – directly below the line `# Block
+  direct access to directories and files.` at the top of each template (nginx uses the first
+  matching regular-expression location in the order they appear):
 
   ```nginx
   location ~ ^/(mail/)?(static\.php/)?plugins/galbridge(-[0-9]+)?/ { deny all; }
+  ```
+
+  On iRedMail this puts it there (once; a template that already has it is left alone):
+
+  ```sh
+  cd /etc/nginx/templates
+  for t in roundcube.tmpl roundcube-subdomain.tmpl; do grep -q 'plugins/galbridge' "$t" || sed -i '/^# Block direct access to directories and files\.$/a location ~ ^/(mail/)?(static\\.php/)?plugins/galbridge(-[0-9]+)?/ { deny all; }' "$t"; done
+  grep -n 'plugins/galbridge' roundcube.tmpl roundcube-subdomain.tmpl   # one line in each, line 5
   ```
 
   The optional `-<digits>` also covers the backup copy of the plugin directory that Roundcube's
@@ -619,8 +799,10 @@ GAL Bridge serves nothing over HTTP; Roundcube reads it from disk. Nothing under
   configuration and its password in it; section 2.1). That copy contains the `.htaccess` as well,
   so Apache denies it too.
 
-  Reload (`nginx -t && systemctl reload nginx`) and check that the plugin source is no longer
-  served (for `roundcube-subdomain.tmpl` leave out the `/mail` prefix). Both requests must answer
+  Reload (`nginx -t && systemctl reload nginx`), wait a few seconds – until nginx's old worker
+  processes are gone a request can still be answered with the previous configuration – and check
+  that the plugin source is no longer served (for `roundcube-subdomain.tmpl` leave out the `/mail`
+  prefix). Both requests must answer
   `403` (or `404`); a `200` means the rule is not effective:
 
   ```sh
@@ -630,13 +812,23 @@ GAL Bridge serves nothing over HTTP; Roundcube reads it from disk. Nothing under
 
   With the self-signed certificate that iRedMail installs (`/etc/ssl/certs/iRedMail.crt`, issued
   for the server's host name, until a trusted certificate replaces it) `curl` prints `000`: add
-  `--cacert /etc/ssl/certs/iRedMail.crt` and use that host name in the address.
+  `--cacert /etc/ssl/certs/iRedMail.crt` and use that host name in the address – never `127.0.0.1`
+  or `localhost`, which the certificate does not name. The name (iRedMail: the server's
+  `hostname -f`) is printed by `openssl x509 -in /etc/ssl/certs/iRedMail.crt -noout -subject
+  -nameopt multiline | sed -n 's/^ *commonName *= *//p'`; when it does not resolve to this server on
+  the server itself, add it to `/etc/hosts`.
+
+  **iRedMail upgrades can replace these templates**: some of iRedMail's upgrade tutorials replace
+  the whole content of `roundcube.tmpl` and `roundcube-subdomain.tmpl` (the one from 1.8.1 to 1.8.2
+  did). After every iRedMail upgrade check that the rule is still there, put it back if not, and run
+  `diag --url=` (below; section 5).
 
 * `diag --url=` makes the same check from the server side for the usual paths (section 2.7):
 
   ```sh
   sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --url=https://mail.example.com/mail/
-  # iRedMail's self-signed certificate: name it, the certificate is still verified
+  # iRedMail's self-signed certificate: name it, the certificate is still verified; the address
+  # names the host name of the certificate (above), not 127.0.0.1 or localhost
   sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --url=https://mail.example.com/mail/ --cafile=/etc/ssl/certs/iRedMail.crt
   ```
 
@@ -656,19 +848,37 @@ GAL Bridge serves nothing over HTTP; Roundcube reads it from disk. Nothing under
 * Keep nothing but the plugin in `plugins/galbridge/`: release archives built with `git archive`
   leave out `tests/` and developer tooling (`.gitattributes`), a git clone does not (section 2.1).
   `diag` lists a clone and files that are not part of a release.
+* **Per-client limits** (section 1 – required when the webmail is reachable from the Internet,
+  iRedMail's default; iRedMail sets none): the nginx lines are in the
+  [hardening checklist of SECURITY.md](SECURITY.md#hardening-checklist-for-administrators). On
+  iRedMail put the two `*_zone` lines into a new file `/etc/nginx/conf-enabled/roundcube-limits.conf`
+  (iRedMail's `nginx.conf` includes `conf-enabled/*.conf` inside `http {}`), and the `limit_req` /
+  `limit_conn` lines at the top of the PHP location of both templates – `location ~
+  ^/mail/(.*\.php)$` in `roundcube.tmpl`, `location ~ ^/(.*\.php)$` in `roundcube-subdomain.tmpl`
+  (not at server level, where they would also count static files and iRedAdmin); keep the
+  `limit_conn` value well below the role's connection limit (2.2). Then `nginx -t && systemctl
+  reload nginx`. Like the deny rule, the two template lines are lost when an iRedMail upgrade
+  replaces the templates. The limits are per client address: every user behind one NAT address (an
+  office, a VPN exit) shares them, and nginx answers a request beyond them with 503 – SECURITY.md
+  says how to size or exempt such networks.
 
 ### 2.7 Test the installation
 
 ```sh
 sudo -u www-data plugins/galbridge/bin/galbridge.sh diag
 sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --user=jan.kowalski@example.com
-sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --url=https://mail.example.com/mail/   # self-signed certificate: add --cafile=/etc/ssl/certs/iRedMail.crt (2.6)
+sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --url=https://mail.example.com/mail/   # self-signed certificate: add --cafile=/etc/ssl/certs/iRedMail.crt and use the host name of the certificate, not 127.0.0.1 (2.6)
 sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --strict      # automated checks: WARN = exit code 2
 ```
 
-Run it as the PHP / web server user from the Roundcube directory (it must read the plugin
-configuration). If the plugin directory is a symlink, set the Roundcube root explicitly:
-`sudo -u www-data env ROUNDCUBE_INSTALL_PATH=/opt/www/roundcubemail plugins/galbridge/bin/galbridge.sh diag`.
+Without `sudo`: `runuser -u www-data -- plugins/galbridge/bin/galbridge.sh diag ...`, the same
+options (section 2, introduction). `runuser -u www-data -- plugins/galbridge/bin/galbridge.sh help`
+lists every command and option (as root the tool prints only its refusal, below). Run it as the PHP / web server user from the Roundcube directory
+(it must read the plugin configuration). If the plugin directory itself is a symlink, set the
+Roundcube root explicitly:
+`sudo -u www-data env ROUNDCUBE_INSTALL_PATH=/opt/www/roundcubemail plugins/galbridge/bin/galbridge.sh diag`
+– iRedMail's symlinked Roundcube directory (`/opt/www/roundcubemail` → `roundcubemail-1.7.7`) needs
+nothing of the kind.
 
 **The tool does not run as root.** It loads PHP code from the plugin directory and from the
 Roundcube tree (and Roundcube's configuration files are PHP as well): started by root, anybody who
@@ -717,7 +927,8 @@ that could not run (the Roundcube database, the plugin code) is a WARN, never si
   its security support; the iRedMail release; an INFO `process` line saying that the PHP version,
   extensions, `php.ini` settings and `ROUNDCUBE_*` / `PG*` variables `diag` reports are those of the
   **command line** PHP it runs in – the web server's PHP (a PHP-FPM pool) has its own: compare
-  `php-fpm -m` and the pool's `env[...]` / `clear_env`.
+  `php-fpm -m` (on Debian and Ubuntu the binary carries its version: `php-fpm8.4 -m` on Debian 13)
+  and the pool's `env[...]` / `clear_env` (Debian 13: `/etc/php/8.4/fpm/pool.d/`).
 * **Configuration**: whether the plugin is enabled; every configuration file Roundcube loads for the
   plugin – `plugins/galbridge/config.inc.php` when it exists, otherwise `galbridge.inc.php` from
   **every** configuration directory (`RCUBE_CONFIG_PATH` included) – with location and mode (FAIL
@@ -800,7 +1011,8 @@ that could not run (the Roundcube database, the plugin code) is a WARN, never si
   puts into sessions: the hosts of `imap_host` (FAIL when its only host is not covered; WARN for
   each uncovered entry when it lists several) and the `mail_host` values stored in Roundcube's
   `users` table (WARN with the number of users who would get no directory; WARN "not checked" when
-  the Roundcube database cannot be read from the command line). For every server of `imap_host` an
+  the Roundcube database cannot be read from the command line; otherwise an OK `stored IMAP hosts`
+  line with the number of accounts). For every server of `imap_host` an
   `IMAP transport` line: OK for a local server or for TLS that verifies the server, FAIL for a server
   on another host reached without it – no `ssl://` or `tls://` scheme (written in lower case:
   Roundcube reads `SSL://` as no TLS), `tls://` on Roundcube older than 1.7.7 or reporting
@@ -840,7 +1052,10 @@ that could not run (the Roundcube database, the plugin code) is a WARN, never si
   connecting – section 3.9); the connection (on failure a FAIL with the reason: the driver's text,
   e.g. `Access denied for user ...`, never the password, an error the driver raised, or the
   statement timeout / read-only mode the server refused); the password-column tripwire – OK only
-  when the server **refuses** `SELECT password` for lack of privilege (any other error is a FAIL with its SQLSTATE: it proves nothing); the
+  when the server **refuses** `SELECT password` for lack of privilege (any other error is a FAIL with its SQLSTATE: it proves nothing) –
+  so on PostgreSQL every `diag` run leaves one line `galbridge@vmail ERROR:  permission denied for
+  table mailbox` in the server log (without the statement: the role's `log_min_error_statement` is
+  `panic`); that line is this probe, the plugin's web requests never send it; the
   **write privileges**, read from the database catalogs (PostgreSQL `has_table_privilege` /
   `has_any_column_privilege` / `has_sequence_privilege` on **every** relation and sequence of the
   schema, `PUBLIC` included; MariaDB/MySQL the `information_schema` user, schema, table and column
@@ -885,7 +1100,8 @@ that could not run (the Roundcube database, the plugin code) is a WARN, never si
   for a Turkish or Azerbaijani collation of an address column (its `LOWER()` maps `I` to a dotless
   `i`); a FAIL `server version` on a MariaDB older than 10.2 or a MySQL older than 8.0 while
   `galbridge_user_aliases` is on (no window functions); mailboxes without a name; the indexes on
-  `mailbox(domain)` and `forwardings(forwarding)`.
+  `mailbox(domain)` and – PostgreSQL only: MariaDB/MySQL show the indexes of a table only to a role
+  with a privilege on it, and the plugin's role reads the view – `forwardings(forwarding)`.
 * **User** (with `--user=`; the value is validated before anything of it is printed): the home
   domain, the size of the address set used for list policies,
   and for each entitled book its data scope, the **effective** grouping (`none` for search-only
@@ -897,11 +1113,13 @@ that could not run (the Roundcube database, the plugin code) is a WARN, never si
   whole-book export on, more than `galbridge_max_export` entries (the export is refused). `--user`
   does not evaluate the IMAP host binding of a real session.
 
-Excerpt of a run on the PostgreSQL edition:
+Excerpt of a run on a standard iRedMail 1.8.11 server, PostgreSQL edition (installed as this section
+describes):
 
 ```
 == vmail database
-  [ OK ] connect                            pgsql (7 ms)
+  [ OK ] DSN                                pgsql://galbridge@127.0.0.1/vmail
+  [ OK ] connect                            pgsql (6 ms)
   [ OK ] password column                    not readable (refused by the server)
   [ OK ] write privileges                   none (every relation and sequence of the schema, PUBLIC included)
   [ OK ] role attributes                    LOGIN only (no SUPERUSER, CREATEROLE, CREATEDB, REPLICATION, BYPASSRLS)
@@ -909,21 +1127,22 @@ Excerpt of a run on the PostgreSQL edition:
   [ OK ] owned objects                      none
   [ OK ] role memberships                   none
   [ OK ] privileges outside                 none outside the vmail schema and database
-  [INFO] other databases                    the role may connect to postgres, roundcubemail (through PUBLIC as a rule): limit it to vmail in pg_hba.conf (README 2.2)
+  [INFO] other databases                    the role may connect to amavisd, fail2ban, iredadmin, iredapd, postgres, roundcubemail (through PUBLIC as a rule): limit it to vmail in pg_hba.conf (README 2.2) - this tool cannot read pg_hba.conf, so the line stays once that is done; README 2.2 shows how to test it
   [INFO] account TLS                        enforced by pg_hba.conf (hostssl / hostnossl ... reject, README 2.2), which the role cannot read
   [ OK ] schema public                      no CREATE privilege (its schema, schema public, the other schemas and the database)
-  [ OK ] ctype                              pl_PL.UTF-8
-  [ OK ] connection limit                   25 (size it to the PHP-FPM pm.max_children of Roundcube)
+  [ OK ] statement time (this session)      3s (galbridge_db_timeout)
+  [ OK ] ctype                              en_US.UTF-8
+  [ OK ] connection limit                   25 (at most the PHP-FPM pm.max_children of Roundcube and what the server's max_connections can spare - README 2.2)
   [ OK ] statement logging                  off for this role (its statements contain search terms)
   [ OK ] secret columns                     not visible (in any relation of the database)
   [ OK ] table forwardings                  not readable by the role (it reads the view galbridge_forwardings, checked below)
-  [INFO] granted but unused                 mailbox.telephone, mailbox.mobile, mailbox.birthday (not in galbridge_fields; the grant can be dropped)
   [ OK ] view galbridge_forwardings         holds alias, alias-member and list rows only (29 rows: built afresh for every statement that reads it)
   [ OK ] view galbridge_forwardings         a security barrier fenced with OFFSET 0, owned by the administrator: no condition of the role sees a private row
 
 == User jan.kowalski@example.com
-  [ OK ] galbridge_domain                   1 domain(s), groups: department (3 groups), search-only: no
-  [INFO]   persons                          7 (0 ms)
+  [ OK ] home domain                        example.com
+  [ OK ] galbridge_domain                   1 domain(s), groups: department (4 groups), search-only: no
+  [INFO]   persons                          8 (0 ms)
 ```
 
 `diag` never prints the database password, the value of an environment override or directory
@@ -933,8 +1152,10 @@ runs (messages of Roundcube, of the database drivers and of PHP), is neutralised
 zero-width and line-separator characters and invalid UTF-8 appear as visible escapes such as `\x1B`
 or `\u{202E}`, so no value – a database server's answer, an exception text, a row of Roundcube's
 `users` table, a file name – can hide or rewrite lines on your terminal. The last line sums up:
-`Result: OK`, `Result: OK with N warning(s)`, `Result: N problem(s) found` or `Result: aborted`;
-without `--url` it adds "(not checked: web access – run with --url)". Exit code 0 = no FAIL
+`Result: OK`, `Result: OK with N warning(s) - read the WARN lines`, with `--strict`
+`Result: N warning(s) - --strict counts them as problems`, `Result: N problem(s) found` or
+`Result: aborted`; without `--url` the first three end with "(not checked: web access - run with
+--url)". Exit code 0 = no FAIL
 (warnings do not change it unless `--strict` is given), 1 = usage error or refused as root, 2 =
 problems found (with `--strict` also WARN lines), an unexpected error or a PHP fatal error
 (`Result: aborted`).
@@ -1112,9 +1333,13 @@ is shown, searched, sorted, grouped on or exported.
 `galbridge_user_aliases` (default `false`): per-user alias addresses (`is_alias` rows of the
 forwardings) are shown and matched by e-mail search only when enabled; when disabled they are
 neither shown nor matched, so a search cannot reveal who owns an alias. When enabled, **showing and
-matching follow one rule**: an alias counts only when its domain belongs to the book and is active
-(not a backup MX and, with `galbridge_hide_expired`, not expired) and when it is on neither hidden
-list (3.7). A hidden alias is therefore not shown and does not find its owner either – not as a
+matching follow one rule**: an alias counts only when its owner's domain belongs to the book and is
+active (not a backup MX and, with `galbridge_hide_expired`, not expired) and when it is on neither
+hidden list (3.7). The owner's domain is the `domain` column of the forwardings row, which iRedAdmin
+fills with the owner's domain also for an address in an alias domain (`jan@example.net` of
+`example.com`): such an address is shown wherever the owner's domain is in scope – the domain lists
+and `*_exclude` options never name an alias domain; hide such an address with
+`galbridge_hidden_addresses` or `galbridge_hidden_localparts` (3.7). A hidden alias is therefore not shown and does not find its owner either – not as a
 whole and not by a fragment. At most 20 aliases are shown per person (the first ones in address
 order) – for every person of a page: the bound is per person, so one person with thousands of
 aliases takes nobody else's away (log `aliases_capped` when a list is cut).
@@ -1490,7 +1715,15 @@ open); to end the Roundcube sessions themselves, delete them from Roundcube's se
 
 The plugin logs to the Roundcube log `galbridge`: the file `<log_dir>/galbridge.log` (Roundcube
 appends `log_file_ext`, default `.log`). With `log_driver = 'syslog'`, which iRedMail configures
-(facility `LOG_MAIL`), the lines go to syslog under Roundcube's ident without the log name. Line
+(facility `LOG_MAIL`), the lines go to syslog under Roundcube's ident without the log name – on
+Debian and Ubuntu into `/var/log/mail.log` (RHEL: `/var/log/maillog`), during a web request with the
+session prefix, e.g. `roundcube: <1a2b3c4d> WARN limits: export_disabled: request refused user=1
+book=galbridge_global`: `journalctl -t roundcube`, or `grep -E 'roundcube: (<[^>]+> )?(ERROR|WARN|INFO) '
+/var/log/mail.log`. PHP's own messages of a webmail request – a warning, a fatal error, a parse
+error of `config/galbridge.inc.php` (2.3) – go to the web server on iRedMail: its PHP-FPM sets no
+`error_log`, so nginx writes them to `/var/log/nginx/error.log` as `FastCGI sent in stderr: "PHP
+message: ..."` (`grep 'PHP message' /var/log/nginx/error.log`; `journalctl -t php-fpm` has only
+the messages of the PHP-FPM master process). Line
 format: `LEVEL operation: message key=value ...`, with the numeric Roundcube user id (`user=`) added
 automatically; a value that contains a blank, `=`, `"` or `\` is written in double quotes
 (`allowed="127.0.0.1 mail.example.com"`, with `\"` and `\\` inside), so a log parser can split the
@@ -1563,7 +1796,10 @@ setting – keep the general query log off or restricted. `diag` shows what appl
   is a file download, so no message can be shown with it. When GAL Bridge refuses one, the server
   answers `204 No Content`: the browser stays on the page and saves no file (not even the contacts
   of other address books selected together with directory contacts). Refused are: the whole book
-  with `galbridge_*_export = false` or above `galbridge_max_export`; a group above the expansion
+  with `galbridge_*_export = false` or above `galbridge_max_export`; the whole of a **search-only**
+  book whatever `galbridge_*_export` says (`galbridge_*_searchonly = true` – the global book's
+  default – or `'auto'` above `galbridge_searchonly_threshold`; its search results, selections and
+  groups stay exportable); a group above the expansion
   cap; more than `galbridge_max_ids` selected contacts; a **search result with more matches than
   the result cap** (`galbridge_max_results` / `galbridge_global_max_results` – on a page such a
   list is cut with a notice, a file could not say so); a set of which an entry could not be read –
@@ -1579,19 +1815,41 @@ setting – keep the general query log off or restricted. `diag` shows what appl
 (section 2.1: verify the tag against the release key and compare its fingerprint, then
 `git archive ... | tar -x`; a configuration in `config/galbridge.inc.php` is not touched – one in
 `plugins/galbridge/config.inc.php` must be kept, or better moved there first, section 2.3) or run
-`composer update --prefer-dist takenek/galbridge` (iRedMail's SQL editions: add
-`--ignore-platform-req=ext-ldap`, section 2.1; and compare the commit it installed with the
-verified tag, section 2.1: Composer does not check signatures). Read [CHANGELOG.md](CHANGELOG.md), then run
-`bin/galbridge.sh diag`. After a Composer update `diag` is not optional: the installer re-creates a
+`composer update --prefer-dist takenek/galbridge` – as root in an interactive shell (answer `yes`),
+or with `COMPOSER_ALLOW_SUPERUSER=1`, never from cron or a script without a terminal: Composer then
+skips Roundcube's plugin installer, puts the new release into `vendor/takenek/galbridge` and leaves
+`plugins/galbridge` as it was (2.1; `diag` warns, "composer copy") – iRedMail's SQL editions add
+`--ignore-platform-req=ext-ldap` (2.1); then compare the installed files with `git archive` of the
+verified tag (`diff -r`) and the commit Composer names with the tag's (2.1: Composer does not check
+signatures, and Packagist publishes no checksum). Read [CHANGELOG.md](CHANGELOG.md), then run
+`sudo -u www-data plugins/galbridge/bin/galbridge.sh diag` from the Roundcube directory (2.7; as root
+it is refused). After a Composer update `diag` is not optional: the installer re-creates a
 `plugins/galbridge/config.inc.php` with the owner and umask of the user who ran Composer – restore
 `chown root:www-data` and `chmod 0640`, or better move the configuration to
 `config/galbridge.inc.php` and delete the plugin-directory file – and a failed update leaves a
 `plugins/galbridge-<20 digits>` copy with the password in it (delete it; section 2.1). There are no plugin tables, so there is no schema update; options added by
 a new release have built-in defaults.
 
+**From 1.0.3 to 1.0.4** – no plugin, configuration or database step: the release corrects the
+installation instructions after a second installation on real iRedMail 1.8.11 servers (CHANGELOG).
+Check an existing installation against them: **PostgreSQL edition** – the line `local all galbridge
+reject` of 2.2 before iRedMail's `local all all md5` in `pg_hba.conf` (without it the role can log in
+over the unix socket to every database, which `diag` cannot see – 2.2 shows the test); **both
+editions** – the connection limit (2.2: on iRedMail the default 25 unless `max_connections` was
+raised; a role created with a larger limit gets 25 back with `grants --grants-only`, or keeps its
+limit with `--grants-only --connection-limit=N`), iRedMail's `config/config.inc.php` owned by root
+(2.4), the per-client limits in nginx (2.6), and for a Composer installation that no
+`vendor/takenek/galbridge` exists (`diag` warns now, "composer copy"; section 7). `diag` also prints
+a new OK line `stored IMAP hosts`.
+
 **From 1.0.2 to 1.0.3** – no configuration or database step. `diag` has the option `--cafile=`
 for a web server with a self-signed certificate (2.6), and a Composer installation on iRedMail's
 SQL editions needs `--ignore-platform-req=ext-ldap` (2.1).
+
+1.0.0 and 1.0.1 were development versions that were never tagged or published
+([CHANGELOG.md](CHANGELOG.md)): an installation of a published release (1.0.2 or later) needs only
+the notes above. The parts below, and the way back to 1.0.0, apply only to a tree installed from a
+repository commit before 1.0.2.
 
 **From 1.0.1 to 1.0.2** – what behaves differently (run `diag` after the upgrade):
 
@@ -1827,6 +2085,18 @@ To go back to 1.0.0, restore its files and give the role the table grant it used
 `GRANT SELECT (address, forwarding, domain, is_alias, is_list, is_maillist, active) ON
 vmail.forwardings TO 'galbridge'@'localhost';` (PostgreSQL: `... ON forwardings TO galbridge;`).
 
+**iRedMail upgrades.** Some of iRedMail's upgrade tutorials replace the whole content of
+`/etc/nginx/templates/roundcube.tmpl` and `roundcube-subdomain.tmpl` (the one from 1.8.1 to 1.8.2
+did): afterwards put the deny rule of 2.6 (and the per-client limits) back, reload nginx and run
+`diag --url=...` (2.6) – plain `diag` does not test the web server. Before a step that alters the
+table `vmail.forwardings`, drop the view – MariaDB/MySQL `DROP VIEW IF EXISTS
+vmail.galbridge_forwardings;`, PostgreSQL `runuser -u postgres -- psql -X -d vmail -c 'DROP VIEW IF
+EXISTS galbridge_forwardings;'` – and apply `grants --allow-root --driver=mysql|pgsql --grants-only`
+afterwards, as root, with the options the role was created with (`--role`, `--db`,
+`--account-host`, `--connection-limit`: without it the limit becomes 25, as the second line of the
+output says; 2.2); the books are unavailable in between. Wait a few seconds after `systemctl reload
+nginx` before `diag --url` or the `curl` checks (2.6).
+
 **Roundcube: install its security releases without waiting.** GAL Bridge supports every release of
 the Roundcube 1.7 branch, and patch releases of that branch regularly fix security problems of
 Roundcube itself: update the core as soon as a 1.7.x release is published – no new GAL Bridge
@@ -1834,10 +2104,45 @@ release is needed for it – and run `diag` afterwards. `diag` warns when the co
 newest 1.7.x release this GAL Bridge version knows. Only a new minor branch (1.8) needs a GAL
 Bridge release that names it.
 
-**Roundcube on iRedMail.** iRedMail installs Roundcube into a versioned directory
-(e.g. `/opt/www/roundcubemail-1.7.7`, reached through the symlink `/opt/www/roundcubemail`), and its
-upgrade procedure creates a new tree. The plugin and its configuration live inside the tree, so copy
-them into the new one before switching the symlink, otherwise the directory silently disappears:
+**Roundcube on iRedMail.** iRedMail installs Roundcube into a versioned directory (e.g.
+`/opt/www/roundcubemail-1.7.7`, reached through the symlink `/opt/www/roundcubemail`). Its upgrade
+tutorials update that tree **in place**: they unpack the new release and run `./bin/installto.sh
+/opt/www/roundcubemail` from it (it needs `rsync`, which iRedMail's PostgreSQL edition does not
+install: `apt install rsync`; the directory keeps its old name). `installto.sh`
+adds to `plugins/` without deleting anything and of `config/` replaces only `defaults.inc.php`, so
+`plugins/galbridge`, `config/galbridge.inc.php` and the plugin list stay. It copies the files with
+their owners (`rsync -a`), and every file of the release tarball belongs to uid 1000: unpacked as
+root with the tutorial's `tar zxf`, Roundcube's code – its `plugins/` directory included – ends up
+owned by uid 1000, which on Debian and Ubuntu is the first user account of the server: until the
+files are given back to root, that account can change Roundcube's code and defaults.
+`grants --allow-root` refuses to run (`.../plugins (owner uid 1000, mode 0755) is not owned by
+root ...`), and `diag` warns about `config/defaults.inc.php` only – its hint to `chown` that one file
+is not enough. Unpack the release with `tar --no-same-owner -xzf roundcubemail-1.7.N-complete.tar.gz`
+instead; after an update from a tree unpacked with `tar zxf`, give those files back to root right
+away – the files of the web server user (`temp/`, `logs/`, the password plugin's configuration) keep
+their owner:
+
+```sh
+find /opt/www/roundcubemail/ ! -user root ! -user www-data -exec chown -h root:root {} +   # www-data: your PHP-FPM user (section 2; nginx on the RHEL family)
+find /opt/www/roundcubemail/ ! -user root ! -user www-data -print                           # must print nothing
+```
+
+Then run `diag`; `grants --allow-root` runs again. `installto.sh` also resets iRedMail's mode 0000
+of `README.md`, `CHANGELOG.md`, `SQL/` and `installer/` (iRedMail's own hardening; nginx denies
+them anyway). **GAL Bridge installed with Composer:** `composer require` rewrites
+`vendor/autoload.php`, so `installto.sh` no longer refreshes `vendor/`; the `update.sh` it starts runs
+`composer update --no-dev` instead – without `--ignore-platform-req=ext-ldap`, so on iRedMail's SQL
+editions it stops with the `ext-ldap` error of 2.1 ("ATTENTION: Update dependencies ..."),
+`installto.sh` ends with `ERROR: Failed to execute command: ... bin/update.sh ...` (exit code 1) –
+the files are copied and the database step has run, only the libraries are left – and the new core
+runs with the libraries of the old release. Run it yourself, as root in the Roundcube directory and
+in an interactive shell (answer `yes`; a script sets `COMPOSER_ALLOW_SUPERUSER=1`, 2.1):
+`composer update --no-dev --prefer-dist --ignore-platform-req=ext-ldap` (it updates Roundcube's
+libraries as `update.sh` would have done, and GAL Bridge within `^1.0`: compare the files with the
+verified tag, 2.1, and run `diag`).
+
+Only if you install a release into a new directory and switch the symlink yourself, copy the plugin
+and its configuration into the new tree first, otherwise the directory silently disappears:
 
 ```sh
 cp -a /opt/www/roundcubemail-OLD/plugins/galbridge /opt/www/roundcubemail-NEW/plugins/
@@ -1868,29 +2173,55 @@ Roundcube tree.
    DROP USER 'galbridge'@'localhost';
    DROP VIEW IF EXISTS vmail.galbridge_forwardings;
    ```
-   PostgreSQL, as `postgres`:
+   PostgreSQL, as `postgres` (`runuser -u postgres -- psql -X`, then):
    ```sql
    \c vmail
    DROP OWNED BY galbridge;   -- revokes its privileges in vmail, including CONNECT
    DROP ROLE galbridge;
    DROP VIEW IF EXISTS galbridge_forwardings;
    ```
-   `DROP ROLE` alone fails while the role still holds privileges in `vmail`. Remove its
-   `pg_hba.conf` lines, if you added them.
-3. Remove `plugins/galbridge`, `config/galbridge.inc.php` (if used), the nginx rule of 2.6 and the
-   log file `<log_dir>/galbridge.log`.
+   `DROP ROLE` alone fails while the role still holds privileges in `vmail`. Then – after `DROP
+   ROLE`, never before: the `reject` lines keep the role away from the other databases – remove the
+   four `pg_hba.conf` lines of 2.2 (iRedMail 1.8.11 on Debian 13:
+   `/etc/postgresql/17/main/pg_hba.conf`) and `systemctl reload postgresql`. On a `vmail` database
+   created by PostgreSQL 14 or older the grant set also took `CREATE` on schema `public` away from
+   `PUBLIC` (2.2); uninstalling does not undo that – it is the default of PostgreSQL 15 and later;
+   give it back only to a role that needs it (`GRANT CREATE ON SCHEMA public TO <role>`, never
+   `PUBLIC`).
+3. Remove the files. **Composer installation:** as root in the Roundcube directory, in an
+   interactive shell (answer `yes` to `Continue as root/super user`) or with
+   `COMPOSER_ALLOW_SUPERUSER=1` (2.1), `composer remove --ignore-platform-req=ext-ldap
+   takenek/galbridge` (the option for iRedMail's SQL editions, 2.1): it deletes `plugins/galbridge`
+   and takes `'galbridge'` out of `$config['plugins']`; `ls -d plugins/galbridge` must fail
+   afterwards. Without a terminal Composer skips Roundcube's plugin installer: the package leaves
+   `composer.json`, but `plugins/galbridge` (and an entry in the plugin list) stays – delete them by
+   hand.
+   A bare `rm -r` leaves the package in `composer.json` and `composer.lock`, and the next `composer
+   install` or `composer update` – also the one Roundcube's `bin/update.sh` runs during a core
+   upgrade – puts the plugin back. Then delete copies a failed update left behind, `rm -rf
+   plugins/galbridge-[0-9]*` (they can hold the configuration with the password, 2.1). **Release
+   archive:** as root in the Roundcube directory `rm -r plugins/galbridge`. In both cases remove
+   `config/galbridge.inc.php` (if used), the deny line of 2.6 from both `roundcube.tmpl` and
+   `roundcube-subdomain.tmpl`, and – if nothing else needs them – the per-client limits: the
+   `limit_req` / `limit_conn` lines of both templates **together with**
+   `/etc/nginx/conf-enabled/roundcube-limits.conf` (template lines without that file fail `nginx -t`
+   with `zero size shared memory zone`); then `nginx -t && systemctl reload nginx`. Remove the log
+   file `<log_dir>/galbridge.log` (with syslog, as on iRedMail, there is none). The changes of 2.4
+   (`config/config.inc.php` owned by root) and 2.5 (`addressbook_sort_col`) do not depend on the
+   plugin and can stay.
 
 ## 7. Troubleshooting
 
-Start with `sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --user=<login>`; it shows the
-cause of almost every "empty directory".
+Start with `sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --user=<login>` (without sudo:
+`runuser -u www-data -- plugins/galbridge/bin/galbridge.sh diag --user=<login>`, section 2) in the
+Roundcube directory; it shows the cause of almost every "empty directory".
 
 | Symptom | Cause / fix |
 |---|---|
-| No GAL Bridge book in the address book | `diag`: `galbridge_db_dsn` missing or refused (FAIL on the `galbridge_db_dsn` line with the reason), plugin disabled by the IMAP host binding (FAIL "directory hosts"; log `plugin disabled` – also with `include_host_config`), session server not a directory server (log `host_mismatch host=… mail_host=… allowed=…`: add the host, or the right port, to `galbridge_imap_hosts`; `diag` checks `imap_host` and the hosts of Roundcube's users), login not an active mailbox (`diag --user`: "not found"; log `denied_source status=no_mailbox`), role too broad (log `role_too_broad`: it can read a secret column or the `forwardings` table), a required column or the view `galbridge_forwardings` missing (log `column_missing` names it: run `grants --grants-only`, section 5), **a switch that is not a boolean or another fail-closed configuration error** (log `config_invalid … all books are disabled`, `diag` FAIL names the option) – also an unknown (misspelt) `galbridge_*` option or `ROUNDCUBE_GALBRIDGE_*` variable (`option=` names it, `diag` the closest valid name), a second configuration file next to `plugins/galbridge/config.inc.php` (`option=galbridge.inc.php`) or a configuration file that cannot be loaded (`option=config.inc.php`: not readable by the PHP user, no `$config` array; 2.3), a malformed `galbridge_db_refused_users` (every connection refused), home domain not in the viewer list, a login during a database outage (the books appear once the database is back, 3.9) |
+| No GAL Bridge book in the address book | `diag`: `galbridge_db_dsn` missing or refused (FAIL on the `galbridge_db_dsn` line with the reason), plugin disabled by the IMAP host binding (FAIL "directory hosts"; log `plugin disabled` – also with `include_host_config`), session server not a directory server (log `host_mismatch host=… mail_host=… allowed=…`: add the host, or the right port, to `galbridge_imap_hosts`; `diag` checks `imap_host` and the hosts of Roundcube's users), login not an active mailbox (`diag --user`: "not found"; log `denied_source status=no_mailbox`), role too broad (log `role_too_broad`: it can read a secret column or the `forwardings` table), a required column or the view `galbridge_forwardings` missing (log `column_missing` names it: run `grants --grants-only`, section 5), **a switch that is not a boolean or another fail-closed configuration error** (log `config_invalid … all books are disabled`, `diag` FAIL names the option) – also an unknown (misspelt) `galbridge_*` option or `ROUNDCUBE_GALBRIDGE_*` variable (`option=` names it, `diag` the closest valid name), a second configuration file next to `plugins/galbridge/config.inc.php` (`option=galbridge.inc.php`, text "is not read: Roundcube loads only ...") or a configuration file that cannot be loaded (`option=` names the file in use – `galbridge.inc.php` or `config.inc.php` – with "cannot be read by the PHP user" or "defines no $config array"; owner root, group of the PHP user, mode 0640, 2.3), a parse error in the configuration file (Roundcube itself stops: check it with `php -l`, 2.3), a malformed `galbridge_db_refused_users` (every connection refused), home domain not in the viewer list, a login during a database outage (the books appear once the database is back, 3.9) |
 | Global book missing | `galbridge_global_viewer_domains` is empty by default; `'*'` data domains without `galbridge_global_allow_wildcard` (log `config_invalid`); its data scope minus the user's own domain(s) is empty |
 | "The directory is temporarily unavailable." | log `db_down` (`cause=connect`: the server is unreachable or slow – in a web request Roundcube's errors log has the driver message, `diag` prints it on its `connect` line; `cause=session_limit`: the server refused the statement timeout or read-only mode, `diag` names the statement; `cause=driver_error` / `lost`; next attempt after 30 s; `cause=refused`: the server answered at once with a refusal – authentication, a limit text in the server's language –, `diag` prints the driver text, the next request tries again) or `db_busy` (the role's or the server's connection limit is reached – raise it, 2.2, and limit the concurrent requests per client in the proxy, SECURITY.md) or `db_error sqlstate=…`: `42000` (MariaDB/MySQL: access denied – grants), `42501` (PostgreSQL: permission denied – grants), `42S22` / `42703` (unknown column – iRedMail schema or the `galbridge_visibility_column` name), `70100` (MariaDB `max_statement_time`), `57014` (PostgreSQL `statement_timeout`), `HY000` (MySQL, includes `max_execution_time`) |
-| Export downloads nothing | a refused export (section 4): log `export_disabled`, `export_too_large` (also a search result above the result cap), `group_too_large`, `too_many_ids`, `set_incomplete`, or `db_down` / `db_error` during the export |
+| Export downloads nothing | a refused export (section 4): log `export_disabled` (export switch off, or the whole of a search-only book – the global book by default), `export_too_large` (also a search result above the result cap), `group_too_large`, `too_many_ids`, `set_incomplete`, or `db_down` / `db_error` during the export |
 | The directory disappears for one user in the middle of a session | the mailbox was disabled, expired, deleted or moved (log `viewer_revoked`), or – when the cached user was renewed – the IMAP server refused the session's credentials: password changed, IMAP service disabled (log `viewer_revoked`, `denied_source status=imap_refused`; a new login gets the directory again; section 3.9) |
 | No book for sessions on a remote IMAP server | the link is not verified TLS (log `imap_transport` with the reason, `denied_source status=transport_unprotected`, `diag` FAIL "IMAP transport"): use `ssl://host:993` or `tls://` on Roundcube 1.7.7+, keep certificate verification on – or `galbridge_imap_allow_plaintext` for a trusted private link (3.9) |
 | No book for requests under one host name only | `include_host_config`: a per-host file sets a `galbridge_*` option (log `config_invalid … differs from the host-independent configuration`, `option=` names it; `diag` "per-host configuration"); move it into the plugin's own file (2.3) |
@@ -1916,7 +2247,12 @@ cause of almost every "empty directory".
 | `diag`: FAIL on a `view galbridge_forwardings` line, `schema public`, `role memberships`, `privileges outside`, `role attributes`, `global privileges`, `owned objects` | apply `grants --grants-only` as root (section 5); a membership, a privilege outside the directory, a global privilege or an owned object of a hand-made role has to be revoked or dropped by hand – the line names it |
 | `diag`: FAIL `server-wide test database` (MariaDB/MySQL; log `server_test_database`) | the server has the `test` database of `mariadb-install-db`, open to every account (RHEL, FreeBSD, official tarballs): run `mariadb-secure-installation` ("Remove test database and access to it"), or as the database administrator `DROP DATABASE test; DELETE FROM mysql.db WHERE Db IN ('test', 'test\\_%'); FLUSH PRIVILEGES;` (and drop other `test_*` databases nobody needs). The books keep working meanwhile (section 2.2) |
 | `diag`: FAIL `connect` "Access denied" or "Connection refused" with a DSN that `grants` printed for a server on another port | the DSN names the default port: generate it again with `--port=N` (MariaDB/MySQL with `--host=127.0.0.1`, section 2.2) or add `:N` to the host of the DSN |
-| Details | `<log_dir>/galbridge.log` or the mail log (syslog); reason codes below |
+| Composer: `pear/net_ldap2 ... requires ext-ldap * -> it is missing from your system` | iRedMail's SQL editions: add `--ignore-platform-req=ext-ldap` to every `composer require`, `update` and `remove` (2.1) |
+| Composer: `Version check failed! takenek/galbridge requires Roundcube version >= ...` | the core is older than 1.7.0: upgrade Roundcube to the newest 1.7.x first (section 1, docs/MIGRATION.md) |
+| Composer succeeded, but there is no `plugins/galbridge` (the package is in `vendor/takenek/galbridge`) | Composer ran as root without a terminal and disabled its plugins (it printed `Composer plugins have been disabled for safety in this non-interactive session.`): remove the package the same way (`composer remove --ignore-platform-req=ext-ldap takenek/galbridge`, without a terminal), then run the `composer require` of 2.1 again in an interactive root shell, or with `COMPOSER_ALLOW_SUPERUSER=1` |
+| `composer remove` succeeded, but `plugins/galbridge` is still there | Composer ran as root without a terminal (2.1): the package is out of `composer.json` and `composer.lock` – delete the directory (`rm -r plugins/galbridge`) and take `'galbridge'` out of `$config['plugins']` (section 6) |
+| `diag`: `composer copy` – `vendor/takenek/galbridge` exists next to `plugins/galbridge` | a `composer update` or `install` ran as root without a terminal: it installed into `vendor/` and did not change `plugins/galbridge` (the plugin keeps running the classes of `plugins/galbridge`, its autoloader comes first). Remove the copy the same way – `composer remove --ignore-platform-req=ext-ldap takenek/galbridge` without a terminal, which leaves `plugins/galbridge` in place – then run the `composer require` of 2.1 again in an interactive root shell and compare the files with the verified tag (2.1) |
+| Details | `<log_dir>/galbridge.log`, or with syslog (iRedMail) the mail log: `/var/log/mail.log` on Debian/Ubuntu (`/var/log/maillog` on RHEL), ident `roundcube`, without the word `galbridge` – `journalctl -t roundcube` (3.10); reason codes below |
 
 **Log reason codes** (`LEVEL operation: code: message key=value`):
 

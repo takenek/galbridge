@@ -166,6 +166,32 @@ final class Remediation2DiagConfigTest extends TestCase
         self::assertStringNotContainsString('composer backup', $this->installation($plugin));
     }
 
+    /**
+     * 1.0.4: Composer run as root without a terminal installs the package into vendor/ and leaves
+     * plugins/galbridge as it was (the real iRedMail 1.8.11 run, docs/TESTING.md section 6).
+     */
+    public function testDiagWarnsForASecondCopyOfThePackageBelowVendor(): void
+    {
+        $plugin = CliRun::releaseCopy($this->plugins(), 'galbridge');
+        self::assertStringNotContainsString('composer copy', $this->installation($plugin));
+        $copy = $this->base() . '/vendor/takenek/galbridge';
+        mkdir($copy, 0o700, true);
+        $out = $this->installation($plugin);
+        CliRun::assertLine($out, 'WARN', 'composer copy', ' is a second copy of the plugin: Composer ran as root without a terminal and skipped Roundcube\'s plugin installer, so that run did not change plugins/galbridge');
+        self::assertSame(1, substr_count($out, 'composer copy'));
+        CliRun::rmTree($this->base() . '/vendor');
+    }
+
+    /**
+     * 1.0.4: the plugin's own autoloader comes first, before a Composer loader that maps GalBridge\
+     * elsewhere.
+     */
+    public function testThePluginsAutoloaderIsRegisteredFirst(): void
+    {
+        $code = (string) file_get_contents(dirname(__DIR__, 2) . '/lib/autoload.php');
+        self::assertStringContainsString('}, true, true);', $code);
+    }
+
     public function testDiagWarnsWhenComposerManagesThePluginAndItsConfigLivesInside(): void
     {
         $plugin = CliRun::releaseCopy($this->plugins(), 'galbridge');

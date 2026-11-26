@@ -180,11 +180,15 @@ registered on Packagist right after the repository becomes public.
 4. **Version bump** in one commit:
    * `galbridge::info()` in `galbridge.php` – `'version' => 'X.Y.Z'`;
    * the `v=X.Y.Z` line of README section 2.1 (`Remediation2ReleaseTest` compares the two);
-   * the version badge of the README, a file of the repository:
-     `curl -fsS -o .github/badges/packagist.svg https://img.shields.io/badge/packagist-vX.Y.Z-007ec6.svg`
-     (the image shields.io draws for Packagist; the README links the committed file because GitHub's
-     image proxy does not reliably fetch shields.io, and `Remediation2ReleaseTest` compares its
-     version with `galbridge.php`);
+   * the version badge of the README, a file of the repository whose name carries the version:
+     `curl -fsS -o .github/badges/packagist-vX.Y.Z.svg https://img.shields.io/badge/packagist-vX.Y.Z-007ec6.svg
+     && git add .github/badges`, and the file name in the badge URL of README line 4 (the image
+     shields.io draws for Packagist; the README links the committed file because GitHub's image
+     proxy does not reliably fetch shields.io, and a new name per release because packagist.org
+     shows README images through rawcdn.githack.com, which caches a URL for a year). The badges of
+     earlier versions stay: the READMEs of earlier releases link them through `main`.
+     `Remediation2ReleaseTest` checks the name and version of the current badge and that every
+     version badge names its own version;
    * `CHANGELOG.md`: rename `## [Unreleased]` to `## [X.Y.Z] – YYYY-MM-DD` (semantic versioning; any
      security fix is at least a patch release; the date of the tag – correct it if the tag is made
      later) and add a new empty `## [Unreleased]` above it.
@@ -260,9 +264,10 @@ composer require --prefer-dist "takenek/galbridge:^X.Y"
 (iRedMail's MariaDB/MySQL and PostgreSQL editions lack the PHP `ldap` extension that Roundcube's
 own lock file declares: add `--ignore-platform-req=ext-ldap` there, README 2.1.)
 `composer update` then stays within the major version; review CHANGELOG.md before upgrading and run
-`bin/galbridge.sh diag` after **every** update. Composer does not verify tag signatures: README 2.1
-compares the commit it installed (`composer show takenek/galbridge`, source reference) with the one
-of a verified tag. Roundcube's plugin installer re-creates `plugins/galbridge/config.inc.php` at every
+`sudo -u www-data plugins/galbridge/bin/galbridge.sh diag` from the Roundcube directory (README 2.7)
+after **every** update. Composer does not verify tag signatures, and Packagist publishes no checksum
+of its archive: README 2.1 compares the installed files with `git archive` of a verified tag and
+the commit Composer names (`composer show takenek/galbridge`, source reference) with the tag's. Roundcube's plugin installer re-creates `plugins/galbridge/config.inc.php` at every
 update as a new file with the owner and umask of the user running Composer, and keeps a full copy of
 the plugin directory in `plugins/galbridge-<20 digits>` until the update succeeds (a failed update
 leaves it): a configuration in `config/galbridge.inc.php` is not touched; `diag` fails for a leftover
@@ -287,10 +292,10 @@ git -c gpg.ssh.allowedSignersFile=.github/release-signers verify-tag vX.Y.Z
 Without `gpg.ssh.allowedSignersFile` git cannot verify an SSH signature at all. The file comes from
 the same clone as the tag: compare the printed fingerprint with SECURITY.md as GitHub shows it on
 `main`, with the maintainer's GitHub **signing** keys (<https://api.github.com/users/takenek/ssh_signing_keys>:
-put the `key` value into a file and run `ssh-keygen -lf` on it) and with the channel outside GitHub
-named in section 0. The commit Composer installed is checked against `git rev-parse "vX.Y.Z^{commit}"`
-of such a verified clone (`composer show takenek/galbridge`, field "source", must also name
-`https://github.com/takenek/galbridge`).
+pipe the `key` values into `ssh-keygen -lf -`, README 2.1 gives the command) and with the channel
+outside GitHub named in section 0. The files Composer installed are compared with `git archive` of
+such a verified clone, and its commit with `git rev-parse "vX.Y.Z^{commit}"` (`composer show
+takenek/galbridge`, field "source": `[git] https://github.com/takenek/galbridge.git <commit>`).
 
 **Key rotation**: add the new key's line to `.github/release-signers` on `main` (principal
 `galbridge-release`, namespace `git`, no comment) before it signs a tag, register it as a GitHub

@@ -1196,14 +1196,19 @@ No actions, templates or JavaScript. CLI (`Cli/Tool.php`):
   (checked with every release, RELEASING step 3); diag warns on a core older than the newest
   release this version knows (`Tool::LATEST_KNOWN_ROUNDCUBE`, raised with every GAL Bridge release)
   and fails on another branch.
-* Upgrade of Roundcube (iRedMail installs versioned trees): copy `plugins/galbridge` and its
-  configuration (`config/galbridge.inc.php`, or the plugin's `config.inc.php`) into the new tree,
-  run diag.
+* Upgrade of Roundcube: iRedMail updates its versioned tree in place with `bin/installto.sh`
+  (`plugins/galbridge` and its configuration stay; the copied files keep the owner uid 1000 of the
+  release tarball unless it is unpacked with `tar --no-same-owner` – give them back to root; with a
+  Composer installation run `composer update --no-dev --ignore-platform-req=ext-ldap` yourself);
+  a new tree instead needs `plugins/galbridge` and its configuration copied (README 5); run diag.
 * Upgrade of the plugin from 1.0.0: apply `grants --grants-only` (the view, the limits; MariaDB/MySQL
   also the printed `REVOKE` for the table) – until then the plugin offers no book (README 5). From
   1.0.1: apply it again as root (the fenced view, the role attributes, CREATE on schema `public`) –
   until then the books keep working with log warnings and `diag` FAILs.
-* Uninstall: remove from `$config['plugins']`; MariaDB `DROP USER 'galbridge'@'localhost'` and
+* Uninstall: remove from `$config['plugins']`; a Composer installation with `composer remove`, run
+  like the installation (interactive root shell or `COMPOSER_ALLOW_SUPERUSER=1`; without a terminal
+  Composer skips Roundcube's installer and `plugins/galbridge` stays; a bare `rm -r` leaves the
+  package in `composer.json` / `composer.lock`, README 6); MariaDB `DROP USER 'galbridge'@'localhost'` and
   `DROP VIEW vmail.galbridge_forwardings`; PostgreSQL `\c vmail` + `DROP OWNED BY galbridge;
   DROP ROLE galbridge; DROP VIEW galbridge_forwardings;`. The plugin keeps no tables and no user
   preferences.

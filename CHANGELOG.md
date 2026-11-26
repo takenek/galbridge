@@ -5,14 +5,140 @@ semantic versioning.
 
 ## [Unreleased]
 
-### Documentation
+## [1.0.4] – 2026-11-26
 
+A second installation on real iRedMail 1.8.11 servers – two fresh Debian 13 systems, the MariaDB and
+the PostgreSQL edition, Roundcube 1.7.7, PHP 8.4 – this time by administrators who knew nothing but
+the documentation (Composer from Packagist on one, the signed tag on the other), then the corrected
+documentation once more on two further fresh servers without `git`, `ssh-keygen`, `sudo`, `curl` or
+Composer, through a Roundcube core update the way iRedMail does it and through the removal; and a
+review of every installation, upgrade and removal step against the iRedMail 1.8.11 installer and
+the Roundcube 1.7.7 sources (docs/TESTING.md section 6). The directory itself worked on both
+editions throughout; the documentation had gaps a first installation runs into – one of them
+weakened the database isolation on the PostgreSQL edition – and two Composer situations could leave
+an old plugin running unnoticed. No configuration or database step is needed for the upgrade; README
+section 5, "From 1.0.3 to 1.0.4", lists what to check on an existing installation.
+
+### Security
+- **PostgreSQL: the `pg_hba.conf` lines of README 2.2 did not keep the role to the `vmail` database
+  over the unix socket.** iRedMail's `pg_hba.conf` ends with `local all all md5` and the catch-all
+  `host all all 0.0.0.0/0 md5`; the three documented lines were `host` lines inserted before the
+  catch-all, so the role could still log in with its password over `/var/run/postgresql` to every
+  database where `PUBLIC` holds `CONNECT` (`roundcubemail`, `amavisd`, `iredadmin`, ...). README 2.2
+  now gives four lines – `local all galbridge reject` first – to insert before `local all all md5`,
+  the file's location on Debian 13, how to check it (`pg_hba_file_rules`), reload it and test that
+  both kinds of connection are rejected; `diag`'s INFO "other databases" says that it cannot read
+  `pg_hba.conf`. The grant template, config.inc.php.dist (also for the socket DSN) and SECURITY.md
+  say the same.
+- **The connection limit on iRedMail.** README 2.2, `diag` and the grant templates told
+  administrators to size `--connection-limit` to the PHP-FPM pool, which iRedMail sets to 100 –
+  while on Debian and Ubuntu its MariaDB keeps `max_connections = 151` and its PostgreSQL 100, shared
+  by every service of the server: a role allowed 100 connections could take the slots Dovecot,
+  Postfix and Roundcube itself need. The advice now names both bounds – at most the pool and what the
+  server can spare: on iRedMail the default 25, more only after raising `max_connections` – next to
+  the `grants` command, in `diag`'s `connection limit` line and in both templates; later
+  `--grants-only` runs repeat the limit.
+
+### Fixed
+- **A second copy of the plugin below `vendor/`**: a `composer update` or `install` run as root
+  without a terminal skips Roundcube's plugin installer and installs the package into
+  `vendor/takenek/galbridge` – `plugins/galbridge` stays as it was, and Roundcube's Composer
+  autoloader, which is registered first, then mapped `GalBridge\` to that copy: after such an
+  "update" the plugin could run the classes of the new release with the rest of the old one. The
+  plugin's own autoloader is now registered first, so it always runs the classes of its directory,
+  and `diag` warns about such a copy (`composer copy`); README 2.1, 5, 6 and 7 say that every
+  Composer command in the Roundcube tree needs an interactive root shell or
+  `COMPOSER_ALLOW_SUPERUSER=1`, and how to recover.
+- **Composer as root without a terminal installed nothing into `plugins/`**: Composer 2.4 and later
+  disable their plugins for such a run, so Roundcube's plugin installer never ran and the package
+  landed in `vendor/takenek/galbridge` with exit code 0. README 2.1 says to run Composer as root in an
+  interactive shell (on iRedMail the only account that can: the tree belongs to root and
+  `composer.json` has mode 0000), to answer its root question, or to set `COMPOSER_ALLOW_SUPERUSER=1`
+  in a script, and how to check the result; a troubleshooting row covers the case.
+- The Composer path of README 2.1 assumed a `composer` command (iRedMail installs none:
+  `apt install composer`), showed the command that fails on iRedMail's SQL editions first, gave no
+  guidance for the installer's question `Do you want to activate the plugin galbridge? [Y|n]`
+  (answer `n`: yes enables the plugin with the still empty configuration), and said "then skip 2.4",
+  although 2.4 also gives iRedMail's `config/config.inc.php` to root – which now happens before the
+  first Composer run, as the plugin installer loads that file inside the root process.
+- **The Composer check verified metadata only**: comparing the source reference of `composer show`
+  with the tag commit proves nothing about the files of a `--prefer-dist` install (Packagist
+  publishes no checksum of the archive). README 2.1 now compares the installed files with `git
+  archive` of the verified tag (`diff -r`), and quotes the source line as `composer show` prints it
+  (`https://github.com/takenek/galbridge.git`).
+- **The DSN line of `grants` is printed as an SQL comment**: pasted with its leading `-- `, the
+  configuration file did not parse and every webmail request of a logged-in user stopped. README 2.2
+  and 2.3, config.inc.php.dist and now the instruction line of `grants` itself say to drop it; the
+  2.2 commands write the line into a file only root can read, and 2.3 puts it into the copied
+  configuration without showing the password (and changes nothing when the file holds no DSN line),
+  then `php -l`.
+- `sudo` (and `curl`) are not part of iRedMail and missing on a Debian server installed with a root
+  password: section 2 gives `runuser -u www-data -- ...` for every `diag` command, and so do the
+  troubleshooting section, config.inc.php.dist, the grant templates, docs/MIGRATION.md and the
+  message of `bin/galbridge.sh` when it is run as root.
+- `diag --url` must name the host name of the certificate – with iRedMail's self-signed certificate
+  `https://127.0.0.1/mail/` gave eight WARN lines: README 2.6 and 2.7 say how to find the name.
+- Section 5 described iRedMail's Roundcube upgrade as a new tree; iRedMail's tutorials update the
+  tree in place with `bin/installto.sh`, which keeps the plugin but copies the files with the owner
+  of the release tarball (uid 1000) – after that `grants --allow-root` refuses to run. README 5 now
+  says to unpack the release with `tar --no-same-owner`, how to give such files back to root, that a
+  Composer installation needs `composer update --no-dev --ignore-platform-req=ext-ldap` afterwards
+  (Roundcube's own `update.sh` runs it without the option and stops), and what an iRedMail upgrade
+  can undo (the nginx templates, the `forwardings` view). The `diag` command of section 5 had a path
+  relative to the plugin directory.
+- Uninstalling a Composer installation with `rm -r` left the package in `composer.json`, and the next
+  `composer update` – also the one of a Roundcube core upgrade – put the plugin back: README 6 uses
+  `composer remove`.
+- `php-fpm -m` (README 2.7, SECURITY.md and `diag`'s `process` line): on Debian and Ubuntu the binary
+  carries its version (`php-fpm8.4`).
+- Three messages – the `config_invalid` of a per-host option, `diag`'s "per-host configuration" and
+  "environment file" lines – told administrators who keep `config/galbridge.inc.php` to use
+  `plugins/galbridge/config.inc.php`; with both files GAL Bridge disables every book. They now name
+  both locations of the plugin's configuration file (never both), and the `config_invalid` text is
+  short enough for the log, which cut it before the remedy.
+- `diag` printed nothing when the IMAP hosts stored for Roundcube's users were all covered; it now
+  says so (`[ OK ] stored IMAP hosts`).
+- README 3.10 sent administrators to `journalctl -t php-fpm` for PHP errors; on iRedMail PHP's
+  messages of a webmail request – a parse error of the configuration included – are in
+  `/var/log/nginx/error.log`.
+
+### Documentation
+- README section 2 starts with a checklist for a standard iRedMail server that links every step to
+  its subsection and says what a correct installation ends with (`Result: OK`, no WARN);
+  `git`/`openssh-client` are installed in the first line of the release-archive commands; the fingerprint comparison has two commands that need only `python3` (iRedMail has no
+  `jq`), and README and SECURITY.md say that the key is titled "MIME Shield release signing" on
+  GitHub (the maintainer signs both projects with it).
+- `namei -l` in README 2.2 and SECURITY.md takes the absolute path, so it shows every directory from
+  `/` down; the review step names the verifier in the `diff` output as a secret.
+- README 2.4 shows iRedMail's plugin line literally; 2.5 says that iRedMail ships
+  `addressbook_sort_col` commented out; 2.6 names the `static.php` location of each template, where
+  the deny rule goes (with a command that inserts it once into both templates), to wait a moment
+  after `systemctl reload nginx` before checking, that iRedMail upgrades can replace the templates,
+  and where the per-client limits of SECURITY.md go on iRedMail – which, per client address, all
+  users behind one NAT address share (SECURITY.md says how to size or exempt such networks).
+- README 3.4 says which domain a per-user alias belongs to (its owner's, also for an address in an
+  alias domain); sections 4 and 7 and config.inc.php.dist say that the whole of a search-only book –
+  the global book by default – is never exported, whatever `galbridge_*_export` says; 3.10 and 7
+  say where the lines are on iRedMail (`/var/log/mail.log`, `journalctl -t roundcube`).
+- The summary lines of `diag` are quoted as the tool prints them, and the example run is that of a
+  standard iRedMail installation; `forwardings(forwarding)` is checked on PostgreSQL only (the
+  MariaDB/MySQL role cannot see the indexes of that table); on PostgreSQL every `diag` run leaves one
+  `permission denied for table mailbox` line in the server log – the password-column probe.
+- docs/MIGRATION.md: the order with the Roundcube 1.7 upgrade, the ownership step of 2.4, `diag
+  --url`, a broken cross-reference, and every place iRedMail keeps the `vmail` password.
+- Section 5 says that 1.0.0 and 1.0.1 were never published, and compares the files of a Composer
+  update with the verified tag (so does SECURITY.md); section 6 names every line it removes (the
+  deny rule, the limits together with their zone file, the four `pg_hba.conf` lines after `DROP
+  ROLE`); the troubleshooting table has rows for Composer's messages; docs/ARCHITECTURE.md and
+  docs/RELEASING.md follow the corrected procedures.
 - The Packagist and License badges of the README showed as broken images on GitHub and on
   Packagist: GitHub's image proxy gave up on `img.shields.io` after about four seconds ("504 Error
   Fetching Resource"). Both badges are now files of the repository (`.github/badges/`, the same
-  images shields.io draws), linked through `raw.githubusercontent.com`, which GitHub does not proxy;
-  the version badge is part of the version bump (docs/RELEASING.md step 4) and a test compares it
-  with the plugin version.
+  images shields.io draws), linked through `raw.githubusercontent.com`, which GitHub does not proxy.
+  packagist.org shows them through a CDN that caches a URL for a year, so the version badge carries
+  the version in its file name: every release adds one and keeps the earlier ones, which the READMEs
+  of earlier releases link (docs/RELEASING.md step 4; a test checks it). The repository description on
+  GitHub names Roundcube 1.7.x and MariaDB/MySQL or PostgreSQL.
 
 ## [1.0.3] – 2026-11-25
 

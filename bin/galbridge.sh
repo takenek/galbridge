@@ -15,6 +15,7 @@
  * to read the plugin configuration); grants as root with --allow-root:
  *   sudo -u www-data plugins/galbridge/bin/galbridge.sh diag
  *   sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --user=jan.kowalski@example.com
+ *   (without sudo, as root: runuser -u www-data -- plugins/galbridge/bin/galbridge.sh diag ...)
  *   umask 077; plugins/galbridge/bin/galbridge.sh grants --allow-root --driver=mysql > /root/galbridge-grants.sql
  * The SQL of grants goes to standard output (the file, readable by root only), its DSN line - with
  * the password - to standard error (the terminal), never into the file.
@@ -340,6 +341,7 @@ if ($galbridgeRoot) {
                   . "  umask 077; plugins/galbridge/bin/galbridge.sh grants --allow-root --driver=mysql|pgsql ... > /root/galbridge-grants.sql\n"
                 : "galbridge.sh must not run as root: it loads PHP code from the plugin and the Roundcube directory.\n"
                   . "Run it as the web server user, e.g.  sudo -u www-data plugins/galbridge/bin/galbridge.sh diag\n"
+                  . "(without sudo:  runuser -u www-data -- plugins/galbridge/bin/galbridge.sh diag)\n"
                   . "(--allow-root overrides this when all of that code is owned by root and writable by nobody else).\n"));
         exit(1);
     }

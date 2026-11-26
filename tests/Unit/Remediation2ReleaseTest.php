@@ -326,8 +326,11 @@ final class Remediation2ReleaseTest extends TestCase
      * The Packagist and License badges of the README are files of this repository: GitHub's image
      * proxy (camo) gave up on img.shields.io after about four seconds with "504 Error Fetching
      * Resource", so both badges showed as broken images on github.com and packagist.org (which
-     * renders the README through GitHub). raw.githubusercontent.com is not proxied. The version
-     * badge is part of the version bump (docs/RELEASING.md step 4).
+     * renders the README through GitHub). raw.githubusercontent.com is not proxied. packagist.org
+     * shows those images through rawcdn.githack.com, which caches a URL for a year (immutable): the
+     * version badge therefore has the version in its file name: every release adds a new file and
+     * keeps the old ones, which the READMEs of earlier releases link (docs/RELEASING.md step 4). The
+     * licence never changes.
      */
     public function testTheReadmeBadgesAreRepositoryFilesThatNameTheCurrentRelease(): void
     {
@@ -337,11 +340,22 @@ final class Remediation2ReleaseTest extends TestCase
         self::assertIsString($license);
         $readme = self::read('README.md');
         $raw = 'https://raw.githubusercontent.com/takenek/galbridge/main/.github/badges/';
-        self::assertStringContainsString("[![Packagist]({$raw}packagist.svg)](https://packagist.org/packages/takenek/galbridge)", $readme);
+        self::assertStringContainsString("[![Packagist]({$raw}packagist-v{$version}.svg)](https://packagist.org/packages/takenek/galbridge)", $readme);
+        $files = array_values(array_diff((array) scandir(self::root() . '/.github/badges'), ['.', '..']));
+        self::assertContains('license.svg', $files);
+        self::assertContains("packagist-v{$version}.svg", $files, 'the version badge of this release');
+        // the badges of earlier releases stay (their READMEs link them through main), each naming its own version
+        foreach ($files as $file) {
+            if ($file === 'license.svg') {
+                continue;
+            }
+            self::assertSame(1, preg_match('/^packagist-v(\d+\.\d+\.\d+)\.svg$/D', (string) $file, $f), (string) $file . ': no other file in .github/badges');
+            self::assertStringContainsString("aria-label=\"packagist: v{$f[1]}\"", self::read('.github/badges/' . $file), (string) $file);
+        }
         self::assertStringContainsString("[![License]({$raw}license.svg)](LICENSE)", $readme);
         self::assertStringNotContainsString('img.shields.io', $readme, 'GitHub\'s image proxy does not reliably fetch shields.io');
         $badges = [
-            'packagist.svg' => ['packagist', 'v' . $version, '#007ec6'],
+            "packagist-v{$version}.svg" => ['packagist', 'v' . $version, '#007ec6'],
             'license.svg' => ['license', $license, '#ea7233'],
         ];
         foreach ($badges as $file => [$label, $value, $colour]) {

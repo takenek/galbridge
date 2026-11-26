@@ -33,6 +33,7 @@
 --    in use - never both), e.g.
 --      $config['galbridge_db_dsn'] = 'mysql://galbridge:PASSWORD@localhost/vmail';
 --    and check it:  sudo -u www-data plugins/galbridge/bin/galbridge.sh diag
+--    (without sudo, as root:  runuser -u www-data -- plugins/galbridge/bin/galbridge.sh diag)
 --
 -- Column-level grants: the account can read ONLY the columns listed here - never mailbox.password,
 -- recovery_email, allow_nets, settings or any other column. "SELECT *" is impossible by design.
@@ -54,8 +55,9 @@
 CREATE USER 'galbridge'@'localhost' IDENTIFIED WITH mysql_native_password AS 'CHANGE_ME_PASSWORD_VERIFIER';
 -- [/role]
 
--- Account limits, active by default: at most 25 simultaneous connections (size it to the PHP-FPM
--- pm.max_children of Roundcube; "galbridge.sh grants --connection-limit=N") and, on MariaDB only,
+-- Account limits, active by default: at most 25 simultaneous connections (at most the PHP-FPM
+-- pm.max_children of Roundcube and what max_connections can spare - README 2.2; "galbridge.sh
+-- grants --connection-limit=N") and, on MariaDB only,
 -- at most 5 seconds per statement (MySQL has no per-account statement time and ignores that part;
 -- the plugin also sets a session limit on both).
 ALTER USER 'galbridge'@'localhost' WITH MAX_USER_CONNECTIONS 25 /*M!100101 MAX_STATEMENT_TIME 5 */;

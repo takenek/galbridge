@@ -16,10 +16,11 @@
 -- it as the postgres superuser, connected to the vmail database. Root's shell reads the file, so
 -- the postgres account needs no access to it, and -X keeps the commands of a ~/.psqlrc out:
 --   runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d vmail < /root/galbridge-grants.sql
--- (iRedMail's pg_hba.conf ends with "host all all 0.0.0.0/0 md5": password logins are accepted from
--- every IPv4 address that listen_addresses lets in, for every database. README 2.2 gives the lines
--- that limit this role to the vmail database and, for a remote Roundcube host, to TLS - insert them
--- BEFORE that line: pg_hba.conf uses the first matching line.)
+-- (iRedMail's pg_hba.conf ends with "local all all md5" and "host all all 0.0.0.0/0 md5": password
+-- logins are accepted over the unix socket and from every IPv4 address that listen_addresses lets
+-- in, for every database. README 2.2 gives the four lines that limit this role to the vmail database
+-- over TCP and refuse it over the socket - and, for a remote Roundcube host, the TLS lines - insert
+-- them BEFORE "local all all md5": pg_hba.conf uses the first matching line.)
 -- To use the file by hand, take it from the verified release archive (README 2.1), never from a
 -- directory that another account can write:
 -- 1. Copy it where only root can read it,  install -m 0600 grants.postgres.sql /root/galbridge-grants.sql,
@@ -34,6 +35,7 @@
 --    plugins/galbridge/config.inc.php if that is the one in use - never both), e.g.
 --      $config['galbridge_db_dsn'] = 'pgsql://galbridge:PASSWORD@127.0.0.1/vmail';
 --    and check it:  sudo -u www-data plugins/galbridge/bin/galbridge.sh diag
+--    (without sudo, as root:  runuser -u www-data -- plugins/galbridge/bin/galbridge.sh diag)
 --
 -- Column-level grants: the role can read ONLY the columns listed here - never mailbox.password,
 -- recovery_email, allow_nets, settings or any other column. "SELECT *" is impossible by design.
@@ -92,8 +94,8 @@ END
 $$;
 -- [/role]
 
--- Role limits (size the connection limit to the PHP-FPM pm.max_children of Roundcube;
--- "galbridge.sh grants --connection-limit=N")
+-- Role limits (the connection limit: at most the PHP-FPM pm.max_children of Roundcube and what
+-- max_connections can spare - README 2.2; "galbridge.sh grants --connection-limit=N")
 ALTER ROLE galbridge WITH CONNECTION LIMIT 25;
 ALTER ROLE galbridge SET default_transaction_read_only = on;
 ALTER ROLE galbridge SET statement_timeout = '5s';

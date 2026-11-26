@@ -601,7 +601,7 @@ final class Tool
         // never in the SQL file that standard output is redirected to (and that a client which
         // keeps comments would send to the server and its logs).
         $dsn = $driver . '://' . $role . ':' . $password . '@' . $host . ($port !== null ? ':' . $port : '') . '/' . $db;
-        $this->err("\n-- Put this line into config/galbridge.inc.php (or plugins/galbridge/config.inc.php if you keep the configuration there; owner root:<web server group>, mode 0640):\n");
+        $this->err("\n-- Put this line into config/galbridge.inc.php (or plugins/galbridge/config.inc.php if you keep the configuration there; owner root:<web server group>, mode 0640) WITHOUT its leading \"-- \", then check the file with php -l:\n");
         $this->err("-- \$config['galbridge_db_dsn'] = '{$dsn}';\n");
         if (!in_array($host, $local, true)) {
             $this->err("-- Remote database: add TLS verification to the DSN (pgsql: ?sslmode=verify-full&sslrootcert=...; mysql: ?ca=...&verify_server_cert=1).\n");
@@ -846,7 +846,7 @@ final class Tool
         $uid = self::euid();
         $this->info('process', 'command line PHP (' . PHP_SAPI . ') as ' . ($uid === null ? 'a user that cannot be determined' : 'uid ' . $uid)
             . ': the PHP version, extensions, php.ini settings and ROUNDCUBE_* / PG* variables reported here are those of this process'
-            . ' - the PHP of the web server (PHP-FPM pool) has its own: compare php-fpm -m and the pool\'s env[...] / clear_env');
+            . ' - the PHP of the web server (PHP-FPM pool) has its own: compare php-fpm -m (on Debian and Ubuntu php-fpm' . PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION . ' -m) and the pool\'s env[...] / clear_env');
     }
 
     /**
@@ -1013,7 +1013,7 @@ final class Tool
             }
         }
         if ($found !== []) {
-            $this->check(false, 'environment file', self::names($found) . ': Roundcube uses such a file INSTEAD of the plain one when it runs with that environment name (index.php / $env) - this tool runs without one and judges the plain files; keep the directory policy in the plain plugins/galbridge/config.inc.php', true);
+            $this->check(false, 'environment file', self::names($found) . ': Roundcube uses such a file INSTEAD of the plain one when it runs with that environment name (index.php / $env) - this tool runs without one and judges the plain files; keep the directory policy in the plain files - config/config.inc.php and the plugin\'s configuration file (config/galbridge.inc.php, or plugins/galbridge/config.inc.php if that is the one in use - never both)', true);
         }
     }
 
@@ -1100,7 +1100,7 @@ final class Tool
             }
             $shown = Log::sanitize(basename($path));
             if ($policy !== []) {
-                $this->check(false, 'per-host configuration', $shown . ': sets ' . self::names($policy) . ' - requests with this host name get no books; keep the directory policy in plugins/galbridge/config.inc.php');
+                $this->check(false, 'per-host configuration', $shown . ': sets ' . self::names($policy) . ' - requests with this host name get no books; keep the directory policy in the plugin\'s configuration file (config/galbridge.inc.php, or plugins/galbridge/config.inc.php if that is the one in use - never both)');
             }
             if ($labels !== []) {
                 $this->info('per-host configuration', $shown . ': sets ' . self::names($labels) . ' (book names may differ per host)');
@@ -1175,6 +1175,7 @@ final class Tool
             $this->ok('plugin directory', 'only the files of a release');
         }
         $this->composerBackups();
+        $this->composerVendorCopy();
 
         $this->pluginCode();
         if ($this->truncated !== []) {
@@ -1539,6 +1540,8 @@ final class Tool
                 throw new \RuntimeException('the query on the users table failed');
             }
             $odd = 0;
+            $accounts = 0;
+            $uncovered = false;
             while ($res && ($row = $db->fetch_assoc($res))) {
                 // judged exactly as at runtime (the raw value, never parsed again); a value that is
                 // not canonical is counted, never printed - it may carry anything a login form took
@@ -1547,11 +1550,17 @@ final class Tool
                 if ($n === null) {
                     $odd += $raw === '' ? 0 : (int) ($row['n'] ?? 0);
                 } elseif (!ViewerResolver::covers($allowed, $n)) {
+                    $uncovered = true;
                     $this->check(false, 'users on ' . $n, (string) ($row['n'] ?? '?') . ' Roundcube users on this IMAP host get no directory', true);
+                } else {
+                    $accounts += (int) ($row['n'] ?? 0);
                 }
             }
             if ($odd > 0) {
                 $this->check(false, 'users on other hosts', $odd . ' Roundcube users have a mail_host that is not a plain host name, IP address or socket (not shown): they get no directory - a login that typed such a server was authenticated by whatever that text named', true);
+            } elseif (!$uncovered) {
+                // a check that ran is never silent (README 2.7): say how many stored hosts it judged
+                $this->check(true, 'stored IMAP hosts', $accounts . ' account(s) with a stored IMAP host, all covered by the directory hosts');
             }
         } catch (\Throwable) {
             // a check that could not run is no OK: the stored hosts may well leave users without a
@@ -1873,6 +1882,32 @@ final class Tool
     }
 
     /**
+     * A second copy of the package below vendor/: Composer installs it there when it runs as root
+     * without a terminal (it disables its plugins, Roundcube's plugin installer among them) - and
+     * then plugins/galbridge was not touched by that run, so an "update" did not update the plugin.
+     * Roundcube's Composer autoloader may map GalBridge\ to that copy; lib/autoload.php is
+     * registered first, so the plugin still runs its own classes. Names only.
+     */
+    private function composerVendorCopy(): void
+    {
+        $roots = [dirname($this->pluginDir, 2) => true];
+        $install = defined('RCUBE_INSTALL_PATH') ? rtrim((string) constant('RCUBE_INSTALL_PATH'), '/') : '';
+        if ($install !== '') {
+            $roots[$install] = true;
+        }
+        $found = [];
+        foreach (array_keys($roots) as $root) {
+            $copy = $root . '/vendor/' . self::PACKAGE;
+            if (is_dir($copy)) {
+                $found[(string) (realpath($copy) ?: $copy)] = true;
+            }
+        }
+        foreach (array_keys($found) as $copy) {
+            $this->check(false, 'composer copy', Log::sanitize($copy) . ' is a second copy of the plugin: Composer ran as root without a terminal and skipped Roundcube\'s plugin installer, so that run did not change plugins/galbridge - repeat it in an interactive shell or with COMPOSER_ALLOW_SUPERUSER=1 (README 2.1, 5 and 7)', true);
+        }
+    }
+
+    /**
      * dont_override: Roundcube writes the current value of every option listed there into the
      * preferences of each user who saves settings - for an option set through a
      * ROUNDCUBE_GALBRIDGE_* variable that is its value, the DSN with the database password included.
@@ -2097,7 +2132,7 @@ final class Tool
             $lc = Log::sanitize((string) ($rows[0]['l'] ?? ''));
             $this->check(!in_array(strtoupper($lc), ['C', 'POSIX'], true), 'ctype', $lc . (in_array(strtoupper($lc), ['C', 'POSIX'], true) ? ' (case-insensitive search folds ASCII only)' : ''), true);
             $cl = (int) ($rows[0]['cl'] ?? -1);
-            $this->check($cl >= 0, 'connection limit', $cl < 0 ? 'unlimited: set one (galbridge.sh grants --grants-only --connection-limit=N, sized to the PHP-FPM pm.max_children of Roundcube)' : $cl . ' (size it to the PHP-FPM pm.max_children of Roundcube)', true);
+            $this->check($cl >= 0, 'connection limit', $cl < 0 ? 'unlimited: set one (galbridge.sh grants --grants-only --connection-limit=N, at most the PHP-FPM pm.max_children of Roundcube and what the server\'s max_connections can spare - README 2.2)' : $cl . ' (at most the PHP-FPM pm.max_children of Roundcube and what the server\'s max_connections can spare - README 2.2)', true);
             // rcube_db inlines bound values, so a logged statement of this role carries search terms
             $logged = [];
             if (!in_array(strtolower((string) ($rows[0]['le'] ?? '')), ['panic', 'fatal', 'log'], true)) {
@@ -2147,7 +2182,7 @@ final class Tool
             $this->statementTime($conn, $var . '=' . $t, $ms);
             // the session value is the effective limit of this account (0 = neither account nor server limit)
             $cl = (int) ($rows[0]['c'] ?? 0);
-            $this->check($cl > 0, 'connection limit', $cl > 0 ? $cl . ' (size it to the PHP-FPM pm.max_children of Roundcube)' : 'unlimited: only the number of PHP workers bounds the connections of this account - set one (galbridge.sh grants --grants-only --connection-limit=N)', true);
+            $this->check($cl > 0, 'connection limit', $cl > 0 ? $cl . ' (at most the PHP-FPM pm.max_children of Roundcube and what the server\'s max_connections can spare - README 2.2)' : 'unlimited: only the number of PHP workers bounds the connections of this account - set one (galbridge.sh grants --grants-only --connection-limit=N)', true);
             $general = in_array(strtolower((string) ($rows[0]['g'] ?? '0')), ['1', 'on'], true);
             $this->check(!$general, 'statement logging', $general ? 'the general query log is ON: it records every statement of the plugin with the search terms (SECURITY.md) - switch it off or restrict the log' : 'general query log off (the slow query log can still record statements with search terms, SECURITY.md)', true);
         }
@@ -2210,7 +2245,7 @@ final class Tool
                 : RoleScope::names($scope->serverTestDatabases) . ' - open to every account of the server (mariadb-install-db creates "test" and grants all on "test" and "test_*" to everybody), the plugin\'s role included: remove it with mariadb-secure-installation ("Remove test database and access to it") or as the administrator: DROP DATABASE test; DELETE FROM mysql.db WHERE Db IN (\'test\', \'test\\\\_%\'); FLUSH PRIVILEGES;');
         }
         if ($flavour === 'pgsql' && $scope->connectable !== []) {
-            $this->info('other databases', 'the role may connect to ' . RoleScope::names($scope->connectable) . ' (through PUBLIC as a rule): limit it to vmail in pg_hba.conf (README 2.2)');
+            $this->info('other databases', 'the role may connect to ' . RoleScope::names($scope->connectable) . ' (through PUBLIC as a rule): limit it to vmail in pg_hba.conf (README 2.2) - this tool cannot read pg_hba.conf, so the line stays once that is done; README 2.2 shows how to test it');
         }
         $this->accountTls($conn);
     }

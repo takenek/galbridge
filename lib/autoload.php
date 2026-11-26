@@ -11,8 +11,11 @@ declare(strict_types=1);
  *
  * GAL Bridge - Global Address List for Roundcube
  *
- * PSR-4 autoloader for the GalBridge\ namespace (lib/GalBridge). Used when the plugin is installed
- * without Composer (git clone / tarball); Composer installs use the autoload section of composer.json.
+ * PSR-4 autoloader for the GalBridge\ namespace (lib/GalBridge). galbridge.php and bin/galbridge.sh
+ * load it whichever way the plugin was installed. It is registered FIRST (prepend): Roundcube's
+ * Composer autoloader may map GalBridge\ to a second copy of the package below vendor/ (a Composer
+ * run as root without a terminal skips Roundcube's plugin installer and installs it there - diag
+ * warns, "composer copy"), and the classes that run must be the ones of this directory.
  *
  * @license GPL-3.0-or-later
  */
@@ -29,4 +32,4 @@ spl_autoload_register(static function (string $class): void {
     if (is_file($file)) {
         require_once $file;
     }
-});
+}, true, true);

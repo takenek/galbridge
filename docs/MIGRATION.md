@@ -39,25 +39,39 @@ bound.
 
 ## 2. Steps
 
+**Order with the Roundcube 1.7 upgrade.** GAL Bridge needs Roundcube 1.7: on 1.6 the Composer
+installer refuses it (`Version check failed!`) and `diag` fails (`not supported`). On 1.7 the old
+plugin stops every request, the login page included (section 0). On a server that still runs
+Roundcube 1.6 (iRedMail 1.8.0 and older) do steps 1 and 2 with the release archive (README 2.1, not
+Composer); then, in one maintenance window, remove `'sql_global_addressbooks'` from
+`$config['plugins']`, upgrade Roundcube to the newest 1.7.x (README section 5, "Roundcube on
+iRedMail") and do step 3. If Roundcube already runs 1.7 with the old plugin still listed, the webmail
+is down: take it out of the list at once, then continue with step 2.
+
 1. **Inventory.** Keep a copy of `plugins/sql_global_addressbooks/config.inc.php` and note which
    books were in use and for which domains.
-2. **Install GAL Bridge without enabling it yet**: README sections 2.1 (files), 2.2 (database role),
-   2.3 (configuration file and permissions), 2.5 (`addressbook_sort_col`) and 2.6 (web server rule).
+2. **Install GAL Bridge without enabling it yet**: README sections 2.1 (files; with Composer answer
+   `n` when the installer asks whether to activate the plugin), 2.2 (database role), 2.3
+   (configuration file and permissions), the ownership of `config/config.inc.php` from 2.4 (iRedMail
+   installs it as the PHP user, mode 0600), 2.5 (`addressbook_sort_col`) and 2.6 (web server rule).
    Translate the old options with the table in section 3.
 3. **Switch** in one edit of `config/config.inc.php`: replace `'sql_global_addressbooks'` with
    `'galbridge'` in `$config['plugins']`. If you ever added the old source IDs (`domain`, `global`
    or a support-book name) to `autocomplete_addressbooks` yourself, remove them: Roundcube stops with
    error 700 for a source that no longer exists. (The old plugin added them at runtime only, so
    normally there is nothing to remove.) GAL Bridge adds its own IDs at runtime.
-4. **Verify**: `sudo -u www-data plugins/galbridge/bin/galbridge.sh diag`, and `diag --user=<login>`
-   for one user of each kind of book. `diag` warns while `sql_global_addressbooks` is still enabled
+4. **Verify**: `sudo -u www-data plugins/galbridge/bin/galbridge.sh diag` (without sudo:
+   `runuser -u www-data -- plugins/galbridge/bin/galbridge.sh diag`), `diag --user=<login>` for one
+   user of each kind of book, and `diag --url=https://mail.example.com/mail/` for the web server rule
+   (with iRedMail's self-signed certificate add `--cafile=/etc/ssl/certs/iRedMail.crt` and use the
+   host name of the certificate, README 2.6). `diag` warns while `sql_global_addressbooks` is still enabled
    and while the old `_sql_*` book options are still set in the main configuration.
 5. **Remove the old database objects** (section 4) and, on PostgreSQL, rotate the `vmail` password.
 6. **Remove the old plugin**: `rm -r plugins/sql_global_addressbooks` (its `config.inc.php` goes with
    it).
 
-There is no way back to the old plugin on Roundcube 1.7 (step 1 of section 1), so do not keep the
-old view "just in case".
+There is no way back to the old plugin on Roundcube 1.7 (section 1, row "Roundcube 1.7": the old
+plugin does not load on 1.7), so do not keep the old view "just in case".
 
 ## 3. Configuration key map
 
@@ -110,9 +124,14 @@ Then **treat the `vmail` password as disclosed and rotate it**:
 
 1. Save the old password into a private file, e.g. `install -m 0600 /dev/null /root/old-vmail-pw`,
    then write the password into it (one line).
-2. Find every file that contains it: `grep -rlF -f /root/old-vmail-pw /etc /opt 2>/dev/null`. On
-   iRedMail this typically lists the Postfix lookup tables (`/etc/postfix/pgsql/*.cf`), the Dovecot
-   SQL configuration and iRedAPD's `settings.py`.
+2. Find every file that contains it:
+   `grep -rlF --exclude=old-vmail-pw -f /root/old-vmail-pw /etc /opt /root /var/lib/postgresql/.pgpass 2>/dev/null`.
+   On iRedMail this typically lists the Postfix lookup tables (`/etc/postfix/pgsql/*.cf`), the
+   Dovecot SQL configuration, iRedAPD's `settings.py`, `/var/lib/postgresql/.pgpass` (written by the
+   installer for the `vmail` role), iRedMail's record `/root/.iredmail/kv/sql_user_vmail`, and the
+   installer's `config` and `iRedMail.tips` in the directory where iRedMail was unpacked. The same
+   text was mailed to the postmaster as the details of the installation: delete that message or treat
+   it as outdated.
 3. Set a new random password (`ALTER ROLE vmail WITH PASSWORD '<new>';` as `postgres`), replace it
    in every file found, restart or reload the affected services (Postfix, Dovecot, iRedAPD, and any
    other service from the list), and check that mail delivery and logins work.
