@@ -5,6 +5,25 @@ semantic versioning.
 
 ## [Unreleased]
 
+The published release 1.0.6 was installed afresh on two new Debian 13 servers with the unattended
+installer of iRedMail 1.8.11 and its default components (Roundcube 1.7.7, PHP 8.4), by
+administrators who knew nothing but the documentation – the MariaDB edition with Composer from
+Packagist, the PostgreSQL edition from the signed tag – and the documentation was reviewed once more
+against the code and the iRedMail and Roundcube sources (docs/TESTING.md section 6). Both
+installations worked as documented: every `diag` form ended with `Result: OK` and no WARN, the
+browser checks passed, nothing private reached a response. Two sentences of README section 2 are
+corrected; the code is unchanged.
+
+### Documentation
+- README 2.2, review of the grant output: the `diff` of the **default** form – the one a first
+  installation applies – was described only in general terms, and the following sentence about the
+  `--grants-only` form read as if it applied to every output: the docs-only administrator saw the
+  `CREATE USER` line of the default form as changed (`1c1`) where that sentence said "missing".
+  Item 3 now says what the `diff` shows for each of the three forms on both engines, with the default
+  options.
+- README 2: `curl` comes with iRedMail's optional netdata component, which the installer selects by
+  default; only a server without it needs `apt install curl` (`sudo` is never part of iRedMail).
+
 ### Tests
 - The browser suite waits until Roundcube has fetched the first contact list before it clicks an
   address book: a click while the interface is busy is ignored by Roundcube, and case U7 failed once in

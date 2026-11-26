@@ -101,9 +101,11 @@ All commands are run in the Roundcube installation directory: `/opt/www/roundcub
 `/var/www/roundcube` elsewhere. `www-data` below is the PHP-FPM / web server user: `www-data` on
 Debian and Ubuntu, `nginx` on the RHEL family, `www` on FreeBSD and OpenBSD.
 
-`sudo` and `curl` are not part of iRedMail, and a Debian server installed with a root password has
-neither. `curl` is needed for the check of 2.6: `apt install curl`. For `sudo` either `apt install
-sudo`, or write each `sudo -u www-data ...` command of this document as `runuser -u www-data -- ...`
+`sudo` is not part of iRedMail, and a Debian server installed with a root password does not have it.
+`curl`, needed for the check of 2.6, comes with iRedMail only together with its optional netdata
+component (on Debian 13 selected by default in the installer); on a server without it:
+`apt install curl`. For `sudo` either `apt install sudo`, or write each `sudo -u www-data ...`
+command of this document as `runuser -u www-data -- ...`
 (util-linux, always installed), run as root from the same directory – e.g. `runuser -u www-data --
 plugins/galbridge/bin/galbridge.sh diag`. `runuser` keeps root's
 environment apart from `HOME`, `SHELL`, `USER` and `LOGNAME`, so run it from a plain root shell (no
@@ -422,14 +424,27 @@ host and database. Keep the output private.
    of the difference carries the password **verifier** (`CREATE USER ... IDENTIFIED WITH
    mysql_native_password AS '*...'` or `CREATE ROLE ... PASSWORD 'SCRAM-SHA-256$...'`), which counts
    as a secret: run the
-   `diff` where nobody watches the terminal, and do not paste its output anywhere. The
-   `--grants-only` form has no account line, and every difference lies in the `[role]` block.
-   MariaDB/MySQL: the `diff` shows only the template's `CREATE USER` line as missing. PostgreSQL:
-   the existence check is turned round – `IF NOT EXISTS ...` and `RAISE EXCEPTION 'role
-   "galbridge" does not exist: ...'` in place of the template's `IF EXISTS ...` / `already exists`
-   lines –, the template's `CREATE ROLE` line is missing, and one line is added, `ALTER ROLE
-   galbridge WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT;`
-   (the attributes asserted again for the existing role; your `--role` in place of `galbridge`).
+   `diff` where nobody watches the terminal, and do not paste its output anywhere. With the default
+   options (`--role`, `--account-host`, `--db` and `--connection-limit` add the lines they change; a
+   non-local `--account-host` also adds the line `ALTER USER ... REQUIRE SSL`, and
+   `--clear-text-password` puts its two guard lines and the statement with the password itself in
+   place of the account line), what the `diff` shows depends on the form that the second line names
+   (item 1):
+   * the **default** form (a new role – the first installation): one changed line, the account line,
+     which carries the verifier where the template has its `CHANGE_ME_...` placeholder –
+     MariaDB/MySQL the `CREATE USER` line (`1c1`), PostgreSQL the `CREATE ROLE` line;
+   * the `--grants-only` form has no account line, and every difference lies in the `[role]` block.
+     MariaDB/MySQL: the `diff` shows only the template's `CREATE USER` line as missing. PostgreSQL:
+     the existence check is turned round – `IF NOT EXISTS ...` and `RAISE EXCEPTION 'role
+     "galbridge" does not exist: ...'` in place of the template's `IF EXISTS ...` / `already exists`
+     lines –, the template's `CREATE ROLE` line is missing, and one line is added, `ALTER ROLE
+     galbridge WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT;`
+     (the attributes asserted again for the existing role; your `--role` in place of `galbridge`);
+   * the `--reset-password` form: MariaDB/MySQL two lines in place of the template's `CREATE USER`
+     line, `CREATE USER IF NOT EXISTS ...` and `ALTER USER ...`, both with the verifier; PostgreSQL
+     the differences of `--grants-only`, except that the role is created (without a password) where
+     `--grants-only` raises its exception, and a second added line sets the password, `ALTER ROLE
+     galbridge WITH LOGIN PASSWORD 'SCRAM-SHA-256$...'`.
 
 Apply it as the database administrator, with the client commands switched off:
 

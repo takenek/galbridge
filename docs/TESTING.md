@@ -166,7 +166,7 @@ branch; 1.0.1 declares and tests it.
 | Remediation2CiTest | 13 methods | second verification pass, F-21 / F-25 / F-34, on `.github/workflows/ci.yml` itself: no switch that turns off every Composer policy (only the advisory blocking, only for `composer install` in job `tests`), Composer pinned by version and SHA-256 and verified before its first use, `ubuntu-24.04` and digests everywhere – every image, also those a matrix names, with one digest per tag –, every resolved set audited plainly, recorded (source commits) and kept as an artifact, the 1.7.0 core the only audit exception, `--fail-on-skipped` on every PHPUnit call and one root call with `--group root-aware`, the job `databases` (the seven server pairs, the leg named after flavour and tags, PostgreSQL 17 as in job `tests`, health commands, the fixture loaded as in job `tests` without a wrapper, the leg check, PHP 8.4 and the newest core; README section 1 names every leg, docs/RELEASING.md its pins), the job `e2e` (both cores, both editions, unprivileged, no `--allow-skips`; final review CI-1: its fixture access is the rows of the test database – the role `e2e` created first, then `load.sh pgsql` with `GALBRIDGE_FIXTURE_USER=e2e`, no `pg_read_all_data` / `pg_write_all_data` anywhere, no later reload), the any-host test account in the jobs `tests` and `databases` only, no "daily" claim without the schedule check; final review CI-2: job `security` checks, before the history scan, that no commit ever had a file in the directories `.gitleaks.toml` excepts by path – exactly those directories |
 | Remediation2ReleaseTest | 9 methods | second verification pass, F-22 / F-23: `.github/release-signers` (principal, namespace, key type inside the blob, RSA ≥ 3072 bits, no e-mail or comment) and its fingerprint (as `ssh-keygen -l` prints it) in SECURITY.md, README.md, RELEASING.md and the scanner exceptions; `tests/release/verify-tag.sh` against throw-away ed25519 keys (good tag; another key; lightweight, unsigned and renamed tags; another commit; `--require-main` without and with `origin/main`, a side branch; `valid-before`, another principal or namespace in the key file); `check-archive.php` on a copy of this tree and with planted files, a symbolic link and a missing file; the release job (no `git fetch`, the key file of `main`); the reporting channel; README 2.1 installs the version of `galbridge.php`, 1.0.0 and 1.0.1 marked as not published; RELEASING describes the scripts and the disposable verification; the README badges are repository files (`raw.githubusercontent.com`, no `img.shields.io`), the version badge named and labelled with the version of `galbridge.php`, the licence badge with that of `composer.json`, both plain images |
 | DiagAdviceTest | 1 method | 1.0.5: `Tool::connectionShareProblem()` – the default 25 and a quarter of the server's connections are fine, an unknown server value is no warning, iRedMail's 100 against 151 (MariaDB) and 97 (PostgreSQL) is a WARN with the remedy |
-| InstallationDocsTest | 8 methods | 1.0.4, the README-only installation on real iRedMail 1.8.11: the four `pg_hba.conf` lines (the socket `reject` first, before iRedMail's `local all all md5`, with location, check, reload and both test logins; also in config.inc.php.dist, the PostgreSQL template, SECURITY.md and `diag`'s INFO); the connection limit names both bounds; every `diag` command has a `runuser` form (README, dist, templates, MIGRATION, SECURITY, the tool's root refusal); the Composer path (Composer installed, interactive root run, the activation question, `config.inc.php` to root first, the working command first, the file comparison, `composer remove`); the DSN line without `-- `; section 5 (installto.sh, `tar --no-same-owner`, Composer after a core update); the certificate name, `php-fpm8.4`, iRedMail's commented `addressbook_sort_col` and plugin line, `namei` on the absolute path; the checklist links resolve |
+| InstallationDocsTest | 11 methods | 1.0.4, the README-only installation on real iRedMail 1.8.11: the four `pg_hba.conf` lines (the socket `reject` first, before iRedMail's `local all all md5`, with location, check, reload and both test logins; also in config.inc.php.dist, the PostgreSQL template, SECURITY.md and `diag`'s INFO); the connection limit names both bounds; every `diag` command has a `runuser` form (README, dist, templates, MIGRATION, SECURITY, the tool's root refusal); the Composer path (Composer installed, interactive root run, the activation question, `config.inc.php` to root first, the working command first, the file comparison, `composer remove`); the DSN line without `-- `; section 5 (installto.sh, `tar --no-same-owner`, Composer after a core update); the certificate name, `php-fpm8.4`, iRedMail's commented `addressbook_sort_col` and plugin line, `namei` on the absolute path; the checklist links resolve; 1.0.6: the blocks of section 2 run in their order from the Roundcube directory, one runnable `grants` line, the documented outputs match the tools (the review `diff` of `--grants-only` on PostgreSQL, `diag --strict` with `--url`, `composer show` without a terminal); after 1.0.6: the review `diff` described for each form, `curl` with iRedMail's netdata |
 | Remediation2RepositoryHygieneTest | 6 methods | second verification pass, F-24: copies of the configuration, `galbridge.inc.php`, `config/`, grants outputs and `.env.*` are git-ignored, the templates and fixtures are not; the scanner exceptions name existing files (directory patterns only for git-ignored local directories); the rule `galbridge-dsn-password` reports 500 generated `grants` passwords (entropy above its threshold) and not the throw-away values; no file of the repository holds what it would report; `.gitguardian.yaml` names the same files and values; the controls of job `security` |
 | Remediation2FinalReviewDocsTest | 4 methods | final review DOCS-1 – DOCS-4, lexical: no document tells to give `plugins/galbridge` to `root:root` (the owner-only command in README 2.1, 5 and 7 and the CHANGELOG, and the refusals of `bin/galbridge.sh` compare the owner and the write bits only); no document sends options or the DSN into the plugin-directory file alone (README 5, CHANGELOG and the manual steps of both grant templates name `config/galbridge.inc.php`, or the plugin-directory file if that is the one in use – never both); every `$_SESSION['galbridge…']` key of `galbridge.php` and `lib/` is named in SECURITY.md, README 6 (with the right count) and THREAT_MODEL GB-15; the register row GB-24 describes the rebuilt DSN |
 | Remediation2DocumentationTest | 9 methods | second verification pass, F-35, lexical: the summaries of fail-closed configuration name what each error disables (every book; the book a deny-list protects; every connection for the refused roles); no "conservative value"; the password plugin's DSN files; the action name as request input (`asciiwords()`, before the `startup` and `ready` hooks); every description of the suggestion order names Roundcube 1.7.6 and 1.7.0 – 1.7.5; the inventory names `vcard_attachments` and `rcmail::contact_exists()`; no `compose_headers`, the `autocomplete` key described as informational; example domains are reserved names; no document says that a new own alias waits for `galbridge_scope_ttl` |
@@ -718,6 +718,66 @@ command"), so the click was lost (U7 took 10 s instead of 1.1 – 1.6 s). The re
 was green: <https://github.com/takenek/galbridge/actions/runs/45771700168>. `tests/ui/test_ui.py` now
 waits until the address book is no longer busy before it clicks a source (9/9 locally on 1.7.7 and
 1.7.0 × MariaDB and PostgreSQL); the test harness is not part of a release.
+
+### Fresh installation of 1.0.6 by the documentation, and a fourth review (2026-11-26)
+
+Two more new, disposable Debian **13.8** systems (systemd-nspawn, private network), each set up with
+the unattended installer of **iRedMail 1.8.11** and its **default** components (netdata included) –
+Roundcube 1.7.7, PHP 8.4.28 PHP-FPM, nginx 1.26.3, Dovecot 2.4.1, MariaDB 11.8.9 or PostgreSQL
+17.12 –, without `git`, `ssh-keygen`, `sudo` or Composer (`curl` came with netdata), and the
+fictional directory of `tests/fixtures/vmail/seed.sql` in the real `vmail` database. The published
+release 1.0.6 was installed **afresh** (the runs above upgraded 1.0.5) by an administrator who knew
+nothing but the documentation published with `v1.0.6` (an independent agent that read README.md,
+SECURITY.md, CHANGELOG.md, config.inc.php.dist and docs/, never docs/TESTING.md, `tests/` or
+`lib/`); a second agent then checked the end state of each server and ran the browser checks:
+
+| | MariaDB edition | PostgreSQL edition |
+|---|---|---|
+| 2.1 | Composer from **Packagist** (`v1.0.6`, source `71226a6`; Debian's Composer 2.8.8, interactive root shell, the activation question answered `n`); the clone of the tag verified (`verify-tag` printed the documented line, both fingerprint commands the same `SHA256:` value) and the installed files compared with its `git archive`: `identical` | signed tag `v1.0.6` from GitHub: `verify-tag` and both fingerprint commands as documented; `git archive` |
+| 2.2 – 2.6 | every command as written: the deny rule on line 5 of both templates, both `curl` requests of 2.6 `403`; the per-client limits at the top of both PHP locations | the same, and the four `pg_hba.conf` lines directly above iRedMail's `local all all md5`; both test logins of 2.2 rejected |
+| `diag`, `--user`, `--url --cafile`, `--strict --url --cafile` | `Result: OK`, no WARN or FAIL line; `[ OK ] GAL Bridge 1.0.6` | the same |
+| end state (second agent) | the plugin directory identical to `git archive v1.0.6`, root's, nothing group/other-writable; `config/galbridge.inc.php` and `config/config.inc.php` root:www-data 0640; column-level `SELECT` only, connection limit 25, statement time 5 s, the fenced view; no grant file, DSN file, clone or check directory left; no PHP message in any log | the same, and the role attributes and defaults of the grant set |
+| browser, headless Chromium 156 through the real nginx / PHP-FPM / Dovecot – the domain book | 10 of 10 | 10 of 10 |
+| the same with the global book (`['*']` viewers, two data domains) and `galbridge_user_aliases`, set as README 3.3 describes (`diag`: `Result: OK`, no WARN) | 10 of 10 | 10 of 10 |
+| vCard export of both books and autocomplete, searched for the fixture canaries | 14 vCards, the search-only global book 204, no canary | the same |
+
+In parallel four reviewers (independent agents with the iRedMail 1.8.11 and Roundcube 1.7.7 sources
+and the plugin code) went through README 1 – 2 for the MariaDB and for the PostgreSQL edition
+(running `grants` of both drivers in all three forms, with the static PHP 8.4, on root-owned copies),
+the documentation against the code (the 51 options and their defaults and ranges, the log codes, the
+quoted `diag` lines, the CLI options, the versions) and the lifecycle sections, the 61 links and
+anchors (checked by a script) and the publication (badges, Packagist metadata, the immutable release,
+`.gitattributes`); each finding was re-checked by two further agents. No step failed and no code
+changed; two sentences of README section 2 were corrected (CHANGELOG, Unreleased):
+
+* item 3 of the grant review of 2.2 described the `diff` of the default form – the one a first
+  installation applies; MariaDB/MySQL `1c1`, the `CREATE USER` line with the verifier – only in
+  general terms, and its sentence on the `--grants-only` form read as if it applied to every output:
+  the docs-only administrator of the MariaDB server expected the `CREATE USER` line "missing". The
+  item now names what the `diff` shows for each form (reproduced with both drivers: default `1c1` /
+  `26c26`, `--grants-only` `1d0` / the turned-round check with the added `ALTER ROLE`,
+  `--reset-password` `CREATE USER IF NOT EXISTS` + `ALTER USER` / the same plus the password line);
+* `curl` is installed by iRedMail together with its netdata component, which the installer selects
+  by default – the README said it was not part of iRedMail.
+
+A further claim – that the comment of `galbridge_domain_searchonly` in `config.inc.php.dist` lets an
+`'auto'` book keep its groups below the threshold – was refuted by both re-checks: the comment says
+nothing about that case, and README 3.1 states that search-only books (`true` or `'auto'`) have no
+groups. A further independent agent reviewed the change itself: it reproduced every form of the
+new item 3 with both drivers and the netdata dependency in the iRedMail source; its remarks are
+taken in – a non-local `--account-host` adds the `REQUIRE SSL` line, `--clear-text-password` replaces
+the account line, iRedMail selects netdata by default on Debian 13 (not on every platform), and the
+method count of the `InstallationDocsTest` row of section 3 was out of date since 1.0.6.
+
+The documentation change was verified in a disposable development container (Debian 13.8, PHP
+8.4.28, the Roundcube 1.7.0 and 1.7.7 release tarballs with the SHA-256 of CI, MariaDB 11.8.9,
+PostgreSQL 17.12, PHPUnit 13.4.8):
+
+| Run | Result |
+|---|---|
+| PHPUnit, SQLite + MariaDB + PostgreSQL, `--fail-on-skipped --exclude-group root`, as the unprivileged user `tester`: 1.7.7 and 1.7.0 | **3014 tests, OK**, each (new: `InstallationDocsTest::testTheReviewDiffIsDescribedForEveryFormAndCurlForNetdata`). The first run, in a container without `python3`, failed once in `Remediation2HarnessTest` (exit code 127 of the Python harness); with `python3`, which CI has, both runs passed |
+| PHPUnit `--group root-aware` as root, from a root-owned copy over the root-owned 1.7.7 tree | **369 tests, OK** |
+| PHPStan level 8, PHP-CS-Fixer, `composer validate --strict` | clean |
 
 ## 7. Not available / not tested
 

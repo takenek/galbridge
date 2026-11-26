@@ -90,7 +90,7 @@ final class InstallationDocsTest extends TestCase
     }
 
     /**
-     * Neither sudo nor curl is part of iRedMail; runuser (util-linux) always is.
+     * sudo is not part of iRedMail, curl only with its optional netdata; runuser (util-linux) always is.
      */
     public function testEveryDiagCommandHasAFormWithoutSudo(): void
     {
@@ -238,6 +238,33 @@ final class InstallationDocsTest extends TestCase
         self::assertStringContainsString('`composer require` empties `plugins/galbridge` before it unpacks the release', self::flat('README.md'));
         $upgrade = (string) preg_replace('/\s+/', ' ', self::section('## 5. Upgrade'));
         self::assertStringContainsString('`Package "takenek/galbridge" listed for update is not locked.`', $upgrade);
+    }
+
+    /**
+     * A fresh installation of 1.0.6 by the documentation alone (CHANGELOG, Unreleased): the review
+     * diff of 2.2 is described for each of the three forms - the docs-only administrator saw the
+     * CREATE USER line of the default form as changed (1c1) where the --grants-only sentence said
+     * "missing" -, and curl is part of a default iRedMail installation (its netdata component).
+     */
+    public function testTheReviewDiffIsDescribedForEveryFormAndCurlForNetdata(): void
+    {
+        $grants = (string) preg_replace('/\s+/', ' ', self::section('### 2.2 '));
+        self::assertStringContainsString('the **default** form (a new role – the first installation): one changed line, the account line', $grants);
+        self::assertStringContainsString('MariaDB/MySQL the `CREATE USER` line (`1c1`), PostgreSQL the `CREATE ROLE` line', $grants);
+        self::assertStringContainsString('* the `--grants-only` form has no account line, and every difference lies in the `[role]` block.', $grants);
+        self::assertStringContainsString('`CREATE USER IF NOT EXISTS ...` and `ALTER USER ...`, both with the verifier', $grants);
+        self::assertStringContainsString("`ALTER ROLE galbridge WITH LOGIN PASSWORD 'SCRAM-SHA-256\$...'`", $grants);
+        self::assertStringContainsString('`--role`, `--account-host`, `--db` and `--connection-limit` add the lines they change; a non-local `--account-host` also adds the line `ALTER USER ... REQUIRE SSL`', $grants);
+        self::assertStringContainsString('`--clear-text-password` puts its two guard lines and the statement with the password itself in place of the account line', $grants);
+        $tool = self::read('lib/GalBridge/Cli/Tool.php');
+        self::assertStringContainsString("\$placeholder = \$driver === 'mysql' ? 'CHANGE_ME_PASSWORD_VERIFIER' : 'CHANGE_ME_RANDOM_PASSWORD';", $tool);
+        self::assertStringContainsString('$out[] = "CREATE USER IF NOT EXISTS {$account} {$auth};";', $tool);
+        self::assertStringContainsString('$out[] = "ALTER USER {$account} {$auth};";', $tool);
+        self::assertStringContainsString("\"ALTER ROLE {\$role} WITH LOGIN PASSWORD '{\$secret}';\",", $tool);
+
+        $intro = (string) preg_replace('/\s+/', ' ', self::section('## 2. Installation'));
+        self::assertStringNotContainsString('`sudo` and `curl` are not part of iRedMail', $intro);
+        self::assertStringContainsString('`curl`, needed for the check of 2.6, comes with iRedMail only together with its optional netdata component', $intro);
     }
 
     /**
