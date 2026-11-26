@@ -855,6 +855,27 @@ release, the scheduled CI run `active`, every image digest of `.github/workflows
 current one of its tag, Composer 2.11.2 kept (2.11.3 is younger than 14 days), gitleaks 8.30.1 the
 newest release.
 
+### CI and post-release verification of 1.0.7 (2026-11-26)
+
+CI run of the release commit `56a5087`: <https://github.com/takenek/galbridge/actions/runs/45792771015>
+(21 jobs green, the release checks wait for the tag); CI run of the tag `v1.0.7`, including the
+release checks: <https://github.com/takenek/galbridge/actions/runs/45794084661> (22 jobs green).
+Before the tag, the PHPUnit suite ran once more in the development container from the dependency
+sets of the CI run of the release commit (`composer-lock-tests-php8.4-newest` and `-1.7.0`,
+`composer install`, `composer audit`: no advisory): **3015 tests, OK** against 1.7.7 and against
+1.7.0. The tag was verified with `tests/release/verify-tag.sh` and `check-archive.php` before the
+push; the GitHub release is immutable and GitHub reports the tag signature as verified. Packagist
+listed `v1.0.7` at `56a5087` (source and dist) within a minute, and its archive (GitHub's zipball of
+the commit) holds exactly the files of `git archive v1.0.7`; github.com and packagist.org show the
+badges `CI passing`, `packagist v1.0.7` and `license GPL-3.0-or-later` (HTTP 200, `image/svg+xml`,
+and in headless Chromium every badge image loaded). From the published sources, on the two iRedMail
+1.8.11 servers of the 1.0.7 run above:
+
+| Server | What | Result |
+|---|---|---|
+| MariaDB edition with 1.0.6 from the tag | README 5, release archive | tag and both fingerprints verified, the `diff -r` check `identical`, nothing group/other-writable; `diag`, `--user` and `--strict --url --cafile`: `[ OK ] GAL Bridge 1.0.7`, `Result: OK`, no WARN, the corrected INFO line `mailboxes without a name`; browser 10/10 (global book), no canary |
+| PostgreSQL edition with 1.0.6 from Packagist | README 5, Composer in an interactive root shell | `Upgrading takenek/galbridge (v1.0.6 => v1.0.7)`, no `vendor/takenek/galbridge`, no backup copy; `composer show` names `56a5087`, the commit of the verified tag; the files identical to `git archive v1.0.7`; `diag` as above; browser 10/10, no canary |
+
 ## 7. Not available / not tested
 
 * Database servers outside the matrix of section 6: MariaDB 10.2 – 10.4, MySQL 8.0 before 8.0.19
