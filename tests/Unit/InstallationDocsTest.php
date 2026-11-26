@@ -119,6 +119,10 @@ final class InstallationDocsTest extends TestCase
             self::assertStringContainsString($text, $s);
         }
         self::assertStringNotContainsString('then skip 2.4', $s);
+        // 1.0.5: the release archive is unpacked only after verify-tag and the fingerprint comparison
+        $raw = self::section('### 2.1 ');
+        self::assertLessThan(strpos($raw, 'archive --prefix=galbridge/ "v$v"'), strpos($raw, 'ssh-keygen -lf -'));
+        self::assertSame(1, preg_match('/```sh\n[^`]*verify-tag "v\$v"\n```/', $raw), 'the first block ends with verify-tag');
         self::assertSame(1, preg_match('/```sh\n[^`]*\ncomposer require --prefer-dist --ignore-platform-req=ext-ldap "takenek\/galbridge:\^1\.0"/', self::section('### 2.1 ')), 'the command that works on iRedMail comes first');
         // the order: config.inc.php to root before Composer loads it as root
         $block = self::section('### 2.1 ');
@@ -149,7 +153,12 @@ final class InstallationDocsTest extends TestCase
     {
         $s = (string) preg_replace('/\s+/', ' ', self::section('## 5. Upgrade'));
         self::assertStringNotContainsString('run `bin/galbridge.sh diag`', $s);
-        self::assertStringContainsString('`sudo -u www-data plugins/galbridge/bin/galbridge.sh diag` from the Roundcube directory', $s);
+        self::assertStringContainsString('`sudo -u www-data plugins/galbridge/bin/galbridge.sh diag` (without sudo: `runuser -u www-data -- plugins/galbridge/bin/galbridge.sh diag`) from the Roundcube directory', $s);
+        // 1.0.5: the release-archive upgrade checks for files of the old release; the 1.0.3 limit and the socket DSN
+        self::assertStringContainsString('diff -r /root/galbridge-check/ plugins/galbridge/ && echo identical # "Only in plugins/galbridge/: X"', $s);
+        self::assertStringContainsString('composer update --prefer-dist --ignore-platform-req=ext-ldap takenek/galbridge', $s);
+        self::assertStringContainsString('first put `local vmail galbridge scram-sha-256` there', $s);
+        self::assertStringContainsString('grants --allow-root --driver=mysql --grants-only > /root/galbridge-grants.sql', $s);
         foreach (['./bin/installto.sh /opt/www/roundcubemail', 'tar --no-same-owner -xzf', 'composer update --no-dev --prefer-dist --ignore-platform-req=ext-ldap', 'roundcube.tmpl'] as $text) {
             self::assertStringContainsString($text, $s);
         }

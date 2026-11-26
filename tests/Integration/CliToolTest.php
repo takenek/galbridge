@@ -1791,6 +1791,22 @@ final class CliToolTest extends TestCase
         if ($engine === 'pgsql') {
             self::assertLine($out, 'OK', 'statement logging', 'off for this role');
         }
+        // 1.0.5: which release runs
+        self::assertSame(1, preg_match("/'version' => '(\\d+\\.\\d+\\.\\d+)'/", (string) file_get_contents(dirname(__DIR__, 2) . '/galbridge.php'), $v));
+        self::assertLine($out, 'OK', 'GAL Bridge', $v[1] . ' (the files of the plugin directory)');
+
+        // 1.0.5: a limit that takes more than a quarter of the server's connections is a WARN - the
+        // 1.0.3 advice (the PHP-FPM pool, 100 on iRedMail) against max_connections of 151 / 100
+        [$code, $more] = self::tool(['grants', 'driver' => $engine, 'role' => $role, 'db' => $db, 'grants-only' => true, 'connection-limit' => '1000'] + $this->server($dsn));
+        self::assertSame(0, $code, $more);
+        $this->apply($engine, $db, $role, $more);
+        [$code, $out] = $this->diag(['galbridge_db_dsn' => self::dsnOf($grants)]);
+        self::assertSame(0, $code, $out);
+        self::assertLine($out, 'WARN', 'connection limit', '1000 of the ');
+        self::assertLine($out, 'WARN', 'connection limit', 'connections the server has for ordinary roles (max_connections)');
+        [$code, $less] = self::tool(['grants', 'driver' => $engine, 'role' => $role, 'db' => $db, 'grants-only' => true] + $this->server($dsn));
+        self::assertSame(0, $code, $less);
+        $this->apply($engine, $db, $role, $less);
 
         // a role created by hand without a limit
         $bare = $this->createRole($dsn, 'nl', self::TEMPLATE_COLUMNS);

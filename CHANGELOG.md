@@ -5,6 +5,48 @@ semantic versioning.
 
 ## [Unreleased]
 
+## [1.0.5] – 2026-11-26
+
+1.0.4 was installed and upgraded once more on real iRedMail 1.8.11 servers, from the published tag
+and from Packagist: a fresh installation by README section 2, and upgrades from 1.0.3 by section 5,
+through Composer and through the signed tag (docs/TESTING.md section 6). All three worked; the
+upgraded installations showed what an administrator who had followed the 1.0.3 instructions still
+needs. No configuration or database step is needed for this upgrade.
+
+### Fixed
+- **`diag` reported a dangerous connection limit as OK.** The 1.0.3 instructions sized the role's
+  connection limit to the PHP-FPM pool – 100 on iRedMail – and `diag` 1.0.4 printed
+  `[ OK ] connection limit 100` against MariaDB's `max_connections = 151` and PostgreSQL's 100,
+  which 1.0.4 itself calls a risk to the mail services. The line now compares the limit with the
+  connections the server has for ordinary roles (`max_connections`, on PostgreSQL minus
+  `superuser_reserved_connections` and `reserved_connections`) and is a WARN for a limit above the
+  default 25 that takes more than a quarter of them, with the command that lowers it.
+- **The upgrade note "From 1.0.3 to 1.0.4" could end the directory**: on PostgreSQL it told
+  administrators to add `local all galbridge reject`, which also refuses the unix-socket DSN that
+  config.inc.php.dist of 1.0.3 offered. It now says to add `local vmail galbridge scram-sha-256`
+  first in that case, that the three `host` lines of 1.0.3 may stay, and gives the commands – the
+  `pg_hba.conf` line, and the `grants --grants-only` run that sets a 1.0.3 limit of 100 back to 25.
+- **README 2.1 installed the files before the signature was checked**: the release-archive block
+  went on to `git archive | tar -x` and `rm -rf` after `verify-tag` – pasted as a whole, a failed
+  check did not stop it, and the fingerprint comparison came after the block. The block now ends
+  with `verify-tag`; the files are unpacked in a second block, after both fingerprints agree.
+
+### Added
+- `diag` names the release of the files in the plugin directory (`[ OK ] GAL Bridge X.Y.Z`): after an
+  update the administrator sees which code runs.
+
+### Documentation
+- README 5: the release-archive upgrade compares the result with the verified tag (`diff -r`), so a
+  file a release no longer has is found; the Composer update is one command, run in an interactive
+  root shell (it asks no activation question); the `diag` command with its `runuser` form; README 6
+  finds the file of the per-client limits whatever its name.
+- README 2.2: a command that inserts the four `pg_hba.conf` lines before iRedMail's `local all all
+  md5` (once), that the socket line must be in place before the reload when the DSN uses the
+  socket, that psql may print the TCP refusal twice (SSL, then no encryption), and what the review
+  `diff` shows for the `--grants-only` form; 2.6: any line before the first `static.php` location is
+  right for the deny rule; 2.7 lists `composer copy`, the version line and the new connection-limit
+  WARN.
+
 ## [1.0.4] – 2026-11-26
 
 A second installation on real iRedMail 1.8.11 servers – two fresh Debian 13 systems, the MariaDB and

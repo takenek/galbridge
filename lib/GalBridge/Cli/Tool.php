@@ -815,6 +815,14 @@ final class Tool
 
     private function versions(): void
     {
+        // 1.0.5: which release runs - after an update the files of plugins/galbridge are the ones
+        // that count (a Composer run without a terminal may have left them alone, "composer copy")
+        $code = @file_get_contents($this->pluginDir . '/galbridge.php');
+        if (is_string($code) && preg_match("/'version' => '(\\d+\\.\\d+\\.\\d+)'/", $code, $m) === 1) {
+            $this->ok('GAL Bridge', $m[1] . ' (the files of the plugin directory)');
+        } else {
+            $this->info('GAL Bridge', 'version not found in galbridge.php');
+        }
         $rcVersion = self::roundcubeVersion();
         $latest = self::LATEST_KNOWN_ROUNDCUBE;
         if (preg_match('/^' . preg_quote(self::SUPPORTED_BRANCH, '/') . '\.\d+$/D', $rcVersion) === 1) {
@@ -1834,6 +1842,21 @@ final class Tool
     }
 
     /**
+     * 1.0.5: the connection limit of the role is a share of the server's connections, which the mail
+     * services and Roundcube itself need as well - iRedMail keeps MariaDB at max_connections = 151 and
+     * PostgreSQL at 100 on Debian and Ubuntu. A limit above the default 25 that takes more than a
+     * quarter of the connections the server has for ordinary roles is a WARN; null when the limit is
+     * fine or the server's value is unknown.
+     */
+    public static function connectionShareProblem(int $limit, ?int $available): ?string
+    {
+        if ($available === null || $available <= 0 || $limit <= 25 || $limit * 4 <= $available) {
+            return null;
+        }
+        return $limit . ' of the ' . $available . ' connections the server has for ordinary roles (max_connections): under load the directory could take the connections that the mail services and Roundcube itself need - lower it (galbridge.sh grants --grants-only --connection-limit=25) or raise max_connections first (README 2.2)';
+    }
+
+    /**
      * Does the Composer installation at $root (its vendor/composer/installed.json: a list in Composer
      * 1, {"packages": [...]} in Composer 2) contain this plugin's package? Then Roundcube's plugin
      * installer manages plugins/galbridge.
@@ -2107,6 +2130,8 @@ final class Tool
             $rows = $conn->select("SELECT current_setting('statement_timeout') AS t,"
                 . ' (SELECT datctype FROM pg_database WHERE datname = current_database()) AS l,'
                 . ' (SELECT rolconnlimit FROM pg_roles WHERE rolname = current_user) AS cl,'
+                // the connections the server has for ordinary roles (reserved_connections: PostgreSQL 16+)
+                . " current_setting('max_connections') AS mxc, current_setting('superuser_reserved_connections') AS srv, current_setting('reserved_connections', true) AS rsv,"
                 . " current_setting('log_min_error_statement') AS le, current_setting('log_statement') AS ls, current_setting('log_min_duration_statement') AS ld,"
                 // sampled logging (PostgreSQL 12 / 13 and later; NULL on a server without the setting)
                 . " (SELECT setting FROM pg_settings WHERE name = 'log_min_duration_sample') AS sd,"
@@ -2132,7 +2157,9 @@ final class Tool
             $lc = Log::sanitize((string) ($rows[0]['l'] ?? ''));
             $this->check(!in_array(strtoupper($lc), ['C', 'POSIX'], true), 'ctype', $lc . (in_array(strtoupper($lc), ['C', 'POSIX'], true) ? ' (case-insensitive search folds ASCII only)' : ''), true);
             $cl = (int) ($rows[0]['cl'] ?? -1);
-            $this->check($cl >= 0, 'connection limit', $cl < 0 ? 'unlimited: set one (galbridge.sh grants --grants-only --connection-limit=N, at most the PHP-FPM pm.max_children of Roundcube and what the server\'s max_connections can spare - README 2.2)' : $cl . ' (at most the PHP-FPM pm.max_children of Roundcube and what the server\'s max_connections can spare - README 2.2)', true);
+            $mxc = (int) ($rows[0]['mxc'] ?? 0);
+            $share = $cl >= 0 ? self::connectionShareProblem($cl, $mxc > 0 ? $mxc - (int) ($rows[0]['srv'] ?? 0) - (int) ($rows[0]['rsv'] ?? 0) : null) : null;
+            $this->check($cl >= 0 && $share === null, 'connection limit', $share ?? ($cl < 0 ? 'unlimited: set one (galbridge.sh grants --grants-only --connection-limit=N, at most the PHP-FPM pm.max_children of Roundcube and what the server\'s max_connections can spare - README 2.2)' : $cl . ' (at most the PHP-FPM pm.max_children of Roundcube and what the server\'s max_connections can spare - README 2.2)'), true);
             // rcube_db inlines bound values, so a logged statement of this role carries search terms
             $logged = [];
             if (!in_array(strtolower((string) ($rows[0]['le'] ?? '')), ['panic', 'fatal', 'log'], true)) {
@@ -2175,14 +2202,16 @@ final class Tool
             }
         } elseif ($flavour === 'mariadb' || $flavour === 'mysql') {
             $var = $flavour === 'mariadb' ? 'max_statement_time' : 'max_execution_time';
-            $rows = $conn->select('SELECT @@' . $var . ' AS t, @@session.max_user_connections AS c, @@global.general_log AS g');
+            $rows = $conn->select('SELECT @@' . $var . ' AS t, @@session.max_user_connections AS c, @@global.general_log AS g, @@global.max_connections AS mxc');
             // MariaDB max_statement_time in seconds (a decimal), MySQL max_execution_time in ms
             $t = (string) ($rows[0]['t'] ?? '');
             $ms = is_numeric($t) ? (int) round((float) $t * ($flavour === 'mariadb' ? 1000 : 1)) : null;
             $this->statementTime($conn, $var . '=' . $t, $ms);
             // the session value is the effective limit of this account (0 = neither account nor server limit)
             $cl = (int) ($rows[0]['c'] ?? 0);
-            $this->check($cl > 0, 'connection limit', $cl > 0 ? $cl . ' (at most the PHP-FPM pm.max_children of Roundcube and what the server\'s max_connections can spare - README 2.2)' : 'unlimited: only the number of PHP workers bounds the connections of this account - set one (galbridge.sh grants --grants-only --connection-limit=N)', true);
+            $mxc = (int) ($rows[0]['mxc'] ?? 0);
+            $share = $cl > 0 ? self::connectionShareProblem($cl, $mxc > 0 ? $mxc : null) : null;
+            $this->check($cl > 0 && $share === null, 'connection limit', $share ?? ($cl > 0 ? $cl . ' (at most the PHP-FPM pm.max_children of Roundcube and what the server\'s max_connections can spare - README 2.2)' : 'unlimited: only the number of PHP workers bounds the connections of this account - set one (galbridge.sh grants --grants-only --connection-limit=N)'), true);
             $general = in_array(strtolower((string) ($rows[0]['g'] ?? '0')), ['1', 'on'], true);
             $this->check(!$general, 'statement logging', $general ? 'the general query log is ON: it records every statement of the plugin with the search terms (SECURITY.md) - switch it off or restrict the log' : 'general query log off (the slow query log can still record statements with search terms, SECURITY.md)', true);
         }
