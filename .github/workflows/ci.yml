@@ -105,8 +105,8 @@ defaults:
 env:
   # https://getcomposer.org/download/<version>/composer.phar and its published SHA-256
   # (composer.phar.sha256sum next to it); refresh both together (docs/RELEASING.md step 3)
-  COMPOSER_VERSION: '2.10.3'
-  COMPOSER_SHA256: 7a2d379d5b8ffdaa028580ef26494c36d2feef4b178d3dd1473a4dbc5e17c8d6
+  COMPOSER_VERSION: '2.11.2'
+  COMPOSER_SHA256: dd158c0afd41d15fac89e1b4e47b5d42911fe316c3687cd5edac98319b25d028
 
 jobs:
   tests:
@@ -722,7 +722,7 @@ jobs:
     # Debian 13: Dovecot 2.4 (tests/e2e/dovecot.sh), PHP 8.4, MariaDB, PostgreSQL 17 and Chromium
     # from the signed Debian archive. The image is pinned by digest (docs/RELEASING.md step 3).
     container:
-      image: debian:13-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+      image: debian:13-slim@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0
       # an init process as PID 1 reaps the daemons the job starts and stops (Dovecot's master is
       # left a zombie otherwise, and the checks below would count it as running)
       options: --init

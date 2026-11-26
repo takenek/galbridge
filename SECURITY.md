@@ -235,7 +235,10 @@ See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the full threat model and
 
 ## Hardening checklist for administrators
 
-* HTTPS only, `use_https = true`, `session_samesite = 'Strict'` or `'Lax'`.
+* HTTPS only (iRedMail's nginx redirects port 80 to HTTPS), and in Roundcube's
+  `config/config.inc.php` `$config['use_https'] = true;` and `$config['session_samesite'] =
+  'Strict';` or `'Lax'` – general Roundcube hardening: Roundcube's defaults are `false` and `null`,
+  iRedMail 1.8.11 sets neither, and `diag` does not check them.
 * **Keep Roundcube current**: install every 1.7.x release (above) and run `diag` afterwards.
 * **Install a release, not a clone** (README 2.1): verify the signed tag against the release signing
   key above (compare its fingerprint) and unpack its archive. A git clone brings `tests/` – scripts
@@ -286,7 +289,8 @@ See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the full threat model and
   check the PHP-FPM pool of Roundcube separately (`php-fpm -m` – on Debian and Ubuntu
   `php-fpm8.4 -m` and so on –, `env[...]`, `clear_env`), and the
   log line `env_override` for the `ROUNDCUBE_GALBRIDGE_*` variables the web server applies. For
-  automated checks use `diag --strict` (a WARN line gives exit code 2, like a FAIL); a run that
+  automated checks use `diag --strict` with the `--url=` of the webmail (a WARN line gives exit code 2,
+  like a FAIL; without `--url` no web access is checked, README 2.7); a run that
   aborts – also a PHP fatal error during Roundcube's start – ends with `Result: aborted` and exit
   code 2. Output and standard error of `diag` are neutralised (no terminal control sequence from a
   database server, an exception or a file name reaches the terminal raw).

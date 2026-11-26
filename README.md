@@ -1,7 +1,7 @@
 # GAL Bridge (`galbridge`) – Global Address List for Roundcube 1.7
 
 [![CI](https://github.com/takenek/galbridge/actions/workflows/ci.yml/badge.svg)](https://github.com/takenek/galbridge/actions/workflows/ci.yml)
-[![Packagist](https://raw.githubusercontent.com/takenek/galbridge/main/.github/badges/packagist-v1.0.5.svg)](https://packagist.org/packages/takenek/galbridge)
+[![Packagist](https://raw.githubusercontent.com/takenek/galbridge/main/.github/badges/packagist-v1.0.6.svg)](https://packagist.org/packages/takenek/galbridge)
 [![License](https://raw.githubusercontent.com/takenek/galbridge/main/.github/badges/license.svg)](LICENSE)
 
 GAL Bridge gives Roundcube Webmail **1.7** (every 1.7.x release) a read-only **Global Address
@@ -150,7 +150,7 @@ with the exact commands and the reasons for them – read it before you run them
 
 ```sh
 apt install git openssh-client   # Debian/Ubuntu: a minimal server (and iRedMail) may have neither
-v=1.0.5   # the release to install: https://github.com/takenek/galbridge/releases (only the latest is supported)
+v=1.0.6   # the release to install: https://github.com/takenek/galbridge/releases (only the latest is supported)
 git clone --branch "v$v" https://github.com/takenek/galbridge.git /root/galbridge-src   # NOT below the web root
 git -C /root/galbridge-src -c gpg.ssh.allowedSignersFile=/root/galbridge-src/.github/release-signers verify-tag "v$v"
 ```
@@ -244,7 +244,9 @@ installs: compare the installed files with a verified clone. Run the commands of
 above – the first block, `verify-tag` and the fingerprint comparison, **not** the `git archive`
 block – with `v` set to the version on the
 `versions` line of `composer show takenek/galbridge` without the `*` and the leading `v`
-(`versions : * vX.Y.Z` gives `v=X.Y.Z`), then, in the Roundcube directory:
+(`versions : * vX.Y.Z` gives `v=X.Y.Z`; like every Composer command here, run it as root in an
+interactive shell – without a terminal it disables its plugins and answers `Package
+"takenek/galbridge" not found`), then, in the Roundcube directory:
 
 ```sh
 mkdir -m 0700 /root/galbridge-check
@@ -327,7 +329,7 @@ refusals.
 database administrator runs what `grants` prints, so it must come from code that no other account
 can change, made by a process that no other account can watch. Check the plugin files first with the
 system's tools – not with the plugin's own code, which a changed tree could make report itself as
-clean – then generate the statements as root:
+clean – then generate the statements as root, with the one `grants` line of your edition:
 
 ```sh
 cd /opt/www/roundcubemail
@@ -335,7 +337,8 @@ find -L plugins/galbridge \( ! -user root -o -perm /022 \) -print   # must print
 namei -l "$PWD/plugins/galbridge/bin/galbridge.sh"   # every line from / down: owner root, no "w" in the group or other columns (excepted: /tmp-style "t", and symbolic links such as roundcubemail -> roundcubemail-1.7.7, always lrwxrwxrwx)
 umask 077     # the SQL file must be readable by root only
 plugins/galbridge/bin/galbridge.sh grants --allow-root --driver=mysql > /root/galbridge-grants.sql 2> /root/galbridge-dsn.txt   # MariaDB/MySQL edition
-plugins/galbridge/bin/galbridge.sh grants --allow-root --driver=pgsql > /root/galbridge-grants.sql 2> /root/galbridge-dsn.txt   # PostgreSQL edition
+# PostgreSQL edition: this line instead of the one above (both write the same two files)
+# plugins/galbridge/bin/galbridge.sh grants --allow-root --driver=pgsql > /root/galbridge-grants.sql 2> /root/galbridge-dsn.txt
 ```
 
 **The connection limit** (`--connection-limit`, default 25) bounds the role's simultaneous
@@ -420,8 +423,13 @@ host and database. Keep the output private.
    mysql_native_password AS '*...'` or `CREATE ROLE ... PASSWORD 'SCRAM-SHA-256$...'`), which counts
    as a secret: run the
    `diff` where nobody watches the terminal, and do not paste its output anywhere. The
-   `--grants-only` form has no account line: there the `diff` shows only the template's
-   `CREATE USER` / `CREATE ROLE` line as missing.
+   `--grants-only` form has no account line, and every difference lies in the `[role]` block.
+   MariaDB/MySQL: the `diff` shows only the template's `CREATE USER` line as missing. PostgreSQL:
+   the existence check is turned round – `IF NOT EXISTS ...` and `RAISE EXCEPTION 'role
+   "galbridge" does not exist: ...'` in place of the template's `IF EXISTS ...` / `already exists`
+   lines –, the template's `CREATE ROLE` line is missing, and one line is added, `ALTER ROLE
+   galbridge WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT;`
+   (the attributes asserted again for the existing role; your `--role` in place of `galbridge`).
 
 Apply it as the database administrator, with the client commands switched off:
 
@@ -813,10 +821,12 @@ GAL Bridge serves nothing over HTTP; Roundcube reads it from disk. Nothing under
   On iRedMail this puts it there (once; a template that already has it is left alone):
 
   ```sh
-  cd /etc/nginx/templates
-  for t in roundcube.tmpl roundcube-subdomain.tmpl; do grep -q 'plugins/galbridge' "$t" || sed -i '/^# Block direct access to directories and files\.$/a location ~ ^/(mail/)?(static\\.php/)?plugins/galbridge(-[0-9]+)?/ { deny all; }' "$t"; done
-  grep -n 'plugins/galbridge' roundcube.tmpl roundcube-subdomain.tmpl   # one line in each (line 5 when this command put it there; any line before the first static.php location is right)
+  for t in /etc/nginx/templates/roundcube.tmpl /etc/nginx/templates/roundcube-subdomain.tmpl; do grep -q 'plugins/galbridge' "$t" || sed -i '/^# Block direct access to directories and files\.$/a location ~ ^/(mail/)?(static\\.php/)?plugins/galbridge(-[0-9]+)?/ { deny all; }' "$t"; done
+  grep -n 'plugins/galbridge' /etc/nginx/templates/roundcube.tmpl /etc/nginx/templates/roundcube-subdomain.tmpl   # one line in each (line 5 when this command put it there; any line before the first static.php location is right)
   ```
+
+  The commands use full paths and do not change the working directory: the `diag` commands below
+  run from the Roundcube directory.
 
   The optional `-<digits>` also covers the backup copy of the plugin directory that Roundcube's
   plugin installer makes during `composer update` (`plugins/galbridge-<20 digits>`, with the
@@ -850,6 +860,7 @@ GAL Bridge serves nothing over HTTP; Roundcube reads it from disk. Nothing under
 * `diag --url=` makes the same check from the server side for the usual paths (section 2.7):
 
   ```sh
+  cd /opt/www/roundcubemail
   sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --url=https://mail.example.com/mail/
   # iRedMail's self-signed certificate: name it, the certificate is still verified; the address
   # names the host name of the certificate (above), not 127.0.0.1 or localhost
@@ -889,11 +900,20 @@ GAL Bridge serves nothing over HTTP; Roundcube reads it from disk. Nothing under
 ### 2.7 Test the installation
 
 ```sh
+cd /opt/www/roundcubemail
 sudo -u www-data plugins/galbridge/bin/galbridge.sh diag
 sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --user=jan.kowalski@example.com
 sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --url=https://mail.example.com/mail/   # self-signed certificate: add --cafile=/etc/ssl/certs/iRedMail.crt and use the host name of the certificate, not 127.0.0.1 (2.6)
-sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --strict      # automated checks: WARN = exit code 2
+sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --strict --url=https://mail.example.com/mail/   # automated checks: WARN = exit code 2 (same --cafile= as above)
 ```
+
+For automated checks (cron, monitoring) give `--strict` the same `--url=` (and `--cafile=`) as the
+third command: without `--url` it checks no web access – it prints `Result: OK (not checked: web
+access - run with --url)` and exits 0 – so it would not notice the deny rule of 2.6 lost in an
+iRedMail upgrade. `diag` checks the plugin and its installation; the general web server and
+Roundcube items of the [hardening checklist of SECURITY.md](SECURITY.md#hardening-checklist-for-administrators)
+(HTTPS only, `use_https`, `session_samesite` – iRedMail 1.8.11 sets neither of the two options) are
+not part of its checks.
 
 Without `sudo`: `runuser -u www-data -- plugins/galbridge/bin/galbridge.sh diag ...`, the same
 options (section 2, introduction). `runuser -u www-data -- plugins/galbridge/bin/galbridge.sh help`
@@ -1881,6 +1901,11 @@ as root it is refused); its first line names the release that runs (`[ OK ] GAL 
 There are no plugin tables, so there is no schema update; options added by a new release have
 built-in defaults.
 
+**From 1.0.5 to 1.0.6** – no plugin, configuration or database step: 1.0.6 corrects the
+documentation (CHANGELOG). A cron or monitoring job built from the `diag --strict` example of 2.7
+checked no web access – give it the `--url=` (and `--cafile=`) of 2.7, so that it notices a deny
+rule of 2.6 lost in an iRedMail upgrade.
+
 **From 1.0.4 to 1.0.5** – no plugin, configuration or database step. `diag` names the release that
 runs (`GAL Bridge`), and its `connection limit` line is a WARN for a limit above 25 that takes more
 than a quarter of the connections the server has for ordinary roles – such as the 100 the 1.0.3
@@ -2239,6 +2264,16 @@ cp -a /opt/www/roundcubemail-OLD/config/galbridge.inc.php /opt/www/roundcubemail
 `config/config.inc.php`, then run `diag` in the new tree. The database role is independent of the
 Roundcube tree.
 
+**GAL Bridge installed with Composer** (`composer show takenek/galbridge` names it in the old
+tree): the `composer.json` and `composer.lock` of a new tree come from the Roundcube release and do
+not contain the package, so a later `composer update ... takenek/galbridge` (above) installs nothing
+– Composer only warns `Package "takenek/galbridge" listed for update is not locked.` Either keep the
+copied `plugins/galbridge` and upgrade it from now on with the release-archive commands above, or
+copy only `config/galbridge.inc.php` (move a `plugins/galbridge/config.inc.php` there first, 2.3),
+give the new `config/config.inc.php` to root (2.4) and run the `composer require` of 2.1 in the new
+tree – as root in an interactive shell, answering `n` to the activation question – then compare the
+files with the verified tag (2.1).
+
 ## 6. Rollback / uninstall
 
 1. Remove `'galbridge'` from `$config['plugins']`. The books disappear at once; Roundcube and the
@@ -2337,7 +2372,7 @@ Roundcube directory; it shows the cause of almost every "empty directory".
 | Composer: `Version check failed! takenek/galbridge requires Roundcube version >= ...` | the core is older than 1.7.0: upgrade Roundcube to the newest 1.7.x first (section 1, docs/MIGRATION.md) |
 | Composer succeeded, but there is no `plugins/galbridge` (the package is in `vendor/takenek/galbridge`) | Composer ran as root without a terminal and disabled its plugins (it printed `Composer plugins have been disabled for safety in this non-interactive session.`): remove the package the same way (`composer remove --ignore-platform-req=ext-ldap takenek/galbridge`, without a terminal), then run the `composer require` of 2.1 again in an interactive root shell, or with `COMPOSER_ALLOW_SUPERUSER=1` |
 | `composer remove` succeeded, but `plugins/galbridge` is still there | Composer ran as root without a terminal (2.1): the package is out of `composer.json` and `composer.lock` – delete the directory (`rm -r plugins/galbridge`) and take `'galbridge'` out of `$config['plugins']` (section 6) |
-| `diag`: `composer copy` – `vendor/takenek/galbridge` exists next to `plugins/galbridge` | a `composer update` or `install` ran as root without a terminal: it installed into `vendor/` and did not change `plugins/galbridge` (the plugin keeps running the classes of `plugins/galbridge`, its autoloader comes first). Remove the copy the same way – `composer remove --ignore-platform-req=ext-ldap takenek/galbridge` without a terminal, which leaves `plugins/galbridge` in place – then run the `composer require` of 2.1 again in an interactive root shell and compare the files with the verified tag (2.1) |
+| `diag`: `composer copy` – `vendor/takenek/galbridge` exists next to `plugins/galbridge` | a `composer update` or `install` ran as root without a terminal: it installed into `vendor/` and did not change `plugins/galbridge` (the plugin keeps running the classes of `plugins/galbridge`, its autoloader comes first). Remove the copy the same way – `composer remove --ignore-platform-req=ext-ldap takenek/galbridge` without a terminal, which leaves `plugins/galbridge` in place –, move a configuration kept in `plugins/galbridge/config.inc.php` to `config/galbridge.inc.php` (2.3: `composer require` empties `plugins/galbridge` before it unpacks the release, the file and its password would be lost), then run the `composer require` of 2.1 again in an interactive root shell and compare the files with the verified tag (2.1) |
 | Details | `<log_dir>/galbridge.log`, or with syslog (iRedMail) the mail log: `/var/log/mail.log` on Debian/Ubuntu (`/var/log/maillog` on RHEL), ident `roundcube`, without the word `galbridge` – `journalctl -t roundcube` (3.10); reason codes below |
 
 **Log reason codes** (`LEVEL operation: code: message key=value`):

@@ -1200,7 +1200,9 @@ No actions, templates or JavaScript. CLI (`Cli/Tool.php`):
   (`plugins/galbridge` and its configuration stay; the copied files keep the owner uid 1000 of the
   release tarball unless it is unpacked with `tar --no-same-owner` – give them back to root; with a
   Composer installation run `composer update --no-dev --ignore-platform-req=ext-ldap` yourself);
-  a new tree instead needs `plugins/galbridge` and its configuration copied (README 5); run diag.
+  a new tree instead needs `plugins/galbridge` and its configuration copied – a Composer
+  installation then upgrades by release archive, or runs `composer require` in the new tree
+  (README 5); run diag.
 * Upgrade of the plugin from 1.0.0: apply `grants --grants-only` (the view, the limits; MariaDB/MySQL
   also the printed `REVOKE` for the table) – until then the plugin offers no book (README 5). From
   1.0.1: apply it again as root (the fenced view, the role attributes, CREATE on schema `public`) –

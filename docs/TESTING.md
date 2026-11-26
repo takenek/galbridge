@@ -628,6 +628,68 @@ Packagist listed `v1.0.5` at `a7881d0`; github.com and packagist.org show `packa
 | MariaDB edition with 1.0.4 from Packagist | README 5, Composer, interactive root shell | `Upgrading takenek/galbridge (v1.0.4 => v1.0.5)`, no `vendor/takenek/galbridge`; `diag`: `[ OK ] GAL Bridge 1.0.5`; with `--grants-only --connection-limit=100` `[WARN] connection limit 100 of the 151 connections the server has for ordinary roles (max_connections) ...`, with the default again `[ OK ] connection limit 25`; browser 10/10 |
 | PostgreSQL edition with 1.0.4 from the tag | README 5, release archive with the `diff -r` check | tag and fingerprint verified, `identical`; `diag`: `GAL Bridge 1.0.5`, limit 100 a WARN (`100 of the 97 connections ...`: 100 minus 3 reserved), 25 OK; browser 10/10 |
 
+### Installation by the documentation of 1.0.5, and its review (2026-11-26, changelog 1.0.6)
+
+Two more fresh, disposable Debian **13.8** systems (systemd-nspawn, private network), each set up
+with the unattended installer of **iRedMail 1.8.11** – Roundcube 1.7.7, PHP 8.4.27 PHP-FPM, nginx
+1.26.3, Dovecot 2.4.1, MariaDB 11.8.9 or PostgreSQL 17.12 –, without `git`, `ssh-keygen`, `sudo`,
+`curl` or Composer, and the fictional directory of `tests/fixtures/vmail/seed.sql` in the real
+`vmail` database (as in the runs above). The **published** release 1.0.5 was installed by an
+administrator who knew nothing but the documentation (an independent agent that read README.md,
+SECURITY.md, CHANGELOG.md, config.inc.php.dist and docs/, never docs/TESTING.md, `tests/` or `lib/`);
+a second agent then checked the end state of each server:
+
+| | MariaDB edition | PostgreSQL edition |
+|---|---|---|
+| 2.1 | signed tag `v1.0.5` from GitHub: `verify-tag` printed the documented line, both fingerprint commands the same `SHA256:` value; `git archive` | Composer from **Packagist** (`v1.0.5`, source `a7881d0`; Debian's Composer 2.8.8, interactive root shell, the activation question answered `n`); the installed files compared with `git archive` of the verified tag: `identical` |
+| 2.2 – 2.6 | every command as written: the review `diff` showed only the account line; the deny rule landed on line 5 of both templates, `static.php/plugins/galbridge/lib/autoload.php` 200 before it, 403 after it; the per-client limits answer a burst with 503 | the same, and the four `pg_hba.conf` lines directly above iRedMail's `local all all md5`; both test logins of 2.2 (TCP and unix socket, to `roundcubemail`) rejected |
+| `diag`, `--user`, `--url --cafile`, `--strict` | `Result: OK`, no WARN line; `[ OK ] GAL Bridge 1.0.5` | the same |
+| end state (second agent) | the plugin directory identical to `git archive v1.0.5`, root's, nothing group/other-writable; `config/galbridge.inc.php` root:www-data 0640, the only configuration file; column-level `SELECT` only, connection limit 25, the fenced view; no grant file, DSN file or clone left; no PHP message in any log | the same |
+| browser, headless Chromium through the real nginx / PHP-FPM / Dovecot – the domain book | 10 of 10 | 10 of 10 |
+| the same with the global book (`['*']` viewers, two data domains) and `galbridge_user_aliases` | 10 of 10 | 10 of 10 |
+| vCard export of both books and autocomplete, searched for the fixture canaries | 14 vCards, the search-only global book 204, no canary | the same |
+
+The archive Packagist serves for `v1.0.5` (GitHub's zipball of `a7881d0`) holds exactly the files of
+`git archive v1.0.5`; github.com and packagist.org showed the badges `packagist v1.0.5`, `license
+GPL-3.0-or-later` and the CI badge (HTTP 200, `image/svg+xml`).
+
+In parallel four reviewers (independent agents with the iRedMail 1.8.11 and Roundcube 1.7.7 sources
+and the plugin code) went through README 1 – 2 for the MariaDB and for the PostgreSQL edition
+(running the documented commands on copies of iRedMail's files and the `grants` output of the
+static PHP 8.4), the documentation against the code (every CLI option and quoted `diag` line, the 51
+option defaults of `config.inc.php.dist`, the localisation labels, the versions) and the lifecycle
+sections with every link and anchor (checked by a script); each finding was re-checked by one or two
+further agents. What the installations and the review found – all in the documentation, fixed in
+1.0.6 (CHANGELOG), the code unchanged:
+
+* the nginx command of 2.6 changed into `/etc/nginx/templates`, so the `diag` commands after it
+  (2.6 `--url`, 2.7) failed with `command not found` when pasted in order;
+* 2.2 had both `grants` lines in one block – pasted as a whole, the PostgreSQL line overwrote the
+  MariaDB grant set and DSN;
+* the review `diff` of the `--grants-only` output was described for MariaDB/MySQL only (on
+  PostgreSQL it also shows the existence check turned round and the `ALTER ROLE ... NOINHERIT;`
+  line – reproduced with both drivers);
+* `diag --strict`, offered for automated checks, checks no web access without `--url`;
+* `composer show` without a terminal answers `Package "takenek/galbridge" not found` (run on the
+  PostgreSQL server); the repair of a `composer copy` empties `plugins/galbridge` (Composer's
+  `ArchiveDownloader`); a Composer installation copied into a new Roundcube tree is not in its
+  `composer.json`; the HTTPS item of the SECURITY.md checklist did not say what it means on iRedMail.
+
+### Release verification of 1.0.6 (2026-11-26)
+
+The tree of the release commit in a disposable development container (Debian 13.8, PHP 8.4.27,
+Roundcube 1.7.0 and 1.7.7 release tarballs with the SHA-256 of CI, MariaDB 11.8.9, PostgreSQL 17.12,
+Dovecot 2.4.1, Chromium 156, PHPUnit 13.4.8, PHPStan 2.3.7, PHP-CS-Fixer 3.95), as the unprivileged
+user `tester` unless noted:
+
+| Run | Result |
+|---|---|
+| PHPUnit, SQLite + MariaDB + PostgreSQL, `--fail-on-skipped --exclude-group root`: 1.7.7 and 1.7.0 | **3013 tests, OK**, each (1.0.5: 3011; new: the two 1.0.6 tests of `InstallationDocsTest`, which fail on the documentation of 1.0.5) |
+| PHPUnit `--group root-aware` and `--group root` as root, from root-owned copies over a root-owned 1.7.7 tree | **369 tests, OK**; **11 tests, OK** |
+| PHPStan level 8, PHP-CS-Fixer, `php -l`, `composer validate --strict`, `tests/release/check-archive.php HEAD` | clean; 58 entries, all on the allow-list |
+| `tests/e2e/test_e2e.py` and `tests/ui/test_ui.py`, Roundcube 1.7.7 and 1.7.0 × MariaDB and PostgreSQL | E2E **37 passed, 0 failed, 0 skipped**, UI **9/9**, each of the four |
+| the changed commands of README 2.2 (`grants --grants-only` and the review `diff`, both drivers) and 2.6 (the nginx command with full paths, on copies of iRedMail's templates) | as the README now describes them |
+
 ## 7. Not available / not tested
 
 * Database servers outside the matrix of section 6: MariaDB 10.2 – 10.4, MySQL 8.0 before 8.0.19

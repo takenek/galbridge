@@ -180,6 +180,67 @@ final class InstallationDocsTest extends TestCase
     }
 
     /**
+     * 1.0.6: what a review of the 1.0.5 documentation and two more installations on real iRedMail
+     * 1.8.11 servers showed. Pasted in their order, the code blocks of section 2 work: no block leaves
+     * the shell in another directory than the Roundcube directory (the 2.6 nginx block of 1.0.5 did,
+     * and the diag commands after it failed), and only one grants line of 2.2 runs.
+     */
+    public function testTheBlocksOfSection2RunInTheirOrder(): void
+    {
+        $s = self::section('## 2. Installation');
+        self::assertGreaterThan(5, (int) preg_match_all('/^ *```sh\n(.*?)^ *```/ms', $s, $blocks));
+        $withTool = 0;
+        foreach ($blocks[1] as $block) {
+            preg_match_all('/^ *cd (\S+)/m', $block, $cd);
+            foreach ($cd[1] as $dir) {
+                self::assertSame('/opt/www/roundcubemail', $dir, "a block of section 2 changes into {$dir}:\n{$block}");
+            }
+            if (preg_match('/^ *(sudo -u www-data |runuser -u www-data -- )?plugins\/galbridge\/bin\/galbridge\.sh /m', $block) === 1) {
+                $withTool++;
+                self::assertSame(1, preg_match('/\A *cd \/opt\/www\/roundcubemail\n/', $block), "a block that runs the tool starts in the Roundcube directory:\n{$block}");
+            }
+        }
+        self::assertGreaterThanOrEqual(3, $withTool, '2.2, the diag --url block of 2.6 and 2.7');
+        self::assertStringContainsString('for t in /etc/nginx/templates/roundcube.tmpl /etc/nginx/templates/roundcube-subdomain.tmpl; do', self::section('### 2.6 '));
+
+        $grants = self::section('### 2.2 ');
+        self::assertSame(1, preg_match_all('/^plugins\/galbridge\/bin\/galbridge\.sh grants --allow-root --driver=(mysql|pgsql) >/m', $grants), 'one runnable grants line');
+        self::assertSame(1, preg_match('/^# plugins\/galbridge\/bin\/galbridge\.sh grants --allow-root --driver=pgsql > \/root\/galbridge-grants\.sql 2> \/root\/galbridge-dsn\.txt$/m', $grants), 'the other edition as a comment');
+    }
+
+    /**
+     * 1.0.6: what the documentation says a command prints is what it prints - the review diff of the
+     * PostgreSQL --grants-only output (1.0.5 named only the missing CREATE ROLE line), diag --strict
+     * without --url, composer show without a terminal; and two Composer paths that lose the
+     * configuration or install nothing.
+     */
+    public function testTheDocumentedOutputsMatchTheTools(): void
+    {
+        $grants = (string) preg_replace('/\s+/', ' ', self::section('### 2.2 '));
+        self::assertStringNotContainsString("shows only the template's `CREATE USER` / `CREATE ROLE` line as missing", $grants);
+        self::assertStringContainsString("MariaDB/MySQL: the `diff` shows only the template's `CREATE USER` line as missing", $grants);
+        self::assertStringContainsString('`ALTER ROLE galbridge WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT;`', $grants);
+        self::assertStringContainsString('"galbridge" does not exist: ...\'`', $grants);
+        $tool = self::read('lib/GalBridge/Cli/Tool.php');
+        self::assertStringContainsString("\$exists = \"IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{\$role}') THEN\";", $tool);
+        self::assertStringContainsString('does not exist: nothing was changed (create it without --grants-only)', $tool);
+        self::assertStringContainsString('"ALTER ROLE {$role} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT;"', $tool);
+        self::assertStringContainsString('CREATE ROLE galbridge WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT PASSWORD', self::read('SQL/grants.postgres.sql'));
+
+        $test = self::section('### 2.7 ');
+        self::assertSame(1, preg_match('/^sudo -u www-data plugins\/galbridge\/bin\/galbridge\.sh diag --strict --url=https:\/\/mail\.example\.com\/mail\//m', $test), 'the automated check includes the web check');
+        self::assertStringContainsString('Result: OK (not checked: web access - run with --url)', (string) preg_replace('/\s+/', ' ', $test));
+        self::assertStringContainsString("' (not checked: web access - run with --url)'", $tool);
+        self::assertStringContainsString('`diag --strict` with the `--url=` of the webmail', self::flat('SECURITY.md'));
+        self::assertStringContainsString("`\$config['use_https'] = true;`", self::flat('SECURITY.md'));
+
+        self::assertStringContainsString('without a terminal it disables its plugins and answers `Package "takenek/galbridge" not found`', (string) preg_replace('/\s+/', ' ', self::section('### 2.1 ')));
+        self::assertStringContainsString('`composer require` empties `plugins/galbridge` before it unpacks the release', self::flat('README.md'));
+        $upgrade = (string) preg_replace('/\s+/', ' ', self::section('## 5. Upgrade'));
+        self::assertStringContainsString('`Package "takenek/galbridge" listed for update is not locked.`', $upgrade);
+    }
+
+    /**
      * The README's checklist links only to headings that exist (GitHub's anchor slugs).
      */
     public function testTheChecklistLinksResolve(): void

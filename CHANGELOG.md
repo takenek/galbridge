@@ -5,6 +5,53 @@ semantic versioning.
 
 ## [Unreleased]
 
+## [1.0.6] – 2026-11-26
+
+1.0.5 was installed once more on two fresh Debian 13 servers with the unattended installer of
+iRedMail 1.8.11 (Roundcube 1.7.7, PHP 8.4), by administrators who knew nothing but the documentation:
+the MariaDB edition from the signed tag, the PostgreSQL edition with Composer from Packagist – both
+servers without `git`, `ssh-keygen`, `sudo`, `curl` or Composer – and its documentation was reviewed
+against the iRedMail 1.8.11 and Roundcube 1.7.7 sources and the plugin code (docs/TESTING.md
+section 6). The plugin worked on both editions: every `diag` form ended with `Result: OK` and no
+WARN, the browser checks passed, nothing private reached a response. The review found places where
+the documentation said something other than what happens. 1.0.6 corrects them and changes no code:
+no plugin, configuration or database step is needed for the upgrade.
+
+### Fixed (documentation)
+- **README 2.6 left the shell in `/etc/nginx/templates`**: its command that inserts the deny rule
+  started with `cd /etc/nginx/templates`, and the `diag` commands after it (the `--url` block of 2.6
+  and every command of 2.7) call the tool by its relative path – pasted in order, they failed with
+  `command not found`. The command now uses full paths, and the `diag` blocks of 2.6 and 2.7 start
+  with `cd /opt/www/roundcubemail`.
+- **README 2.2 had both `grants` lines in one block**: pasted as a whole, the PostgreSQL line ran last
+  and overwrote the MariaDB grant set and DSN of the line before it. One line runs; the other
+  edition's line is a comment.
+- **README 2.2 described the review `diff` of the `--grants-only` output for MariaDB/MySQL only**:
+  on PostgreSQL it also shows the existence check turned round (`IF NOT EXISTS` / `does not exist`)
+  and the added `ALTER ROLE ... NOINHERIT;` line of that form, not just the missing `CREATE ROLE`.
+- **README 2.7 and SECURITY.md offered `diag --strict` without `--url` for automated checks**: that
+  form checks no web access (`Result: OK (not checked: web access - run with --url)`, exit code 0),
+  so a cron job built from it never noticed a deny rule lost in an iRedMail upgrade. The automated
+  form now has the `--url=` of the webmail; README 5, "From 1.0.5 to 1.0.6", says to add it.
+
+### Documentation
+- README 2.1: `composer show takenek/galbridge` (the version and commit for the comparison with the
+  signed tag) runs in an interactive root shell as well – without a terminal it answers `Package
+  "takenek/galbridge" not found`.
+- README 7, `composer copy`: move a configuration kept in `plugins/galbridge/config.inc.php` before
+  the `composer require` that repairs the installation – it empties `plugins/galbridge` first.
+- README 5 and docs/ARCHITECTURE.md: a Composer installation copied into a new Roundcube tree is not
+  in that tree's `composer.json`, so `composer update ... takenek/galbridge` installs nothing there
+  (`listed for update is not locked`): upgrade it by release archive, or run `composer require` in
+  the new tree.
+- SECURITY.md hardening checklist: the HTTPS item names the two Roundcube options (`use_https`,
+  `session_samesite`), says that iRedMail 1.8.11 sets neither and that `diag` does not check them;
+  README 2.7 says what `diag` covers.
+
+### CI
+- The `debian:13-slim` image of the job `e2e` pinned to its current digest, and Composer 2.11.2 (was
+  2.10.3) with its published SHA-256 (docs/RELEASING.md step 3).
+
 ## [1.0.5] – 2026-11-26
 
 1.0.4 was installed and upgraded once more on real iRedMail 1.8.11 servers, from the published tag
