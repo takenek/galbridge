@@ -710,6 +710,15 @@ of the 1.0.6 run above:
 | MariaDB edition with 1.0.5 from the tag | README 5, release archive | tag and both fingerprints verified, the `diff -r` check `identical`; `diag`, `--user` and `--strict --url --cafile`: `[ OK ] GAL Bridge 1.0.6`, `Result: OK`, no WARN; browser 10/10, no canary |
 | PostgreSQL edition with 1.0.5 from Packagist | README 5, Composer in an interactive root shell | `Upgrading takenek/galbridge (v1.0.5 => v1.0.6)`, no `vendor/takenek/galbridge`, no backup copy; `composer show` names `71226a6`, the commit of the verified tag; the files identical to `git archive v1.0.6`; `diag` as above; browser 10/10, no canary |
 
+The CI run of the commit that recorded this (`9238fc1`, documentation only) failed once in case U7
+of the browser suite, on both Roundcube 1.7.7 legs: the test clicked the directory book while
+Roundcube was still fetching the first contact list, and `rcmail.command()` ignores every command
+while the interface is busy (app.js of 1.7.7: "do nothing if interface is locked by another
+command"), so the click was lost (U7 took 10 s instead of 1.1 – 1.6 s). The re-run of the two jobs
+was green: <https://github.com/takenek/galbridge/actions/runs/45771700168>. `tests/ui/test_ui.py` now
+waits until the address book is no longer busy before it clicks a source (9/9 locally on 1.7.7 and
+1.7.0 × MariaDB and PostgreSQL); the test harness is not part of a release.
+
 ## 7. Not available / not tested
 
 * Database servers outside the matrix of section 6: MariaDB 10.2 – 10.4, MySQL 8.0 before 8.0.19

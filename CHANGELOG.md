@@ -5,6 +5,11 @@ semantic versioning.
 
 ## [Unreleased]
 
+### Tests
+- The browser suite waits until Roundcube has fetched the first contact list before it clicks an
+  address book: a click while the interface is busy is ignored by Roundcube, and case U7 failed once in
+  CI on a slow runner (docs/TESTING.md section 6).
+
 ## [1.0.6] – 2026-11-26
 
 1.0.5 was installed once more on two fresh Debian 13 servers with the unattended installer of

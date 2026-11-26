@@ -152,7 +152,9 @@ def js_errors(d):
 
 def open_addressbook(d):
     d.get(C.base + '?_task=addressbook')
-    wait(d, lambda x: js(x, 'return !!(window.rcmail && rcmail.contact_list && document.readyState == "complete")'),
+    # rcmail.busy: the first contact list is still being fetched - rcmail.command() ignores every
+    # click until it has arrived (app.js: "do nothing if interface is locked by another command")
+    wait(d, lambda x: js(x, 'return !!(window.rcmail && rcmail.contact_list && document.readyState == "complete" && !rcmail.busy)'),
          msg='address book did not load')
 
 
@@ -174,6 +176,7 @@ def wait_list(d, count, msg):
 def open_directory(d):
     link = directory_link(d)
     check(link is not None, 'directory not in the source list')
+    wait(d, lambda x: not js(x, 'return rcmail.busy'), msg='address book still busy')
     link.click()
     wait(d, lambda x: js(x, 'return rcmail.env.source') == 'galbridge_domain', msg='directory not selected')
 
