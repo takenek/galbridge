@@ -1,7 +1,7 @@
 # GAL Bridge (`galbridge`) – Global Address List for Roundcube 1.7
 
 [![CI](https://github.com/takenek/galbridge/actions/workflows/ci.yml/badge.svg)](https://github.com/takenek/galbridge/actions/workflows/ci.yml)
-[![Packagist](https://raw.githubusercontent.com/takenek/galbridge/main/.github/badges/packagist-v1.0.6.svg)](https://packagist.org/packages/takenek/galbridge)
+[![Packagist](https://raw.githubusercontent.com/takenek/galbridge/main/.github/badges/packagist-v1.0.7.svg)](https://packagist.org/packages/takenek/galbridge)
 [![License](https://raw.githubusercontent.com/takenek/galbridge/main/.github/badges/license.svg)](LICENSE)
 
 GAL Bridge gives Roundcube Webmail **1.7** (every 1.7.x release) a read-only **Global Address
@@ -152,7 +152,7 @@ with the exact commands and the reasons for them – read it before you run them
 
 ```sh
 apt install git openssh-client   # Debian/Ubuntu: a minimal server (and iRedMail) may have neither
-v=1.0.6   # the release to install: https://github.com/takenek/galbridge/releases (only the latest is supported)
+v=1.0.7   # the release to install: https://github.com/takenek/galbridge/releases (only the latest is supported)
 git clone --branch "v$v" https://github.com/takenek/galbridge.git /root/galbridge-src   # NOT below the web root
 git -C /root/galbridge-src -c gpg.ssh.allowedSignersFile=/root/galbridge-src/.github/release-signers verify-tag "v$v"
 ```
@@ -901,16 +901,29 @@ GAL Bridge serves nothing over HTTP; Roundcube reads it from disk. Nothing under
 * **Per-client limits** (section 1 – required when the webmail is reachable from the Internet,
   iRedMail's default; iRedMail sets none): the nginx lines are in the
   [hardening checklist of SECURITY.md](SECURITY.md#hardening-checklist-for-administrators). On
-  iRedMail put the two `*_zone` lines into a new file `/etc/nginx/conf-enabled/roundcube-limits.conf`
+  iRedMail the two `*_zone` lines go into a new file `/etc/nginx/conf-enabled/roundcube-limits.conf`
   (iRedMail's `nginx.conf` includes `conf-enabled/*.conf` inside `http {}`), and the `limit_req` /
   `limit_conn` lines at the top of the PHP location of both templates – `location ~
   ^/mail/(.*\.php)$` in `roundcube.tmpl`, `location ~ ^/(.*\.php)$` in `roundcube-subdomain.tmpl`
-  (not at server level, where they would also count static files and iRedAdmin); keep the
-  `limit_conn` value well below the role's connection limit (2.2). Then `nginx -t && systemctl
-  reload nginx`. Like the deny rule, the two template lines are lost when an iRedMail upgrade
-  replaces the templates. The limits are per client address: every user behind one NAT address (an
-  office, a VPN exit) shares them, and nginx answers a request beyond them with 503 – SECURITY.md
-  says how to size or exempt such networks.
+  (not at server level, where they would also count static files and iRedAdmin). This puts them
+  there with the values of SECURITY.md, once: the zones are left alone when nginx already reads them
+  from any file (`nginx -T` shows the whole configuration – the 1.0.2 and 1.0.3 checklist named no
+  file for them), and a template that already has a `limit_req` or `limit_conn` line is left
+  alone:
+
+  ```sh
+  f=/etc/nginx/conf-enabled/roundcube-limits.conf
+  nginx -T 2>/dev/null | grep -qE 'zone=rc_(php|conn):' || printf '%s\n' 'limit_req_zone  $binary_remote_addr zone=rc_php:10m rate=10r/s;' 'limit_conn_zone $binary_remote_addr zone=rc_conn:10m;' > "$f"
+  for t in /etc/nginx/templates/roundcube.tmpl /etc/nginx/templates/roundcube-subdomain.tmpl; do grep -q 'limit_req\|limit_conn' "$t" || sed -i '/^location ~ ^\/\(mail\/\)\{0,1\}(\.\*\\\.php)\$ {$/a\    limit_req  zone=rc_php burst=40 nodelay;\n    limit_conn rc_conn 8;' "$t"; done
+  grep -n -A2 'php)\$ {$' /etc/nginx/templates/roundcube.tmpl /etc/nginx/templates/roundcube-subdomain.tmpl   # the two lines directly below the PHP location of each template
+  ```
+
+  Keep the `limit_conn` value well below the role's connection limit (2.2; 8 of the default 25).
+  Then `nginx -t && systemctl reload nginx` – one reload for the deny rule above and the limits.
+  Like the deny rule, the two template lines are lost when an iRedMail upgrade replaces the
+  templates: run the block again. The limits are per client address: every user behind one NAT
+  address (an office, a VPN exit) shares them, and nginx answers a request beyond them with 503 –
+  SECURITY.md says how to size or exempt such networks.
 
 ### 2.7 Test the installation
 
@@ -1916,6 +1929,10 @@ as root it is refused); its first line names the release that runs (`[ OK ] GAL 
 There are no plugin tables, so there is no schema update; options added by a new release have
 built-in defaults.
 
+**From 1.0.6 to 1.0.7** – no plugin, configuration or database step: 1.0.7 corrects the
+documentation and one INFO line of `diag` (CHANGELOG). 2.6 now has commands for the per-client
+limits; on a server that has them already they change nothing.
+
 **From 1.0.5 to 1.0.6** – no plugin, configuration or database step: 1.0.6 corrects the
 documentation (CHANGELOG). A cron or monitoring job built from the `diag --strict` example of 2.7
 checked no web access – give it the `--url=` (and `--cafile=`) of 2.7, so that it notices a deny
@@ -2212,7 +2229,8 @@ vmail.forwardings TO 'galbridge'@'localhost';` (PostgreSQL: `... ON forwardings 
 
 **iRedMail upgrades.** Some of iRedMail's upgrade tutorials replace the whole content of
 `/etc/nginx/templates/roundcube.tmpl` and `roundcube-subdomain.tmpl` (the one from 1.8.1 to 1.8.2
-did): afterwards put the deny rule of 2.6 (and the per-client limits) back, reload nginx and run
+did): afterwards put the deny rule of 2.6 (and the per-client limits) back – the commands of 2.6
+leave a template that still has them alone –, reload nginx and run
 `diag --url=...` (2.6) – plain `diag` does not test the web server. Before a step that alters the
 table `vmail.forwardings`, drop the view – MariaDB/MySQL `DROP VIEW IF EXISTS
 vmail.galbridge_forwardings;`, PostgreSQL `runuser -u postgres -- psql -X -d vmail -c 'DROP VIEW IF

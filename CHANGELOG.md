@@ -5,16 +5,37 @@ semantic versioning.
 
 ## [Unreleased]
 
-The published release 1.0.6 was installed afresh on two new Debian 13 servers with the unattended
+## [1.0.7] – 2026-11-26
+
+The published release 1.0.6 was installed afresh on four new Debian 13 servers with the unattended
 installer of iRedMail 1.8.11 and its default components (Roundcube 1.7.7, PHP 8.4), by
-administrators who knew nothing but the documentation – the MariaDB edition with Composer from
-Packagist, the PostgreSQL edition from the signed tag – and the documentation was reviewed once more
-against the code and the iRedMail and Roundcube sources (docs/TESTING.md section 6). Both
-installations worked as documented: every `diag` form ended with `Result: OK` and no WARN, the
-browser checks passed, nothing private reached a response. Two sentences of README section 2 are
-corrected; the code is unchanged.
+administrators who knew nothing but the documentation – each edition once with Composer from
+Packagist and once from the signed tag (the second pair following the documentation of this
+release) – and the documentation was reviewed twice more against the code and the iRedMail and
+Roundcube sources (docs/TESTING.md section 6). Every installation worked as documented: every
+`diag` form ended with `Result: OK` and no WARN, the browser checks passed, nothing private reached
+a response. 1.0.7 corrects two sentences of README section 2, gives the per-client limits of 2.6 the
+commands the other steps have, and corrects one INFO line of `diag`; the directory itself is
+unchanged: no plugin, configuration or database step is needed for the upgrade.
+
+### Fixed
+- `diag`, section "vmail database": the INFO line `mailboxes without a name N (shown with their
+  address)` said what the directory does not do. Such a mailbox is shown with its first and last
+  name where `galbridge_fields` allows them and the row has them, else with the local part of its
+  address – never with the address (README 3.4); on the PostgreSQL server of this round the one
+  mailbox counted appeared as "Anna Nowak". The line now says so. It is an INFO and never changed the
+  result.
 
 ### Documentation
+- README 2.6, per-client limits: the one change of an nginx file that 2.6 requires for a webmail
+  reachable from the Internet had no commands – where to put which lines, but nothing to paste –,
+  and each docs-only administrator wrote their own `sed`. A block now writes the two `*_zone` lines
+  into `/etc/nginx/conf-enabled/roundcube-limits.conf` and the `limit_req` / `limit_conn` lines at
+  the top of the PHP location of both templates, with the values of the SECURITY.md checklist, and
+  shows the result. It declares the zones only when nginx does not already read them from some file
+  (`nginx -T`: the checklist of 1.0.2 and 1.0.3 named no file, and a second declaration fails
+  `nginx -t`), and leaves a template that has `limit_req` or `limit_conn` lines alone – run it again
+  after an iRedMail upgrade replaced the templates. SECURITY.md and README 5 point to it.
 - README 2.2, review of the grant output: the `diff` of the **default** form – the one a first
   installation applies – was described only in general terms, and the following sentence about the
   `--grants-only` form read as if it applied to every output: the docs-only administrator saw the
@@ -28,6 +49,11 @@ corrected; the code is unchanged.
 - The browser suite waits until Roundcube has fetched the first contact list before it clicks an
   address book: a click while the interface is busy is ignored by Roundcube, and case U7 failed once in
   CI on a slow runner (docs/TESTING.md section 6).
+- `InstallationDocsTest` runs the limits block of README 2.6 on the two templates as iRedMail 1.8.11
+  installs them – on a fresh server, with the zones of a 1.0.3 installation in `nginx.conf` and with a
+  template that has limits of its own: the lines land below the PHP location of each template and
+  nowhere else, zones are never declared twice, and a second run changes nothing – and compares its
+  values with SECURITY.md.
 
 ## [1.0.6] – 2026-11-26
 

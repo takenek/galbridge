@@ -1165,6 +1165,8 @@ final class CliToolTest extends TestCase
             ['OK', 'optional columns mailbox', 'ok'], ['OK', 'optional columns alias', 'ok'], ['OK', 'optional columns maillists', 'ok'],
             ['INFO', 'granted but unused', 'mailbox.telephone, mailbox.mobile, mailbox.birthday (not in galbridge_fields'],
             ['INFO', 'hosted domains', '4 active'], ['INFO', 'deliverable mailboxes', '11'],
+            // 1.0.7: the fallback name of RecordMapper::person() (README 3.4), not "their address"
+            ['INFO', 'mailboxes without a name', '(shown as first + last name where allowed and filled, else as the local part of the address)'],
             ['OK', 'home domain', 'example.com'], ['INFO', 'addresses', '4 (login + per-user aliases of deliverable domains'],
             ['OK', 'galbridge_domain', '1 domain(s), groups: department (3 groups), search-only: no'],
             ['INFO', 'persons', '7 ('], ['INFO', 'alias accounts', '5 ('], ['INFO', 'mailing lists', '1 ('],

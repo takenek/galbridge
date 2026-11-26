@@ -2520,7 +2520,8 @@ final class Tool
         $this->entriesNotOffered($conn, $columns);
         $this->windowFunctions($conn, $cfg);
         $rows = $conn->select("SELECT COUNT(m.username) AS n FROM `mailbox` m WHERE m.active = 1 AND TRIM(m.name) = ''");
-        $this->info('mailboxes without a name', (string) ($rows[0]['n'] ?? '0') . ' (shown with their address)');
+        // the name the directory gives them (RecordMapper::person(), README 3.4) - never the address
+        $this->info('mailboxes without a name', (string) ($rows[0]['n'] ?? '0') . ' (shown as first + last name where allowed and filled, else as the local part of the address)');
         $flavour = $conn->flavour();
         foreach (['mailbox' => 'domain', Schema::FORWARDINGS_TABLE => 'forwarding'] as $table => $column) {
             if ($flavour === 'pgsql') {

@@ -442,9 +442,9 @@ See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the full threat model and
   two `*_zone` lines into a new file `/etc/nginx/conf-enabled/roundcube-limits.conf`, and the
   `limit_req` / `limit_conn` lines at the top of `location ~ ^/mail/(.*\.php)$` in
   `/etc/nginx/templates/roundcube.tmpl` (`location ~ ^/(.*\.php)$` in `roundcube-subdomain.tmpl`),
-  not at server level, where they would also count static files and iRedAdmin; `nginx -t &&
-  systemctl reload nginx`. iRedMail upgrades that replace those templates remove the two lines: add
-  them again (README 5).
+  not at server level, where they would also count static files and iRedAdmin (README 2.6 has the
+  commands that put the lines above there); `nginx -t && systemctl reload nginx`. iRedMail upgrades
+  that replace those templates remove the two lines: add them again (README 5).
 * Run `sudo -u www-data plugins/galbridge/bin/galbridge.sh diag --url=<webmail URL>` from the
   Roundcube directory (README 2.6 and 2.7; without sudo `runuser -u www-data -- ...`) after every
   Roundcube, iRedMail or plugin upgrade – `--url` checks that the web server rule is still there.

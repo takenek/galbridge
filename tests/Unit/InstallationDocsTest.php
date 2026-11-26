@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace GalBridge\Tests\Unit;
 
+use GalBridge\Tests\Support\CliRun;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -15,6 +16,15 @@ use PHPUnit\Framework\TestCase;
  */
 final class InstallationDocsTest extends TestCase
 {
+    private ?string $dir = null;
+
+    protected function tearDown(): void
+    {
+        if ($this->dir !== null) {
+            CliRun::rmTree($this->dir);
+        }
+    }
+
     private static function read(string $file): string
     {
         return (string) file_get_contents(dirname(__DIR__, 2) . '/' . $file);
@@ -241,7 +251,7 @@ final class InstallationDocsTest extends TestCase
     }
 
     /**
-     * A fresh installation of 1.0.6 by the documentation alone (CHANGELOG, Unreleased): the review
+     * A fresh installation of 1.0.6 by the documentation alone (CHANGELOG 1.0.7): the review
      * diff of 2.2 is described for each of the three forms - the docs-only administrator saw the
      * CREATE USER line of the default form as changed (1c1) where the --grants-only sentence said
      * "missing" -, and curl is part of a default iRedMail installation (its netdata component).
@@ -265,6 +275,162 @@ final class InstallationDocsTest extends TestCase
         $intro = (string) preg_replace('/\s+/', ' ', self::section('## 2. Installation'));
         self::assertStringNotContainsString('`sudo` and `curl` are not part of iRedMail', $intro);
         self::assertStringContainsString('`curl`, needed for the check of 2.6, comes with iRedMail only together with its optional netdata component', $intro);
+    }
+
+    /**
+     * 1.0.7: the per-client limits of 2.6 - the one change of an nginx file required for a webmail
+     * reachable from the Internet - have commands like the deny rule; three docs-only installations
+     * wrote their own. The block, run on the two templates exactly as iRedMail 1.8.11 installs them
+     * (functions/nginx.sh copies samples/nginx/templates/ and replaces the placeholders), puts the
+     * lines of SECURITY.md directly below the PHP location of each and nowhere else, and run a
+     * second time changes nothing. Zones that nginx already reads from another file (the 1.0.2 and
+     * 1.0.3 checklist named none) are not declared twice - nginx -t would refuse them -, and a
+     * template that has limit lines of its own is left alone.
+     */
+    public function testThePerClientLimitsHaveCommandsWithTheValuesOfSecurityMd(): void
+    {
+        $s = self::section('### 2.6 ');
+        self::assertSame(1, preg_match('/^  ```sh\n(  f=\/etc\/nginx\/conf-enabled\/roundcube-limits\.conf\n.*?)^  ```/ms', $s, $m), 'the limits block of 2.6');
+        $block = (string) preg_replace('/^  /m', '', $m[1]);
+        self::assertSame(0, preg_match('/^\s*cd /m', $block), 'full paths, no cd');
+
+        // the values are those of the hardening checklist
+        self::assertSame(1, preg_match('/^  ```nginx\n(.*?)^  ```/ms', (string) strstr(self::read('SECURITY.md'), '* **Per-client limits in the reverse proxy**'), $n));
+        $lines = array_values(array_filter(array_map('trim', explode("\n", $n[1])), static fn (string $l): bool => $l !== '' && $l[0] !== '#'));
+        self::assertSame([
+            'limit_req_zone  $binary_remote_addr zone=rc_php:10m rate=10r/s;',
+            'limit_conn_zone $binary_remote_addr zone=rc_conn:10m;',
+            'limit_req  zone=rc_php burst=40 nodelay;',
+            'limit_conn rc_conn 8;',
+        ], $lines);
+        self::assertStringContainsString('README 2.6 has the commands that put the lines above there', self::flat('SECURITY.md'));
+
+        $bash = is_executable('/bin/bash') ? '/bin/bash' : null;
+        if ($bash === null) {
+            self::markTestSkipped('needs bash');
+        }
+        $this->dir = CliRun::tempBase('galbridge-limits');
+        $deny = "location ~ ^/(mail/)?(static\\.php/)?plugins/galbridge(-[0-9]+)?/ { deny all; }\n";
+        $templates = [
+            // iRedMail 1.8.11 samples/nginx/templates/roundcube.tmpl as installed
+            'roundcube.tmpl' => <<<'TPL'
+            #
+            # Running Roundcube as a subfolder on an existing virtual host
+            #
+            # Block direct access to directories and files.
+            location ~ ^/mail/(SQL|bin|config|installer|logs|temp|vendor)/ { deny all; }
+            location ~ ^/mail/(.*\.md|composer\.*|INSTALL|LICENSE|Makefile|UPGRADING)$ { deny all; }
+            location ~ ^/mail/plugins/.*/config.inc.php.* { deny all; }
+            location ~ ^/mail/plugins/enigma/home($|/.*) { deny all; }
+
+            # Block access to directories and files via `public_html/static.php`.
+            location ~ ^/mail/static.php/(SQL|bin|config|installer|logs|temp|vendor)/ { deny all; }
+            location ~ ^/mail/static.php/(.*\.md|composer\.*|INSTALL|LICENSE|Makefile|UPGRADING)$ { deny all; }
+            location ~ ^/mail/static.php/plugins/.*/config.inc.php.* { deny all; }
+            location ~ ^/mail/static.php/plugins/enigma/home($|/.*) { deny all; }
+
+            # Redirect URI `/mail` to `/mail/`.
+            location = /mail {
+                return 301 /mail/;
+            }
+
+            location = /mail/ {
+                alias /opt/www/roundcubemail/public_html/;
+                index index.php;
+            }
+
+            location ~ ^/mail/static.php/(.*) {
+                include /etc/nginx/templates/hsts.tmpl;
+                alias /opt/www/roundcubemail/$1;
+            }
+
+            location ~ ^/mail/(.*\.php)$ {
+                include /etc/nginx/templates/hsts.tmpl;
+                include /etc/nginx/templates/fastcgi_php.tmpl;
+                fastcgi_param SCRIPT_FILENAME /opt/www/roundcubemail/public_html/$1;
+            }
+            TPL,
+            // samples/nginx/templates/roundcube-subdomain.tmpl as installed
+            'roundcube-subdomain.tmpl' => <<<'TPL'
+            #
+            # Run Roundcube as a sub-domain virtual host.
+            #
+            # Block direct access to directories and files.
+            location ~ ^/(SQL|bin|config|installer|logs|temp|vendor)/ { deny all; }
+            location ~ ^/(.*\.md|composer\.*|INSTALL|LICENSE|Makefile|UPGRADING)$ { deny all; }
+            location ~ ^/plugins/.*/config.inc.php.* { deny all; }
+            location ~ ^/plugins/enigma/home($|/.*) { deny all; }
+
+            # Block access to directories and files via `public_html/static.php`.
+            location ~ ^/static.php/(SQL|bin|config|installer|logs|temp|vendor)/ { deny all; }
+            location ~ ^/static.php/(.*\.md|composer\.*|INSTALL|LICENSE|Makefile|UPGRADING)$ { deny all; }
+            location ~ ^/static.php/plugins/.*/config.inc.php.* { deny all; }
+            location ~ ^/static.php/plugins/enigma/home($|/.*) { deny all; }
+
+            location / {
+                root    /opt/www/roundcubemail/public_html;
+                index   index.php index.html;
+                include /etc/nginx/templates/hsts.tmpl;
+            }
+
+            location ~ ^/static.php/(.*) {
+                include /etc/nginx/templates/hsts.tmpl;
+                alias /opt/www/roundcubemail/$1;
+            }
+
+            location ~ ^/(.*\.php)$ {
+                include /etc/nginx/templates/hsts.tmpl;
+                include /etc/nginx/templates/fastcgi_php.tmpl;
+                fastcgi_param SCRIPT_FILENAME /opt/www/roundcubemail/public_html/$1;
+            }
+            TPL,
+        ];
+        $limits = "    limit_req  zone=rc_php burst=40 nodelay;\n    limit_conn rc_conn 8;\n";
+        $php = ['roundcube.tmpl' => "location ~ ^/mail/(.*\\.php)\$ {\n", 'roundcube-subdomain.tmpl' => "location ~ ^/(.*\\.php)\$ {\n"];
+        $zones = $lines[0] . "\n" . $lines[1] . "\n";
+
+        // $case: [zones declared in nginx.conf before the block, own limit line in roundcube.tmpl]
+        $cases = ['fresh server' => [false, false], 'zones of 1.0.3 in nginx.conf' => [true, false], 'own limits in a template' => [false, true]];
+        foreach (array_keys($cases) as $i => $case) {
+            [$zonesElsewhere, $ownLimits] = $cases[$case];
+            $root = "{$this->dir}/case{$i}";   // the block takes its paths unquoted, as on a server
+            $etc = "{$root}/etc/nginx";
+            mkdir("{$etc}/templates", 0o700, true);
+            mkdir("{$etc}/conf-enabled", 0o700);
+            mkdir("{$root}/bin", 0o700);
+            // nginx -T prints the configuration nginx reads: here nginx.conf and conf-enabled/*.conf
+            file_put_contents("{$root}/bin/nginx", "#!/bin/sh\n[ \"\$1\" = -T ] || exit 1\ncat {$etc}/nginx.conf {$etc}/conf-enabled/*.conf 2>/dev/null\n");
+            chmod("{$root}/bin/nginx", 0o700);
+            file_put_contents("{$etc}/nginx.conf", "http {\n" . ($zonesElsewhere ? $zones : '') . "    include {$etc}/conf-enabled/*.conf;\n}\n");
+            $expected = [];
+            foreach ($templates as $name => $text) {
+                $text = str_replace("# Block direct access to directories and files.\n", "# Block direct access to directories and files.\n" . $deny, $text . "\n");
+                self::assertSame(1, substr_count($text, $php[$name]), $name);
+                if ($ownLimits && $name === 'roundcube.tmpl') {
+                    $text = str_replace($php[$name], $php[$name] . "    limit_req zone=webmail burst=20;\n", $text);
+                    $expected[$name] = $text;
+                } else {
+                    $expected[$name] = str_replace($php[$name], $php[$name] . $limits, $text);
+                }
+                file_put_contents("{$etc}/templates/{$name}", $text);
+            }
+            $run = str_replace('/etc/nginx/', $etc . '/', $block);
+            $env = getenv();
+            $env['PATH'] = "{$root}/bin:" . ($env['PATH'] ?? '/usr/bin:/bin');
+            foreach ([1, 2] as $pass) {
+                [$code, $out, $err] = CliRun::exec([$bash, '-c', $run], null, $env);
+                self::assertSame(0, $code, "{$case}, pass {$pass}: {$err}");
+                self::assertSame($ownLimits ? 1 : 2, substr_count($out, 'limit_req  zone=rc_php burst=40 nodelay;'), "{$case}, pass {$pass}: the check line shows the templates");
+                if ($zonesElsewhere) {
+                    self::assertFileDoesNotExist("{$etc}/conf-enabled/roundcube-limits.conf", "{$case}, pass {$pass}: the zones are not declared twice");
+                } else {
+                    self::assertSame($zones, file_get_contents("{$etc}/conf-enabled/roundcube-limits.conf"), "{$case}, pass {$pass}");
+                }
+                foreach ($expected as $name => $text) {
+                    self::assertSame($text, file_get_contents("{$etc}/templates/{$name}"), "{$case}, pass {$pass}: {$name}");
+                }
+            }
+        }
     }
 
     /**
