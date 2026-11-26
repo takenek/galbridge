@@ -5,6 +5,15 @@ semantic versioning.
 
 ## [Unreleased]
 
+### Documentation
+
+- The Packagist and License badges of the README showed as broken images on GitHub and on
+  Packagist: GitHub's image proxy gave up on `img.shields.io` after about four seconds ("504 Error
+  Fetching Resource"). Both badges are now files of the repository (`.github/badges/`, the same
+  images shields.io draws), linked through `raw.githubusercontent.com`, which GitHub does not proxy;
+  the version badge is part of the version bump (docs/RELEASING.md step 4) and a test compares it
+  with the plugin version.
+
 ## [1.0.3] – 2026-11-25
 
 The plugin was installed on real iRedMail 1.8.11 servers – Debian 13, Roundcube 1.7.7, PHP 8.4

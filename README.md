@@ -1,8 +1,8 @@
 # GAL Bridge (`galbridge`) – Global Address List for Roundcube 1.7
 
 [![CI](https://github.com/takenek/galbridge/actions/workflows/ci.yml/badge.svg)](https://github.com/takenek/galbridge/actions/workflows/ci.yml)
-[![Packagist](https://img.shields.io/packagist/v/takenek/galbridge.svg)](https://packagist.org/packages/takenek/galbridge)
-[![License](https://img.shields.io/packagist/l/takenek/galbridge.svg)](LICENSE)
+[![Packagist](https://raw.githubusercontent.com/takenek/galbridge/main/.github/badges/packagist.svg)](https://packagist.org/packages/takenek/galbridge)
+[![License](https://raw.githubusercontent.com/takenek/galbridge/main/.github/badges/license.svg)](LICENSE)
 
 GAL Bridge gives Roundcube Webmail **1.7** (every 1.7.x release) a read-only **Global Address
 List** read directly from the SQL `vmail` database of **iRedMail 1.8.x** (MariaDB/MySQL and

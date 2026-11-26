@@ -323,6 +323,41 @@ final class Remediation2ReleaseTest extends TestCase
     }
 
     /**
+     * The Packagist and License badges of the README are files of this repository: GitHub's image
+     * proxy (camo) gave up on img.shields.io after about four seconds with "504 Error Fetching
+     * Resource", so both badges showed as broken images on github.com and packagist.org (which
+     * renders the README through GitHub). raw.githubusercontent.com is not proxied. The version
+     * badge is part of the version bump (docs/RELEASING.md step 4).
+     */
+    public function testTheReadmeBadgesAreRepositoryFilesThatNameTheCurrentRelease(): void
+    {
+        self::assertSame(1, preg_match("/'version' => '(\\d+\\.\\d+\\.\\d+)'/", self::read('galbridge.php'), $m));
+        $version = $m[1];
+        $license = json_decode(self::read('composer.json'), true, 512, JSON_THROW_ON_ERROR)['license'];
+        self::assertIsString($license);
+        $readme = self::read('README.md');
+        $raw = 'https://raw.githubusercontent.com/takenek/galbridge/main/.github/badges/';
+        self::assertStringContainsString("[![Packagist]({$raw}packagist.svg)](https://packagist.org/packages/takenek/galbridge)", $readme);
+        self::assertStringContainsString("[![License]({$raw}license.svg)](LICENSE)", $readme);
+        self::assertStringNotContainsString('img.shields.io', $readme, 'GitHub\'s image proxy does not reliably fetch shields.io');
+        $badges = [
+            'packagist.svg' => ['packagist', 'v' . $version, '#007ec6'],
+            'license.svg' => ['license', $license, '#ea7233'],
+        ];
+        foreach ($badges as $file => [$label, $value, $colour]) {
+            $svg = self::read('.github/badges/' . $file);
+            self::assertStringStartsWith('<svg xmlns="http://www.w3.org/2000/svg" ', $svg, $file);
+            self::assertLessThan(4096, strlen($svg), $file);
+            self::assertStringContainsString("aria-label=\"{$label}: {$value}\"", $svg, $file);
+            self::assertStringContainsString("<title>{$label}: {$value}</title>", $svg, $file);
+            self::assertSame(3, substr_count($svg, ">{$label}</text>"), $file);
+            self::assertSame(3, substr_count($svg, ">{$value}</text>"), $file . ' names ' . $value);
+            self::assertStringContainsString("fill=\"{$colour}\"", $svg, $file);
+            self::assertSame(0, preg_match('/<script|<foreignObject|href|\son[a-z]+=|url\((?!#)/i', $svg), $file . ': a plain image');
+        }
+    }
+
+    /**
      * docs/RELEASING.md describes the procedure the scripts and CI implement.
      */
     public function testTheReleaseProcedureUsesTheScriptsAndADisposableVerification(): void

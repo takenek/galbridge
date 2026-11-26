@@ -180,6 +180,11 @@ registered on Packagist right after the repository becomes public.
 4. **Version bump** in one commit:
    * `galbridge::info()` in `galbridge.php` – `'version' => 'X.Y.Z'`;
    * the `v=X.Y.Z` line of README section 2.1 (`Remediation2ReleaseTest` compares the two);
+   * the version badge of the README, a file of the repository:
+     `curl -fsS -o .github/badges/packagist.svg https://img.shields.io/badge/packagist-vX.Y.Z-007ec6.svg`
+     (the image shields.io draws for Packagist; the README links the committed file because GitHub's
+     image proxy does not reliably fetch shields.io, and `Remediation2ReleaseTest` compares its
+     version with `galbridge.php`);
    * `CHANGELOG.md`: rename `## [Unreleased]` to `## [X.Y.Z] – YYYY-MM-DD` (semantic versioning; any
      security fix is at least a patch release; the date of the tag – correct it if the tag is made
      later) and add a new empty `## [Unreleased]` above it.
