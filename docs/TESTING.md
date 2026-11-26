@@ -690,6 +690,26 @@ user `tester` unless noted:
 | `tests/e2e/test_e2e.py` and `tests/ui/test_ui.py`, Roundcube 1.7.7 and 1.7.0 × MariaDB and PostgreSQL | E2E **37 passed, 0 failed, 0 skipped**, UI **9/9**, each of the four |
 | the changed commands of README 2.2 (`grants --grants-only` and the review `diff`, both drivers) and 2.6 (the nginx command with full paths, on copies of iRedMail's templates) | as the README now describes them |
 
+### CI and post-release verification of 1.0.6 (2026-11-26)
+
+CI run of the release commit `71226a6`: <https://github.com/takenek/galbridge/actions/runs/45769311312>
+(21 jobs green – with Composer 2.11.2 and the refreshed `debian:13-slim` digest –, the release checks
+wait for the tag); CI run of the tag `v1.0.6`, including the release checks:
+<https://github.com/takenek/galbridge/actions/runs/45770716453> (22 jobs green). Before the tag, the
+PHPUnit suite ran once more in the development container from the dependency sets of the CI run of
+the release commit (`composer-lock-tests-php8.4-newest` and `-1.7.0`, `composer install`, `composer
+audit`: no advisory): **3013 tests, OK** against 1.7.7 and against 1.7.0. The tag was verified with
+`tests/release/verify-tag.sh` and `check-archive.php` before the push; the GitHub release is
+immutable. Packagist listed `v1.0.6` at `71226a6` (source and dist); github.com and packagist.org
+show the badges `CI passing`, `packagist v1.0.6` and `license GPL-3.0-or-later` (checked in headless
+Chromium: every badge image loaded). From the published sources, on the two iRedMail 1.8.11 servers
+of the 1.0.6 run above:
+
+| Server | What | Result |
+|---|---|---|
+| MariaDB edition with 1.0.5 from the tag | README 5, release archive | tag and both fingerprints verified, the `diff -r` check `identical`; `diag`, `--user` and `--strict --url --cafile`: `[ OK ] GAL Bridge 1.0.6`, `Result: OK`, no WARN; browser 10/10, no canary |
+| PostgreSQL edition with 1.0.5 from Packagist | README 5, Composer in an interactive root shell | `Upgrading takenek/galbridge (v1.0.5 => v1.0.6)`, no `vendor/takenek/galbridge`, no backup copy; `composer show` names `71226a6`, the commit of the verified tag; the files identical to `git archive v1.0.6`; `diag` as above; browser 10/10, no canary |
+
 ## 7. Not available / not tested
 
 * Database servers outside the matrix of section 6: MariaDB 10.2 – 10.4, MySQL 8.0 before 8.0.19
