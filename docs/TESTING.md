@@ -615,6 +615,19 @@ The tree of the release commit in the development container of section 6, as for
 | `tests/e2e/test_e2e.py` and `tests/ui/test_ui.py`, Roundcube 1.7.7 × MariaDB and PostgreSQL | E2E **37 passed, 0 failed, 0 skipped**, UI **9/9**, each |
 | the two `pg_hba.conf` commands of README 2.2 and 5, the nginx command of 2.6, the 2.3 DSN commands | run as printed on copies of iRedMail's files: the lines in the right place, a second run changes nothing, a missing DSN file changes nothing |
 
+### CI and post-release verification of 1.0.5 (2026-11-26)
+
+CI run of the release commit `a7881d0`: <https://github.com/takenek/galbridge/actions/runs/45761746657>
+(21 jobs green, the release checks wait for the tag); CI run of the tag `v1.0.5`, including the
+release checks: <https://github.com/takenek/galbridge/actions/runs/45762346946> (22 jobs green).
+Packagist listed `v1.0.5` at `a7881d0`; github.com and packagist.org show `packagist v1.0.5` and
+`license GPL-3.0-or-later`. From the published sources, on the real iRedMail 1.8.11 servers above:
+
+| Server | What | Result |
+|---|---|---|
+| MariaDB edition with 1.0.4 from Packagist | README 5, Composer, interactive root shell | `Upgrading takenek/galbridge (v1.0.4 => v1.0.5)`, no `vendor/takenek/galbridge`; `diag`: `[ OK ] GAL Bridge 1.0.5`; with `--grants-only --connection-limit=100` `[WARN] connection limit 100 of the 151 connections the server has for ordinary roles (max_connections) ...`, with the default again `[ OK ] connection limit 25`; browser 10/10 |
+| PostgreSQL edition with 1.0.4 from the tag | README 5, release archive with the `diff -r` check | tag and fingerprint verified, `identical`; `diag`: `GAL Bridge 1.0.5`, limit 100 a WARN (`100 of the 97 connections ...`: 100 minus 3 reserved), 25 OK; browser 10/10 |
+
 ## 7. Not available / not tested
 
 * Database servers outside the matrix of section 6: MariaDB 10.2 – 10.4, MySQL 8.0 before 8.0.19
