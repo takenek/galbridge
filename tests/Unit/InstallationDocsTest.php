@@ -36,15 +36,48 @@ final class InstallationDocsTest extends TestCase
     }
 
     /**
-     * @return string the text of one README section, from its heading to the next one of that level
+     * The documentation set: README.md and the three documents that hold the full text of its
+     * sections (1.0.8: the README keeps the short form, docs/ the full one).
      */
-    private static function section(string $heading): string
+    private const FULL_TEXTS = ['docs/INSTALLATION.md', 'docs/CONFIGURATION.md', 'docs/OPERATIONS.md'];
+
+    private static function docs(): string
+    {
+        $all = self::read('README.md');
+        foreach (self::FULL_TEXTS as $file) {
+            $all .= "\n" . self::read($file);
+        }
+        return (string) preg_replace('/\s+/', ' ', $all);
+    }
+
+    /**
+     * The file that holds the full text of a numbered section: 1 and 2 docs/INSTALLATION.md, 3, 4
+     * and 10 docs/CONFIGURATION.md, 5 - 7 docs/OPERATIONS.md, the rest the README.
+     */
+    private static function home(string $heading): string
+    {
+        if (preg_match('/^#+ (\d+)[. ]/', $heading, $m) !== 1) {
+            return 'README.md';
+        }
+        return match ((int) $m[1]) {
+            1, 2 => 'docs/INSTALLATION.md',
+            3, 4, 10 => 'docs/CONFIGURATION.md',
+            5, 6, 7 => 'docs/OPERATIONS.md',
+            default => 'README.md',
+        };
+    }
+
+    /**
+     * @return string the text of one section, from its heading to the next one of that level - by
+     *                default from the file that holds its full text
+     */
+    private static function section(string $heading, ?string $file = null): string
     {
         $level = strspn($heading, '#');
         $out = [];
         $inside = false;
         $fence = false;
-        foreach (explode("\n", self::read('README.md')) as $line) {
+        foreach (explode("\n", self::read($file ?? self::home($heading))) as $line) {
             if (str_starts_with($line, '```')) {
                 $fence = !$fence;
             }
@@ -104,12 +137,15 @@ final class InstallationDocsTest extends TestCase
      */
     public function testEveryDiagCommandHasAFormWithoutSudo(): void
     {
-        $intro = (string) preg_replace('/\s+/', ' ', self::section('## 2. Installation'));
-        self::assertStringContainsString('`runuser -u www-data -- plugins/galbridge/bin/galbridge.sh diag`', $intro);
-        self::assertStringContainsString('`apt install curl`', $intro);
-        self::assertStringContainsString('`apt install sudo`', $intro);
-        foreach (['### 2.7 ', '## 7. Troubleshooting'] as $heading) {
-            self::assertStringContainsString('runuser -u www-data -- plugins/galbridge/bin/galbridge.sh diag', (string) preg_replace('/\s+/', ' ', self::section($heading)), $heading);
+        foreach (['README.md', 'docs/INSTALLATION.md'] as $file) {
+            $intro = (string) preg_replace('/\s+/', ' ', self::section('## 2. Installation', $file));
+            self::assertStringContainsString('`runuser -u www-data -- plugins/galbridge/bin/galbridge.sh diag`', $intro, $file);
+            self::assertStringContainsString('`apt install curl`', $intro, $file);
+            self::assertStringContainsString('`apt install sudo`', $intro, $file);
+            foreach (['### 2.7 ', '## 7. Troubleshooting'] as $heading) {
+                $file2 = $file === 'README.md' ? 'README.md' : null;
+                self::assertStringContainsString('runuser -u www-data -- plugins/galbridge/bin/galbridge.sh diag', (string) preg_replace('/\s+/', ' ', self::section($heading, $file2)), $heading);
+            }
         }
         foreach (['config.inc.php.dist', 'docs/MIGRATION.md', 'SQL/grants.mysql.sql', 'SQL/grants.postgres.sql', 'bin/galbridge.sh', 'SECURITY.md'] as $file) {
             self::assertStringContainsString('runuser -u www-data --', self::read($file), $file);
@@ -148,7 +184,7 @@ final class InstallationDocsTest extends TestCase
      */
     public function testTheDsnLineIsPastedWithoutTheCommentMarker(): void
     {
-        self::assertStringContainsString('**without the leading `-- `**', self::flat('README.md'));
+        self::assertStringContainsString('**without the leading `-- `**', self::docs());
         self::assertStringContainsString('php -l config/galbridge.inc.php', self::section('### 2.3 '));
         self::assertStringContainsString('WITHOUT the leading "-- "', self::flat('config.inc.php.dist'));
         // the tool's own format, which the documentation describes
@@ -181,12 +217,14 @@ final class InstallationDocsTest extends TestCase
      */
     public function testIredmailSpecificsAreSpelledOut(): void
     {
-        self::assertStringContainsString('openssl x509 -in /etc/ssl/certs/iRedMail.crt -noout -subject', self::flat('README.md'));
-        self::assertStringContainsString('php-fpm8.4 -m', self::flat('README.md'));
+        self::assertStringContainsString('openssl x509 -in /etc/ssl/certs/iRedMail.crt -noout -subject', self::docs());
+        self::assertStringContainsString('php-fpm8.4 -m', self::docs());
         self::assertStringContainsString("'.' . PHP_MINOR_VERSION . ' -m)", self::read('lib/GalBridge/Cli/Tool.php'));
-        self::assertStringContainsString("(`//\$config['addressbook_sort_col'] = 'name';`)", self::flat('README.md'));
-        self::assertStringContainsString("\$config['plugins'] = array('managesieve', 'password', 'zipdownload', 'galbridge');", self::read('README.md'));
-        self::assertStringContainsString('namei -l "$PWD/plugins/galbridge/bin/galbridge.sh"', self::read('README.md'));
+        self::assertStringContainsString("(`//\$config['addressbook_sort_col'] = 'name';`)", self::docs());
+        foreach (['README.md', 'docs/INSTALLATION.md'] as $file) {
+            self::assertStringContainsString("\$config['plugins'] = array('managesieve', 'password', 'zipdownload', 'galbridge');", self::read($file), $file);
+            self::assertStringContainsString('namei -l "$PWD/plugins/galbridge/bin/galbridge.sh"', self::read($file), $file);
+        }
     }
 
     /**
@@ -197,25 +235,28 @@ final class InstallationDocsTest extends TestCase
      */
     public function testTheBlocksOfSection2RunInTheirOrder(): void
     {
-        $s = self::section('## 2. Installation');
-        self::assertGreaterThan(5, (int) preg_match_all('/^ *```sh\n(.*?)^ *```/ms', $s, $blocks));
-        $withTool = 0;
-        foreach ($blocks[1] as $block) {
-            preg_match_all('/^ *cd (\S+)/m', $block, $cd);
-            foreach ($cd[1] as $dir) {
-                self::assertSame('/opt/www/roundcubemail', $dir, "a block of section 2 changes into {$dir}:\n{$block}");
+        // README: 2.2 and 2.7 run the tool; the full text also has the diag --url block of 2.6
+        foreach (['README.md' => 2, 'docs/INSTALLATION.md' => 3] as $file => $minimum) {
+            $s = self::section('## 2. Installation', $file);
+            self::assertGreaterThan(5, (int) preg_match_all('/^ *```sh\n(.*?)^ *```/ms', $s, $blocks), $file);
+            $withTool = 0;
+            foreach ($blocks[1] as $block) {
+                preg_match_all('/^ *cd (\S+)/m', $block, $cd);
+                foreach ($cd[1] as $dir) {
+                    self::assertSame('/opt/www/roundcubemail', $dir, "a block of section 2 of {$file} changes into {$dir}:\n{$block}");
+                }
+                if (preg_match('/^ *(sudo -u www-data |runuser -u www-data -- )?plugins\/galbridge\/bin\/galbridge\.sh /m', $block) === 1) {
+                    $withTool++;
+                    self::assertSame(1, preg_match('/\A *cd \/opt\/www\/roundcubemail\n/', $block), "a block of {$file} that runs the tool starts in the Roundcube directory:\n{$block}");
+                }
             }
-            if (preg_match('/^ *(sudo -u www-data |runuser -u www-data -- )?plugins\/galbridge\/bin\/galbridge\.sh /m', $block) === 1) {
-                $withTool++;
-                self::assertSame(1, preg_match('/\A *cd \/opt\/www\/roundcubemail\n/', $block), "a block that runs the tool starts in the Roundcube directory:\n{$block}");
-            }
-        }
-        self::assertGreaterThanOrEqual(3, $withTool, '2.2, the diag --url block of 2.6 and 2.7');
-        self::assertStringContainsString('for t in /etc/nginx/templates/roundcube.tmpl /etc/nginx/templates/roundcube-subdomain.tmpl; do', self::section('### 2.6 '));
+            self::assertGreaterThanOrEqual($minimum, $withTool, $file);
+            self::assertStringContainsString('for t in /etc/nginx/templates/roundcube.tmpl /etc/nginx/templates/roundcube-subdomain.tmpl; do', self::section('### 2.6 ', $file));
 
-        $grants = self::section('### 2.2 ');
-        self::assertSame(1, preg_match_all('/^plugins\/galbridge\/bin\/galbridge\.sh grants --allow-root --driver=(mysql|pgsql) >/m', $grants), 'one runnable grants line');
-        self::assertSame(1, preg_match('/^# plugins\/galbridge\/bin\/galbridge\.sh grants --allow-root --driver=pgsql > \/root\/galbridge-grants\.sql 2> \/root\/galbridge-dsn\.txt$/m', $grants), 'the other edition as a comment');
+            $grants = self::section('### 2.2 ', $file);
+            self::assertSame(1, preg_match_all('/^plugins\/galbridge\/bin\/galbridge\.sh grants --allow-root --driver=(mysql|pgsql) >/m', $grants), "{$file}: one runnable grants line");
+            self::assertSame(1, preg_match('/^# plugins\/galbridge\/bin\/galbridge\.sh grants --allow-root --driver=pgsql > \/root\/galbridge-grants\.sql 2> \/root\/galbridge-dsn\.txt$/m', $grants), "{$file}: the other edition as a comment");
+        }
     }
 
     /**
@@ -245,7 +286,7 @@ final class InstallationDocsTest extends TestCase
         self::assertStringContainsString("`\$config['use_https'] = true;`", self::flat('SECURITY.md'));
 
         self::assertStringContainsString('without a terminal it disables its plugins and answers `Package "takenek/galbridge" not found`', (string) preg_replace('/\s+/', ' ', self::section('### 2.1 ')));
-        self::assertStringContainsString('`composer require` empties `plugins/galbridge` before it unpacks the release', self::flat('README.md'));
+        self::assertStringContainsString('`composer require` empties `plugins/galbridge` before it unpacks the release', self::docs());
         $upgrade = (string) preg_replace('/\s+/', ' ', self::section('## 5. Upgrade'));
         self::assertStringContainsString('`Package "takenek/galbridge" listed for update is not locked.`', $upgrade);
     }
@@ -303,7 +344,7 @@ final class InstallationDocsTest extends TestCase
             'limit_req  zone=rc_php burst=40 nodelay;',
             'limit_conn rc_conn 8;',
         ], $lines);
-        self::assertStringContainsString('README 2.6 has the commands that put the lines above there', self::flat('SECURITY.md'));
+        self::assertStringContainsString('docs/INSTALLATION.md 2.6 has the commands that put the lines above there', self::flat('SECURITY.md'));
 
         $bash = is_executable('/bin/bash') ? '/bin/bash' : null;
         if ($bash === null) {
@@ -434,22 +475,89 @@ final class InstallationDocsTest extends TestCase
     }
 
     /**
-     * The README's checklist links only to headings that exist (GitHub's anchor slugs).
+     * @return list<string> the GitHub anchors of the headings of a Markdown file
+     */
+    private static function anchors(string $file): array
+    {
+        $slugs = [];
+        $fence = false;
+        foreach (explode("\n", self::read($file)) as $line) {
+            if (preg_match('/^ *```/', $line) === 1) {
+                $fence = !$fence;
+            }
+            if (!$fence && preg_match('/^#{1,6} (.+)$/', $line, $m) === 1) {
+                $slug = strtolower(trim($m[1]));
+                $slug = (string) preg_replace('/[^\p{L}\p{N} _-]/u', '', $slug);
+                $slugs[] = str_replace(' ', '-', $slug);
+            }
+        }
+        return $slugs;
+    }
+
+    /**
+     * Every link of the README and of the three full texts to a heading resolves (GitHub's anchor
+     * slugs): in-page links, and the links between the README and docs/ (1.0.8 moved the full
+     * text of sections 1 - 7 and 10 into docs/; the README links each step to it).
      */
     public function testTheChecklistLinksResolve(): void
     {
+        $count = 0;
+        foreach (['README.md', ...self::FULL_TEXTS] as $file) {
+            preg_match_all('/\]\(([^)\s]*?)(?:#([^)\s]+))?\)/', self::read($file), $links, PREG_SET_ORDER);
+            foreach ($links as $link) {
+                $path = $link[1];
+                $anchor = $link[2] ?? '';
+                if (preg_match('/^[a-z]+:/', $path) === 1) {
+                    continue;
+                }
+                $target = $path === '' ? $file : (string) preg_replace('~(^|/)[^/]+/\.\./~', '$1', (dirname($file) === '.' ? '' : dirname($file) . '/') . $path);
+                self::assertFileExists(dirname(__DIR__, 2) . '/' . $target, "{$file}: link to {$path}");
+                if ($anchor !== '') {
+                    self::assertContains($anchor, self::anchors($target), "{$file}: link {$path}#{$anchor}");
+                    $count++;
+                }
+            }
+        }
+        self::assertGreaterThanOrEqual(30, $count);
+    }
+
+    /**
+     * 1.0.8 (the author of iRedMail: "README.md is too long ... admins might want to know how to get
+     * it working first"): the README is the short form - requirements, the seven installation
+     * steps as commands, short notes - and docs/ holds the full text under the same section numbers.
+     * The short form must not drift from the full one: every command line of the README is one of
+     * the full texts, its steps 2.1 - 2.7 carry the headings of the full text and end with a link
+     * to it, and the README stays short.
+     */
+    public function testTheReadmeIsTheShortFormOfTheFullTexts(): void
+    {
         $readme = self::read('README.md');
-        preg_match_all('/^#{1,6} (.+)$/m', $readme, $h);
-        $slugs = [];
-        foreach ($h[1] as $title) {
-            $slug = strtolower(trim($title));
-            $slug = (string) preg_replace('/[^\p{L}\p{N} _-]/u', '', $slug);
-            $slugs[] = str_replace(' ', '-', $slug);
+        self::assertLessThanOrEqual(700, substr_count($readme, "\n"), 'the README stays short: details belong into docs/');
+        $full = '';
+        foreach (self::FULL_TEXTS as $file) {
+            $full .= "\n" . self::read($file);
         }
-        self::assertGreaterThan(0, (int) preg_match_all('/\]\(#([^)]+)\)/', $readme, $links));
-        foreach ($links[1] as $anchor) {
-            self::assertContains($anchor, $slugs, "README link #{$anchor}");
+        $fullLines = array_map('trim', explode("\n", $full));
+        foreach (['## 2. Installation', '## 5. Upgrade', '## 7. Troubleshooting'] as $heading) {
+            preg_match_all('/^```(?:sh|nginx)\n(.*?)^```/ms', self::section($heading, 'README.md'), $blocks);
+            self::assertNotSame([], $blocks[1], $heading);
+            foreach ($blocks[1] as $block) {
+                foreach (explode("\n", trim($block)) as $line) {
+                    self::assertTrue(in_array(trim($line), $fullLines, true) || str_contains($full, trim($line)), "README {$heading}: the command line is not in the full text:\n{$line}");
+                }
+            }
         }
-        self::assertGreaterThanOrEqual(7, count($links[1]));
+        foreach (['2.1', '2.2', '2.3', '2.4', '2.5', '2.6', '2.7'] as $step) {
+            self::assertSame(1, preg_match('/^### ' . preg_quote($step, '/') . ' (.+)$/m', $readme, $short), "README {$step}");
+            self::assertSame(1, preg_match('/^### ' . preg_quote($step, '/') . ' (.+)$/m', self::read('docs/INSTALLATION.md'), $long), "docs/INSTALLATION.md {$step}");
+            self::assertSame($long[1], $short[1], "step {$step} has the same heading in both");
+            $anchor = str_replace(' ', '-', (string) preg_replace('/[^\p{L}\p{N} _-]/u', '', strtolower($long[1])));
+            $anchor = str_replace('.', '', $step) . '-' . $anchor;
+            self::assertStringContainsString('(docs/INSTALLATION.md#' . $anchor . ')', self::section('### ' . $step . ' ', 'README.md'), "README {$step} links to its full text");
+        }
+        // the three full texts say where the other sections are
+        foreach (self::FULL_TEXTS as $file) {
+            self::assertStringContainsString('Section numbers are shared by [README.md](../README.md)', self::read($file), $file);
+        }
     }
 }

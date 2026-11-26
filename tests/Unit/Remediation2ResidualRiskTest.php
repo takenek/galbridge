@@ -73,15 +73,15 @@ final class Remediation2ResidualRiskTest extends TestCase
     {
         self::assertStringNotContainsString('a crafted request loop cannot flood the mail log', self::flat('docs/THREAT_MODEL.md'));
         self::assertStringNotContainsString('must not be able to flood the mail log', self::flat('lib/GalBridge/Log.php'));
-        foreach (['docs/THREAT_MODEL.md', 'SECURITY.md', 'README.md'] as $file) {
+        foreach (['docs/THREAT_MODEL.md', 'SECURITY.md', 'docs/CONFIGURATION.md'] as $file) {
             self::assertStringContainsString('one line per reason code per request', self::flat($file), $file);
         }
     }
 
     public function testTheConfigurationDirectoryIsRecommended(): void
     {
-        $readme = self::flat('README.md');
-        self::assertStringNotContainsString('Both locations are denied by iRedMail', $readme);
+        $readme = self::flat('docs/INSTALLATION.md');
+        self::assertStringNotContainsString('Both locations are denied by iRedMail', $readme . ' ' . self::flat('README.md'));
         self::assertStringContainsString('Use `config/galbridge.inc.php`.', $readme);
         self::assertStringContainsString('install -o root -g www-data -m 0640 plugins/galbridge/config.inc.php.dist config/galbridge.inc.php', $readme);
         self::assertStringContainsString('config over HTTP', $readme);
@@ -92,7 +92,7 @@ final class Remediation2ResidualRiskTest extends TestCase
 
     public function testTheHtaccessPreconditionIsExact(): void
     {
-        foreach (['.htaccess', 'README.md', 'SECURITY.md'] as $file) {
+        foreach (['.htaccess', 'docs/INSTALLATION.md', 'SECURITY.md'] as $file) {
             self::assertStringContainsString('AllowOverride AuthConfig', self::flat($file), $file);
         }
     }

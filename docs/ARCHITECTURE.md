@@ -469,7 +469,7 @@ vCard export.
   interleaved by the domain inside the marker, and only the C locale puts them first. With
   `autocomplete_threads` the client appends the answer of each book in arrival order. A marker at
   the end would sort by name but can be cut off by the ellipsis – the reason it is not there. The
-  order is documented (README 3.3), described by diag for the core release in use
+  order is documented (CONFIGURATION.md 3.3), described by diag for the core release in use
   (`Tool::coreSortsWithIcu()`: whether `rcube_utils::asort()` exists) while it applies, and
   avoidable with `galbridge_global_autocomplete = false`.
 
@@ -641,8 +641,8 @@ and departments.
   account (set by the grant templates for both engines and reported by diag; the role's statement
   time there is a default for other sessions only – MySQL has none; a refusal at that limit fails
   only the request, 12), and per-client request-rate and concurrency limits on every Roundcube PHP
-  request in the reverse proxy, the concurrency limit below the role's connection limit (README 1
-  and 10; register entry GB-26 in SECURITY.md) – a limit keyed on the query-string `_action` alone
+  request in the reverse proxy, the concurrency limit below the role's connection limit (INSTALLATION.md 1,
+  CONFIGURATION.md 10; register entry GB-26 in SECURITY.md) – a limit keyed on the query-string `_action` alone
   misses the POST-body and cookie forms core also reads. Throttling the plugin's log lines per
   session was rejected for the same reason (session writes) and because it would hide repeated
   probing: a reason code is logged once per request (14). APCu or another shared store is optional
@@ -1023,7 +1023,7 @@ No actions, templates or JavaScript. CLI (`Cli/Tool.php`):
   others can write, anything it loads or prints (the same routine with the owners `[0, euid]`). For
   every user `grants` works in the plugin directory with the plugin's `lib/` as include path. The
   output holds no client command (`Tool::clientCommand()`: no backslash, no line starting with a
-  long-form mysql command; checked before anything is printed), and README 2.2 adds what code cannot
+  long-form mysql command; checked before anything is printed), and INSTALLATION.md 2.2 adds what code cannot
   enforce: a check of the files with system tools before a root run, the review, `mysql
   --binary-mode` / `psql -X`. The self-check is only as trustworthy as the script itself – that is
   what the system-tool check is for.
@@ -1202,15 +1202,15 @@ No actions, templates or JavaScript. CLI (`Cli/Tool.php`):
   Composer installation run `composer update --no-dev --ignore-platform-req=ext-ldap` yourself);
   a new tree instead needs `plugins/galbridge` and its configuration copied – a Composer
   installation then upgrades by release archive, or runs `composer require` in the new tree
-  (README 5); run diag.
+  (OPERATIONS.md 5); run diag.
 * Upgrade of the plugin from 1.0.0: apply `grants --grants-only` (the view, the limits; MariaDB/MySQL
-  also the printed `REVOKE` for the table) – until then the plugin offers no book (README 5). From
+  also the printed `REVOKE` for the table) – until then the plugin offers no book (OPERATIONS.md 5). From
   1.0.1: apply it again as root (the fenced view, the role attributes, CREATE on schema `public`) –
   until then the books keep working with log warnings and `diag` FAILs.
 * Uninstall: remove from `$config['plugins']`; a Composer installation with `composer remove`, run
   like the installation (interactive root shell or `COMPOSER_ALLOW_SUPERUSER=1`; without a terminal
   Composer skips Roundcube's installer and `plugins/galbridge` stays; a bare `rm -r` leaves the
-  package in `composer.json` / `composer.lock`, README 6); MariaDB `DROP USER 'galbridge'@'localhost'` and
+  package in `composer.json` / `composer.lock`, OPERATIONS.md 6); MariaDB `DROP USER 'galbridge'@'localhost'` and
   `DROP VIEW vmail.galbridge_forwardings`; PostgreSQL `\c vmail` + `DROP OWNED BY galbridge;
   DROP ROLE galbridge; DROP VIEW galbridge_forwardings;`. The plugin keeps no tables and no user
   preferences.

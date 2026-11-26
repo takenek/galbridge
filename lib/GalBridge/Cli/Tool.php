@@ -946,7 +946,7 @@ final class Tool
             $this->check(false, 'switches', 'not shown: ' . implode(', ', array_diff([...Config::BOOLEANS, ...Config::TRISTATES], $shown)), true);
         }
         if ($cfg->bool('galbridge_global_book') && $cfg->bool('galbridge_global_autocomplete') && $cfg->bool('galbridge_mark_foreign_domains')) {
-            // a consequence of the marker position (README 3.3): told here, because nobody would look
+            // a consequence of the marker position (docs/CONFIGURATION.md 3.3): told here, because nobody would look
             // for it. How the core sorts depends on its release: rcube_utils::asort() (ICU collator)
             // from 1.7.6, PHP's asort() with the C library locale of the user's language before
             $this->info('autocomplete order', 'entries of other domains start with their "(domain)" marker and Roundcube sorts its suggestions by name '
@@ -2007,7 +2007,7 @@ final class Tool
         }
         if ($cfg->bool('galbridge_debug')) {
             // also when ROUNDCUBE_GALBRIDGE_DEBUG switches it on (the plugin parses that variable itself)
-            $this->check(false, 'debug', 'on (galbridge_debug): the log receives database driver error texts and exception messages, which can contain search words and addresses - switch it off after the diagnosis (README 3.10)', true);
+            $this->check(false, 'debug', 'on (galbridge_debug): the log receives database driver error texts and exception messages, which can contain search words and addresses - switch it off after the diagnosis (docs/CONFIGURATION.md 3.10)', true);
         }
         if ($cfg->bool('galbridge_global_allow_wildcard') && $cfg->domainAllowList('galbridge_global_data_domains') !== ['*']) {
             $this->check(false, 'global_allow_wildcard', "on while galbridge_global_data_domains is not ['*']: it lets a later '*' list every hosted domain - set it to false unless that is intended", true);
@@ -2520,7 +2520,7 @@ final class Tool
         $this->entriesNotOffered($conn, $columns);
         $this->windowFunctions($conn, $cfg);
         $rows = $conn->select("SELECT COUNT(m.username) AS n FROM `mailbox` m WHERE m.active = 1 AND TRIM(m.name) = ''");
-        // the name the directory gives them (RecordMapper::person(), README 3.4) - never the address
+        // the name the directory gives them (RecordMapper::person(), docs/CONFIGURATION.md 3.4) - never the address
         $this->info('mailboxes without a name', (string) ($rows[0]['n'] ?? '0') . ' (shown as first + last name where allowed and filled, else as the local part of the address)');
         $flavour = $conn->flavour();
         foreach (['mailbox' => 'domain', Schema::FORWARDINGS_TABLE => 'forwarding'] as $table => $column) {
@@ -2591,7 +2591,7 @@ final class Tool
                 $parts[] = $label . ' ' . $n;
             }
             $this->check(false, 'entries not offered', array_sum($counts) . ' (' . implode(', ', $parts) . ') - their address or domain does not follow the address rule (local part of'
-                . ' lower-case letters, digits and . _ + = -, host name of at least two labels; README 3.4), so no book lists, counts, finds or groups them:'
+                . ' lower-case letters, digits and . _ + = -, host name of at least two labels; docs/CONFIGURATION.md 3.4), so no book lists, counts, finds or groups them:'
                 . ' correct them in iRedAdmin, or leave them out of the directory knowingly (the log names such a row by the same row= tag)', true);
             foreach ($examples as $label => $lines) {
                 foreach ($lines as $line) {

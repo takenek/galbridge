@@ -5,6 +5,51 @@ semantic versioning.
 
 ## [Unreleased]
 
+## [1.0.8] – 2026-11-26
+
+The author of iRedMail read the README and said it was too long: most of it could live in a file of
+technical details, and administrators want to know first how to get the plugin working. The README is
+now the short form – what GAL Bridge is, the requirements, the installation on a standard iRedMail
+server as seven steps of commands with the result to expect, and short notes on configuration,
+upgrade, uninstall and troubleshooting: about 650 lines instead of 2,612. The full text moved, word
+for word, into three documents under the same section numbers, and each step of the README links to
+its full text. No plugin behaviour changes: no plugin, configuration or database step is needed for
+the upgrade. Two fresh iRedMail 1.8.11 servers (Debian 13, MariaDB and PostgreSQL edition) were set
+up by administrators who followed the new README – the MariaDB one never opened the full text, the
+PostgreSQL one only for the Composer commands the README points to – and both installations ended
+with `Result: OK` and no WARN; independent reviews checked that nothing of the old README was lost
+and that every reference and link leads to the right place (docs/TESTING.md section 6).
+
+### Documentation
+- **docs/INSTALLATION.md** holds sections 1 and 2 in full (every requirement and installation step
+  with its reasons, Composer, other systems and web servers, a remote database, the grant set, every
+  `diag` line), **docs/CONFIGURATION.md** sections 3, 4 and 10 (every option, what users see, the
+  known limitations), **docs/OPERATIONS.md** sections 5 – 7 (upgrade with the notes of every earlier
+  release, rollback and uninstall, troubleshooting and the log reason codes). They are part of the
+  release archive like the other documents of `docs/`. The README's section numbers stay, so the
+  `README 2.x` references that `diag`, `grants` and the log messages print – also those of installed
+  earlier releases – still lead to the right step; the README sections 3.1 – 3.10 are now sections of
+  docs/CONFIGURATION.md, and every reference to them (two `diag` lines, config.inc.php.dist,
+  SECURITY.md, docs/) names that file. SECURITY.md and the documents of `docs/` refer to the full
+  texts.
+- Steps 2.4 and 2.5 have commands as well: `sed` adds `'galbridge'` to iRedMail's plugin list (only
+  when the list has iRedMail's form; otherwise it changes nothing and says so) and uncomments
+  `addressbook_sort_col`; both leave a file that has the change alone. 2.2 finds `pg_hba.conf` with
+  `SHOW hba_file` instead of the Debian 13 path, so the command works with every PostgreSQL version
+  iRedMail installs (15 on Debian 12, 16 on Ubuntu 24.04); the review of the grant output has a block
+  of commands, and the `curl` check of 2.6 carries the `--cacert` of iRedMail's self-signed
+  certificate. README 2.2 says what to do when the file checks report something, and README 5 has
+  the block that re-applies the grant set, which two `diag` FAIL lines name.
+- The `pg_hba.conf` command of the upgrade note "From 1.0.3 to 1.0.4" finds the file with `SHOW
+  hba_file` as well; SECURITY.md's key rotation names README 2.1 and docs/INSTALLATION.md 2.1.
+
+### Tests
+- `InstallationDocsTest::testTheReadmeIsTheShortFormOfTheFullTexts`: every command line of README
+  sections 2, 5 and 7 is one of the full texts, the steps 2.1 – 2.7 carry the headings of
+  docs/INSTALLATION.md and link to it, and the README stays below 700 lines; every link between the
+  four files resolves. The documentation tests read the file that holds the full text, and the
+  checks that no document says something wrong cover the three new documents.
+
 ## [1.0.7] – 2026-11-26
 
 The published release 1.0.6 was installed afresh on four new Debian 13 servers with the unattended

@@ -33,7 +33,7 @@ use PHPUnit\Framework\TestCase;
  */
 final class Remediation2DocumentationTest extends TestCase
 {
-    private const DOCS = ['README.md', 'SECURITY.md', 'config.inc.php.dist', 'docs/THREAT_MODEL.md', 'docs/ARCHITECTURE.md'];
+    private const DOCS = ['docs/CONFIGURATION.md', 'SECURITY.md', 'config.inc.php.dist', 'docs/THREAT_MODEL.md', 'docs/ARCHITECTURE.md'];
 
     public function testDenyListSummariesDistinguishTheProtectedBook(): void
     {
@@ -50,10 +50,10 @@ final class Remediation2DocumentationTest extends TestCase
 
     public function testAmbiguousSwitchWordingIsRestrictive(): void
     {
-        foreach (['lib/GalBridge/Config.php', 'lib/GalBridge/Cli/Tool.php', 'README.md', 'docs/ARCHITECTURE.md'] as $file) {
+        foreach (['lib/GalBridge/Config.php', 'lib/GalBridge/Cli/Tool.php', 'README.md', 'docs/INSTALLATION.md', 'docs/CONFIGURATION.md', 'docs/OPERATIONS.md', 'docs/ARCHITECTURE.md'] as $file) {
             self::assertStringNotContainsString('conservative value', self::flat($file), $file);
         }
-        self::assertStringContainsString('restrictive value it is read as', self::flat('README.md'));
+        self::assertStringContainsString('restrictive value it is read as', self::flat('docs/INSTALLATION.md'));
         self::assertStringContainsString('Config::RESTRICTIVE', self::flat('docs/ARCHITECTURE.md'));
         self::assertStringContainsString('Config::RESTRICTIVE', self::flat('docs/THREAT_MODEL.md'));
     }
@@ -91,7 +91,7 @@ final class Remediation2DocumentationTest extends TestCase
 
     public function testTheInventoryNamesEveryCorePath(): void
     {
-        foreach (['README.md', 'docs/ARCHITECTURE.md'] as $file) {
+        foreach (['docs/CONFIGURATION.md', 'docs/ARCHITECTURE.md'] as $file) {
             $text = self::flat($file);
             self::assertStringContainsString('vcard_attachments', $text, $file);
             self::assertStringContainsString('rcmail::contact_exists()', $text, $file);

@@ -59,7 +59,7 @@ regexes = [
 ]
 
 # Fingerprints of the release signing keys (.github/release-signers): public by design, published
-# in SECURITY.md, README.md and docs/RELEASING.md. Exact values; a new key adds its own line.
+# in SECURITY.md, README.md, docs/INSTALLATION.md and docs/RELEASING.md. Exact values; a new key adds its own line.
 [[allowlists]]
 description = "public fingerprints of the release signing keys"
 regexes = [

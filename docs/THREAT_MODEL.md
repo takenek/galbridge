@@ -211,7 +211,7 @@ and result caps with notices, aliases of every entry of a page, the page clamp),
 (`testCopyReadsAtMostMaxIdsContactsPerRequest`, `testFullSetDetailStatementsAreBatched`).
 
 *Residual risk.* An export is a file download: when it is refused, no message can be shown with
-it (README 4 and 10). A book larger than `galbridge_max_count` cannot be browsed to its end (the
+it (CONFIGURATION.md 4 and 10). A book larger than `galbridge_max_count` cannot be browsed to its end (the
 user is told to search).
 
 ### GB-07 SQL injection and engine-specific SQL errors
@@ -249,7 +249,7 @@ and local parts are validated without them). A required birthday is compared as 
 integration: `testSearchWordsWithControlCharactersOrABackslashMatchNothing`,
 `testABoundValueWithANulByteOrABackslashIsNeverSent`, `testDepartmentGroupsWithUnusableKeysAreNotOffered`,
 `testARequiredBirthdayMeansARealDate`), all integration tests on the tested MariaDB, MySQL and
-PostgreSQL versions (README section 1) and SQLite.
+PostgreSQL versions (INSTALLATION.md section 1) and SQLite.
 
 ### GB-08 SQL injection through search state replayed from the session
 
@@ -540,7 +540,7 @@ unfenced view is a `diag` FAIL and a log warning), `Remediation2RoleScopeTest`
 
 *Residual risk.* Building the view costs time on every statement that reads it, growing with the
 alias and list rows of the table; that time reveals the size of the table, nothing about a row.
-The suites read the fence from the server's own plan on the tested versions (README section 1:
+The suites read the fence from the server's own plan on the tested versions (INSTALLATION.md section 1:
 MariaDB 10.5 to 13.1, MySQL 8.0 to 26.10, PostgreSQL 13 to 19; CI's job `databases` repeats a set of
 them); a server release outside that set could plan the view differently, and `diag` checks the
 view's definition, not the plan.
@@ -736,7 +736,7 @@ only the C locale puts them first; with `autocomplete_threads` the answers of th
 appended in arrival order (SECURITY.md register GB-19; `diag` describes the order of the core in
 use; `galbridge_global_autocomplete = false` keeps the global book out of autocomplete). Texts are treated field by field; what a template joins is covered by the rules
 for brackets, placeholders and the edges of a text above, not by a check of the composed name.
-Internationalised (SMTPUTF8) addresses are not offered (README 10). A department group label of the
+Internationalised (SMTPUTF8) addresses are not offered (CONFIGURATION.md 10). A department group label of the
 global book shows the department of another domain's entries with the domain marker first, also
 when a name template withholds the department from the record.
 
@@ -930,19 +930,19 @@ local integration databases connect with a role created from the shipped templat
 (`tests/fixtures/vmail/load.sh`, with the commented-out personal-data grant enabled).
 
 *Residual risk.* The password is in the plugin configuration file; protect it with `0640
-root:<PHP group>` and the web-server deny rule (README 2.3, 2.6). Roundcube's plugin installer
+root:<PHP group>` and the web-server deny rule (INSTALLATION.md 2.3, 2.6). Roundcube's plugin installer
 re-creates `plugins/galbridge/config.inc.php` at every Composer install and update with the owner
 and umask of the user running Composer and keeps a full copy of the plugin directory next to it
 while it runs: Composer installations keep the configuration in `config/galbridge.inc.php`; `diag`
 fails for a leftover installer backup (`plugins/galbridge-<20 digits>`) and warns for a
-plugin-directory configuration of a Composer installation, and the nginx rule of README 2.6 covers
+plugin-directory configuration of a Composer installation, and the nginx rule of INSTALLATION.md 2.6 covers
 the backup name (`Remediation2DiagConfigTest`: `testDiagFailsForAComposerBackupNextToThePluginDirectory`,
 `testDiagWarnsWhenComposerManagesThePluginAndItsConfigLivesInside`; `Remediation2ToolTest`). The
 credentials and how they are created: GB-30. The probe sees what the catalogs show the role: on
 MariaDB/MySQL a privilege granted to `PUBLIC` (10.11 and later) is not among them (`diag` asks the
 server for the relations GAL Bridge reads and lists every column the role can see), and
 `pg_hba.conf` – which databases and addresses a PostgreSQL role may use – is invisible to the role
-(README 2.2 gives the lines; `diag` lists the databases it may connect to). MySQL before 8.0.19
+(INSTALLATION.md 2.2 gives the lines; `diag` lists the databases it may connect to). MySQL before 8.0.19
 cannot show memberships (`diag` WARN "not checked"). A server-wide test database of
 `mariadb-install-db` (`test`, `test_*`) is open to every account, the plugin's role included: whoever
 holds the password can create tables there, store data and use the server's resources until the
@@ -1109,7 +1109,7 @@ it offers and a Turkish/Azerbaijani collation of an address column.
 `Remediation2DiagDataTest` (`testDiagListsEntriesThatAreNotOffered`,
 `testDiagTellsWhatAnAddressWithCapitalsMeansOnThisEngine`).
 
-*Residual risk.* Accent folding still differs (README 10) – a search convenience, no scope
+*Residual risk.* Accent folding still differs (CONFIGURATION.md 10) – a search convenience, no scope
 question. PostgreSQL does not offer an address written with capitals (MariaDB/MySQL do); entries
 outside the address rule (internationalised local parts, for instance) are not in the directory at
 all (`diag` lists them). On MariaDB/MySQL the lower-case comparison of the deny-lists assumes
@@ -1279,7 +1279,7 @@ identity), and refuses code that an account other than root and that user owns o
 or others can write (`galbridge_cli_plugin_problem()` with the allowed owners `[0, euid]`). It works
 in the plugin directory with the plugin's `lib/` as include path. Its SQL holds no backslash and no
 line that starts with a long-form mysql client command (`Tool::clientCommand()`, checked before
-anything is printed – the templates hold none); README 2.2 has the plugin files checked with system
+anything is printed – the templates hold none); INSTALLATION.md 2.2 has the plugin files checked with system
 tools (`find`, `namei`) before a root run, the output reviewed (role line, no backslash, a `diff`
 against the template) and applied with the client commands off (`mysql --binary-mode`, `psql -X`
 reading standard input). Standard output carries only the SQL; the DSN line, usage errors,
@@ -1345,7 +1345,7 @@ Logs). With `--allow-root`, PHP's own configuration (`php.ini`, `conf.d`,
 start code of every enabled Roundcube plugin runs as root (its files are checked, its data
 directories are not): the web server user remains the account to run `diag` as. The self-check
 of `galbridge.sh` (for `grants` as for `--allow-root`) is only as trustworthy as that file – a
-changed script can skip it, hence the check with `find` / `namei` that README 2.2 puts before a
+changed script can skip it, hence the check with `find` / `namei` that INSTALLATION.md 2.2 puts before a
 root run. PHP 8.1 ends a
 run that exceeds the memory limit itself, with exit code 1 and its own message, before any handler
 runs (not 0, but no `Result: aborted` line).
@@ -1359,14 +1359,14 @@ that drop databases and reconfigure Dovecot – and, if they were ever committed
 of a security audit.
 
 *Controls.* The directory holds no secret of the installation when the documented layout is used:
-the configuration file belongs in `config/galbridge.inc.php` (README 2.3), outside the plugin
+the configuration file belongs in `config/galbridge.inc.php` (INSTALLATION.md 2.3), outside the plugin
 directory. A configuration in `plugins/galbridge/config.inc.php` stays supported (Roundcube reads
 it, Composer's installer creates it); then `diag` without `--url` warns that the file with the
 database password lies there unchecked, and `diag --url=` asks the web server for the configuration
 file in use – `plugins/galbridge/config.inc.php` or `config/galbridge.inc.php` of the Roundcube
 directory, each also through `static.php` – and fails when it is served as text (recognised by its
 content; nothing of the answer is printed). `.htaccess` denies everything on Apache 2.4 where the
-directory allows it (`AllowOverride AuthConfig` or `All`); README 2.6 gives the nginx rule. `diag` reports a git clone and files
+directory allows it (`AllowOverride AuthConfig` or `All`); INSTALLATION.md 2.6 gives the nginx rule. `diag` reports a git clone and files
 that are not part of a release (also inside `bin/`, `lib/`, `SQL/`, `localization/` and `docs/`),
 warns when the PHP user can change the plugin code (every code file and directory, recursively -
 also files it owns, whatever their mode - and the directories above the plugin and Roundcube's
@@ -1451,8 +1451,8 @@ rule, `.gitignore`); the CI jobs `security`, `databases`, `e2e` and `release`.
 dependency versions; development dependencies execute in CI and in the disposable verification
 container, never on the machine that signs. The workflow runs from the tagged commit, so a writer can
 change the workflow and the key file together: the job catches mistakes, and the independent check
-is the administrator's comparison of the key fingerprint (README 2.1, SECURITY.md "Release signing
-key"). Composer does not verify tag signatures (README 2.1 shows the comparison of the installed
+is the administrator's comparison of the key fingerprint (INSTALLATION.md 2.1, SECURITY.md "Release signing
+key"). Composer does not verify tag signatures (INSTALLATION.md 2.1 shows the comparison of the installed
 commit). Branch and tag rulesets exist only once the repository is public (docs/RELEASING.md
 section 0).
 

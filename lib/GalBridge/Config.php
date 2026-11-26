@@ -176,7 +176,7 @@ final class Config
     public const TRISTATES = ['galbridge_domain_searchonly', 'galbridge_global_searchonly'];
 
     /**
-     * The range of every numeric option (README 3.8 / 3.9): int() reports a value outside it and
+     * The range of every numeric option (docs/CONFIGURATION.md 3.8 / 3.9): int() reports a value outside it and
      * clamps it. Every caller of int() passes exactly this range (Remediation2ConfigRangesTest).
      */
     public const RANGES = [

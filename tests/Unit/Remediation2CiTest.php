@@ -170,15 +170,16 @@ final class Remediation2CiTest extends TestCase
         self::assertStringNotContainsString('continue-on-error', $code);
         self::assertStringContainsString('job "databases"', Workflow::text(), 'the design notes describe the job');
 
-        // README section 1 names every leg of the job, docs/RELEASING.md refreshes their pins
+        // docs/INSTALLATION.md section 1 (the full text of README section 1) names every leg of the
+        // job, docs/RELEASING.md refreshes their pins
         $root = dirname(__DIR__, 2);
-        $readme = (string) file_get_contents($root . '/README.md');
+        $readme = (string) file_get_contents($root . '/docs/INSTALLATION.md');
         $requirements = substr($readme, (int) strpos($readme, '## 1. Requirements'), (int) strpos($readme, '## 2. Installation') - (int) strpos($readme, '## 1. Requirements'));
         foreach ($legs as $leg) {
             preg_match('/^(mariadb|mysql):([0-9.]+)@/', $leg['server'], $server);
             preg_match('/^postgres:([0-9]+)@/', $leg['postgres'], $postgres);
             $label = ($server[1] === 'mariadb' ? 'MariaDB' : 'MySQL') . " {$server[2]} + PostgreSQL {$postgres[1]}";
-            self::assertStringContainsString($label, $requirements, "README section 1 names the CI leg {$leg['leg']}");
+            self::assertStringContainsString($label, $requirements, "docs/INSTALLATION.md section 1 names the CI leg {$leg['leg']}");
         }
         $releasing = (string) file_get_contents($root . '/docs/RELEASING.md');
         self::assertStringContainsString('job `databases`', $releasing);

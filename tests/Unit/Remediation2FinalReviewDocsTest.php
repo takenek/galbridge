@@ -35,7 +35,7 @@ use PHPUnit\Framework\TestCase;
 final class Remediation2FinalReviewDocsTest extends TestCase
 {
     /** the documents an administrator follows, and the texts that ship with the plugin */
-    private const DOCUMENTS = ['README.md', 'SECURITY.md', 'CHANGELOG.md', 'config.inc.php.dist', 'docs/THREAT_MODEL.md', 'docs/ARCHITECTURE.md',
+    private const DOCUMENTS = ['README.md', 'docs/INSTALLATION.md', 'docs/CONFIGURATION.md', 'docs/OPERATIONS.md', 'SECURITY.md', 'CHANGELOG.md', 'config.inc.php.dist', 'docs/THREAT_MODEL.md', 'docs/ARCHITECTURE.md',
         'docs/RELEASING.md', 'docs/TESTING.md', 'docs/MIGRATION.md', 'SQL/grants.mysql.sql', 'SQL/grants.postgres.sql', 'bin/galbridge.sh',
         'tests/fixtures/vmail/README.txt'];
 
@@ -46,8 +46,9 @@ final class Remediation2FinalReviewDocsTest extends TestCase
             self::assertDoesNotMatchRegularExpression('~chown\s+(?:-[A-Za-z]+\s+)*root:root\s+[^\s`]*plugins/galbridge\b~', $flat, "{$file}: chown of the plugin to root:root");
             self::assertDoesNotMatchRegularExpression('~chown\s+-R\s+root:\S*\s+[^\s`]*plugins/galbridge\b~', $flat, "{$file}: a recursive chown of the plugin that sets a group");
         }
-        $readme = self::flat('README.md');
-        self::assertSame(3, substr_count($readme, '`chown -R root plugins/galbridge && chmod -R go-w plugins/galbridge`'), 'README 2.1, 5 and 7');
+        // the full texts of README 2.1, 5 and 7 (docs/ since 1.0.8)
+        $readme = self::flat('docs/INSTALLATION.md') . ' ' . self::flat('docs/OPERATIONS.md');
+        self::assertSame(3, substr_count($readme, '`chown -R root plugins/galbridge && chmod -R go-w plugins/galbridge`'), 'sections 2.1, 5 and 7');
         self::assertStringContainsString('It changes the owner only: a configuration kept in `plugins/galbridge/config.inc.php` keeps its group – the PHP group, e.g. `www-data` – and mode 0640', $readme);
         self::assertStringContainsString('`chown -R root plugins/galbridge && chmod -R go-w plugins/galbridge` first (the owner only: a `plugins/galbridge/config.inc.php` keeps its PHP group and mode 0640)', self::flat('CHANGELOG.md'));
         // that is enough for the refusals: they compare the owner and the group/other write bits, never the group
@@ -62,7 +63,7 @@ final class Remediation2FinalReviewDocsTest extends TestCase
             self::assertDoesNotMatchRegularExpression('~\binto `?plugins/galbridge/config\.inc\.php\b~', self::flat($file), "{$file}: options sent into the plugin-directory file");
         }
         $either = "into the plugin's configuration file (`config/galbridge.inc.php`, or `plugins/galbridge/config.inc.php` if that is the one in use – never both";
-        self::assertStringContainsString($either, self::flat('README.md'));
+        self::assertStringContainsString($either, self::flat('docs/OPERATIONS.md'));
         self::assertStringContainsString($either, self::flat('CHANGELOG.md'));
         self::assertStringContainsString("-- 4. Put the DSN (with the password, not the verifier) into the plugin's configuration file, -- config/galbridge.inc.php (README 2.3; or plugins/galbridge/config.inc.php if that is the one -- in use - never both), e.g.", self::flat('SQL/grants.mysql.sql'));
         self::assertStringContainsString("-- 3. Put the DSN into the plugin's configuration file, config/galbridge.inc.php (README 2.3; or -- plugins/galbridge/config.inc.php if that is the one in use - never both), e.g.", self::flat('SQL/grants.postgres.sql'));
@@ -88,13 +89,13 @@ final class Remediation2FinalReviewDocsTest extends TestCase
 
         $security = self::flat('SECURITY.md');
         $assumption = self::between($security, "* Roundcube's session storage is trusted.", 'See [docs/THREAT_MODEL.md]');
-        $readme = self::between(self::flat('README.md'), '## 6. Rollback / uninstall', ' 2. ');
+        $readme = self::between(self::flat('docs/OPERATIONS.md'), '## 6. Rollback / uninstall', ' 2. ');
         $threat = self::between(self::flat('docs/THREAT_MODEL.md'), '### GB-15 ', '*Tests.*');
         self::assertStringContainsString("`\$_SESSION['galbridge']`", $assumption);
         self::assertStringContainsString("`\$_SESSION['galbridge']`", $threat);
         self::assertStringContainsString('`galbridge`, the resolved user', $readme);
         foreach (array_diff($keys, ['galbridge']) as $key) {
-            foreach (['SECURITY.md (important security assumptions)' => $assumption, 'README 6' => $readme, 'THREAT_MODEL GB-15' => $threat] as $where => $text) {
+            foreach (['SECURITY.md (important security assumptions)' => $assumption, 'docs/OPERATIONS.md 6' => $readme, 'THREAT_MODEL GB-15' => $threat] as $where => $text) {
                 self::assertStringContainsString("`{$key}`", $text, "{$where} names the session key {$key}");
             }
         }
@@ -108,9 +109,9 @@ final class Remediation2FinalReviewDocsTest extends TestCase
     {
         $security = self::flat('SECURITY.md');
         self::assertStringNotContainsString('handed to the driver exactly as written', $security);
-        self::assertStringContainsString('The DSN is otherwise judged and handed to the driver rebuilt from exactly the judged parts; `localhost` is kept as written, not resolved or rewritten by the plugin (README 3.9).', $security);
-        // and that is what README 3.9 and the code say
-        self::assertStringContainsString('The DSN handed to the driver is rebuilt from the', self::flat('README.md'));
+        self::assertStringContainsString('The DSN is otherwise judged and handed to the driver rebuilt from exactly the judged parts; `localhost` is kept as written, not resolved or rewritten by the plugin (docs/CONFIGURATION.md 3.9).', $security);
+        // and that is what docs/CONFIGURATION.md 3.9 and the code say
+        self::assertStringContainsString('The DSN handed to the driver is rebuilt from the', self::flat('docs/CONFIGURATION.md'));
         self::assertStringContainsString('rebuilt from the judged parts', self::flat('lib/GalBridge/Db/Dsn.php'));
     }
 

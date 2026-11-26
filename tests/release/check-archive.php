@@ -32,8 +32,8 @@ const ALLOWED = '~^(?:'
 const REQUIRED = [
     '.htaccess', 'CHANGELOG.md', 'COPYRIGHT', 'LICENSE', 'README.md', 'SECURITY.md', 'composer.json', 'config.inc.php.dist',
     'galbridge.php', 'bin/galbridge.sh', 'lib/autoload.php', 'SQL/grants.mysql.sql', 'SQL/grants.postgres.sql',
-    'localization/en_US.inc', 'docs/ARCHITECTURE.md', 'docs/MIGRATION.md', 'docs/RELEASING.md', 'docs/TESTING.md',
-    'docs/THREAT_MODEL.md',
+    'localization/en_US.inc', 'docs/ARCHITECTURE.md', 'docs/CONFIGURATION.md', 'docs/INSTALLATION.md', 'docs/MIGRATION.md',
+    'docs/OPERATIONS.md', 'docs/RELEASING.md', 'docs/TESTING.md', 'docs/THREAT_MODEL.md',
 ];
 
 /**

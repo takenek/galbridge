@@ -111,7 +111,7 @@ final class Remediation2ReleaseTest extends TestCase
                 self::assertSame(0, $code);
                 self::assertStringContainsString(' ' . $fp . ' ', $out, 'the fingerprint computed here is the one ssh-keygen prints');
             }
-            foreach (['SECURITY.md', 'README.md', 'docs/RELEASING.md', self::SIGNERS] as $doc) {
+            foreach (['SECURITY.md', 'README.md', 'docs/INSTALLATION.md', 'docs/RELEASING.md', self::SIGNERS] as $doc) {
                 self::assertStringContainsString($fp, self::read($doc), "{$doc} publishes {$fp}");
             }
             self::assertStringContainsString("'''^" . substr($fp, 7) . "$'''", self::read('.gitleaks.toml'));
@@ -296,23 +296,26 @@ final class Remediation2ReleaseTest extends TestCase
     }
 
     /**
-     * README 2.1 installs the version of the code it ships with; 1.0.0 and 1.0.1 never got a tag.
+     * README 2.1 and its full text, docs/INSTALLATION.md 2.1, install the version of the code they
+     * ship with - one v= line each (RELEASING step 4 bumps both); 1.0.0 and 1.0.1 never got a tag.
      */
     public function testInstallationInstructionsNameTheCurrentVersion(): void
     {
         self::assertSame(1, preg_match("/'version' => '(\\d+\\.\\d+\\.\\d+)'/", self::read('galbridge.php'), $m));
         $version = $m[1];
-        $readme = self::read('README.md');
-        self::assertSame(1, preg_match('/^### 2\.1 .*?(?=^### 2\.2 )/ms', $readme, $s));
-        $install = $s[0];
-        self::assertSame(1, preg_match_all('/^v=(\d+\.\d+\.\d+)\s/m', $install, $v), 'exactly one v= line in README 2.1');
-        self::assertSame($version, $v[1][0], 'README 2.1 installs the version of galbridge.php');
-        self::assertSame(0, preg_match('/\bv\d+\.\d+\.\d+\b/', $install), 'no other version written out in README 2.1');
-        foreach (['clone --branch "v$v"', '-c gpg.ssh.allowedSignersFile=/root/galbridge-src/.github/release-signers verify-tag "v$v"', 'archive --prefix=galbridge/ "v$v"'] as $cmd) {
-            self::assertStringContainsString($cmd, $install);
+        foreach (['README.md', 'docs/INSTALLATION.md'] as $file) {
+            self::assertSame(1, preg_match('/^### 2\.1 .*?(?=^### 2\.2 )/ms', self::read($file), $s), $file);
+            $install = $s[0];
+            self::assertSame(1, preg_match_all('/^v=(\d+\.\d+\.\d+)\s/m', $install, $v), "exactly one v= line in {$file} 2.1");
+            self::assertSame($version, $v[1][0], "{$file} 2.1 installs the version of galbridge.php");
+            self::assertSame(0, preg_match('/\bv\d+\.\d+\.\d+\b/', $install), "no other version written out in {$file} 2.1");
+            self::assertSame(1, preg_match_all('/^v=/m', self::read($file)), "{$file}: the v= line of 2.1 is the only one");
+            foreach (['clone --branch "v$v"', '-c gpg.ssh.allowedSignersFile=/root/galbridge-src/.github/release-signers verify-tag "v$v"', 'archive --prefix=galbridge/ "v$v"'] as $cmd) {
+                self::assertStringContainsString($cmd, $install, $file);
+            }
+            self::assertStringContainsString('Composer does not verify tag signatures', $install, $file);
+            self::assertStringNotContainsString('--no-same-permissions', $install, "{$file}: no instruction for GitHub's unsigned source archive");
         }
-        self::assertStringContainsString('Composer does not verify tag signatures', $install);
-        self::assertStringNotContainsString('--no-same-permissions', $install, 'no instruction for GitHub\'s unsigned source archive');
         self::assertStringContainsString('carry no signature: they are no', $install);
         $changelog = self::read('CHANGELOG.md');
         self::assertStringContainsString("## [{$version}]", $changelog);

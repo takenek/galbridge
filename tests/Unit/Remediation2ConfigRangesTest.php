@@ -64,15 +64,16 @@ final class Remediation2ConfigRangesTest extends TestCase
     }
 
     /**
-     * README 3.8 documents the range of the limits (and 3.9 the three others) exactly as declared.
+     * docs/CONFIGURATION.md 3.8 (README 3.8 until 1.0.7) documents the range of the limits (and 3.9
+     * the three others) exactly as declared.
      */
     public function testTheReadmeDocumentsTheDeclaredRanges(): void
     {
-        $readme = (string) file_get_contents(dirname(__DIR__, 2) . '/README.md');
+        $readme = (string) file_get_contents(dirname(__DIR__, 2) . '/docs/CONFIGURATION.md');
         foreach (Config::RANGES as $name => [$min, $max]) {
             $range = $min . '–' . $max;
             $row = preg_match('/^\| `' . preg_quote($name, '/') . '` \|[^\n]*\b' . preg_quote($range, '/') . '\b/mu', $readme) === 1;
-            self::assertTrue($row, 'README: ' . $name . ' ' . $range);
+            self::assertTrue($row, 'docs/CONFIGURATION.md: ' . $name . ' ' . $range);
         }
     }
 }

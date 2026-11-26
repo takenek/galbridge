@@ -29,7 +29,8 @@ use PHPUnit\Framework\TestCase;
  */
 final class Remediation2DocsTest extends TestCase
 {
-    private const DOCUMENTS = ['README.md', 'SECURITY.md', 'CHANGELOG.md', 'config.inc.php.dist', 'docs/THREAT_MODEL.md', 'docs/ARCHITECTURE.md', 'docs/RELEASING.md'];
+    private const DOCUMENTS = ['README.md', 'docs/INSTALLATION.md', 'docs/CONFIGURATION.md', 'docs/OPERATIONS.md', 'SECURITY.md', 'CHANGELOG.md', 'config.inc.php.dist',
+        'docs/THREAT_MODEL.md', 'docs/ARCHITECTURE.md', 'docs/RELEASING.md'];
 
     public function testNoDocumentRecommendsGalbridgeOptionsInDontOverride(): void
     {
@@ -58,7 +59,7 @@ final class Remediation2DocsTest extends TestCase
             $flat = (string) preg_replace('/\s+/', ' ', self::read($file));
             self::assertDoesNotMatchRegularExpression('/composer update`? keeps/i', $flat, $file);
         }
-        $readme = (string) preg_replace('/\s+/', ' ', self::read('README.md'));
+        $readme = (string) preg_replace('/\s+/', ' ', self::read('docs/INSTALLATION.md'));
         self::assertStringContainsString('**Keep the configuration in `config/galbridge.inc.php` for a Composer installation:**', $readme);
         self::assertStringContainsString('composer require --prefer-dist', $readme);
         self::assertStringContainsString('composer require --prefer-dist', self::read('docs/RELEASING.md'));

@@ -61,7 +61,7 @@ registered on Packagist right after the repository becomes public.
    the SQLite mirror, MariaDB 11.8 and PostgreSQL 17 and failing on any skipped test, plus the root
    step of the PHP 8.4 legs (the refusal of `bin/galbridge.sh` to run as root and the checks of
    `--allow-root`, from a root-owned copy); the job `databases` (the same suite on PHP 8.4 and the
-   newest 1.7.x against the seven server pairs of README section 1, each leg with a MariaDB or MySQL
+   newest 1.7.x against the seven server pairs of INSTALLATION.md section 1, each leg with a MariaDB or MySQL
    server and a PostgreSQL server, failing on any skipped test); `php -l`, `composer validate
    --strict`, `composer audit` of every resolved dependency set, PHPStan, PHP-CS-Fixer; the job `e2e` (end-to-end and browser
    suites against Roundcube 1.7.0 and the newest known 1.7.x, MariaDB and PostgreSQL, as an
@@ -149,7 +149,7 @@ registered on Packagist right after the repository becomes public.
      checked against the GPG-signed tarball) in the next GAL Bridge release.
    * **A new minor branch** (1.8) needs the full verification before these are changed together:
      `Tool::SUPPORTED_BRANCH`, `composer.json` `extra.roundcube.min-version` / `max-version`, the
-     Roundcube constraints in `.github/workflows/ci.yml`, README section 1, SECURITY.md "Supported
+     Roundcube constraints in `.github/workflows/ci.yml`, INSTALLATION.md section 1, SECURITY.md "Supported
      versions".
    * Update `Tool::PHP_SECURITY_EOL` when PHP publishes new dates.
    * **Pins that nothing updates automatically** (Dependabot updates the actions and their tag
@@ -169,7 +169,7 @@ registered on Packagist right after the repository becomes public.
      and replace each digest that changed. A server release outside the tested set (a new MariaDB
      LTS or MySQL release, a new PostgreSQL major version) is added as a new leg of the job `databases`
      after a local run of the database matrix against it (`docs/TESTING.md` section 2), together with
-     README section 1. Further pins: the gitleaks
+     INSTALLATION.md section 1. Further pins: the gitleaks
      release with its SHA-256 (from the checksums file of the release), `COMPOSER_VERSION` with
      `COMPOSER_SHA256` (from `https://getcomposer.org/download/<version>/composer.phar.sha256sum`; take
      a release that is at least 14 days old) and the SHA-256 of each Roundcube tarball of the job
@@ -179,7 +179,8 @@ registered on Packagist right after the repository becomes public.
      `composer.json` when a release with an advisory is still allowed).
 4. **Version bump** in one commit:
    * `galbridge::info()` in `galbridge.php` – `'version' => 'X.Y.Z'`;
-   * the `v=X.Y.Z` line of README section 2.1 (`Remediation2ReleaseTest` compares the two);
+   * the `v=X.Y.Z` lines of README section 2.1 and of docs/INSTALLATION.md section 2.1 – the same
+     command in both (`Remediation2ReleaseTest` compares them with `galbridge.php`);
    * the version badge of the README, a file of the repository whose name carries the version:
      `curl -fsS -o .github/badges/packagist-vX.Y.Z.svg https://img.shields.io/badge/packagist-vX.Y.Z-007ec6.svg
      && git add .github/badges`, and the file name in the badge URL of README line 4 (the image
@@ -262,19 +263,19 @@ composer require --prefer-dist "takenek/galbridge:^X.Y"
 ```
 
 (iRedMail's MariaDB/MySQL and PostgreSQL editions lack the PHP `ldap` extension that Roundcube's
-own lock file declares: add `--ignore-platform-req=ext-ldap` there, README 2.1.)
+own lock file declares: add `--ignore-platform-req=ext-ldap` there, INSTALLATION.md 2.1.)
 `composer update` then stays within the major version; review CHANGELOG.md before upgrading and run
-`sudo -u www-data plugins/galbridge/bin/galbridge.sh diag` from the Roundcube directory (README 2.7)
+`sudo -u www-data plugins/galbridge/bin/galbridge.sh diag` from the Roundcube directory (INSTALLATION.md 2.7)
 after **every** update. Composer does not verify tag signatures, and Packagist publishes no checksum
-of its archive: README 2.1 compares the installed files with `git archive` of a verified tag and
+of its archive: INSTALLATION.md 2.1 compares the installed files with `git archive` of a verified tag and
 the commit Composer names (`composer show takenek/galbridge`, source reference) with the tag's. Roundcube's plugin installer re-creates `plugins/galbridge/config.inc.php` at every
 update as a new file with the owner and umask of the user running Composer, and keeps a full copy of
 the plugin directory in `plugins/galbridge-<20 digits>` until the update succeeds (a failed update
 leaves it): a configuration in `config/galbridge.inc.php` is not touched; `diag` fails for a leftover
-copy and warns for a configuration inside the plugin directory of a Composer installation (README
-2.1). The release itself needs no `extra.roundcube.persistent-files` entry: the installer cannot be
+copy and warns for a configuration inside the plugin directory of a Composer installation
+(INSTALLATION.md 2.1). The release itself needs no `extra.roundcube.persistent-files` entry: the installer cannot be
 told to keep the owner and mode of a restored file. Without Composer, administrators unpack the
-archive of the verified tag into `plugins/galbridge` (README 2.1: `verify-tag` with the release key,
+archive of the verified tag into `plugins/galbridge` (INSTALLATION.md 2.1: `verify-tag` with the release key,
 then `git archive | tar -x`); a git clone inside `plugins/` is not an installation method – it would
 bring the test suite onto the mail server.
 
@@ -292,7 +293,7 @@ git -c gpg.ssh.allowedSignersFile=.github/release-signers verify-tag vX.Y.Z
 Without `gpg.ssh.allowedSignersFile` git cannot verify an SSH signature at all. The file comes from
 the same clone as the tag: compare the printed fingerprint with SECURITY.md as GitHub shows it on
 `main`, with the maintainer's GitHub **signing** keys (<https://api.github.com/users/takenek/ssh_signing_keys>:
-pipe the `key` values into `ssh-keygen -lf -`, README 2.1 gives the command) and with the channel
+pipe the `key` values into `ssh-keygen -lf -`, INSTALLATION.md 2.1 gives the command) and with the channel
 outside GitHub named in section 0. The files Composer installed are compared with `git archive` of
 such a verified clone, and its commit with `git rev-parse "vX.Y.Z^{commit}"` (`composer show
 takenek/galbridge`, field "source": `[git] https://github.com/takenek/galbridge.git <commit>`).
@@ -300,7 +301,7 @@ takenek/galbridge`, field "source": `[git] https://github.com/takenek/galbridge.
 **Key rotation**: add the new key's line to `.github/release-signers` on `main` (principal
 `galbridge-release`, namespace `git`, no comment) before it signs a tag, register it as a GitHub
 signing key, give the old line `namespaces="git",valid-before="YYYYMMDD"` (tags signed before that
-day keep verifying), and replace the fingerprint in SECURITY.md, README 2.1, this section and the
+day keep verifying), and replace the fingerprint in SECURITY.md, README 2.1, INSTALLATION.md 2.1, this section and the
 exact-value exceptions of `.gitleaks.toml` and `.gitguardian.yaml` (`Remediation2ReleaseTest`
 checks all of them).
 

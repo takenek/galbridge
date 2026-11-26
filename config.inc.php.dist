@@ -539,8 +539,8 @@ $config['galbridge_fields'] = ['name', 'firstname', 'surname', 'email', 'departm
 // alias cannot reveal who receives it (e.g. which person is behind ceo@ or abuse@).
 // With true, showing and matching follow ONE rule: an alias counts only when its domain belongs to
 // the book and is active (not a backup MX, not expired with galbridge_hide_expired), when it follows
-// the address rule of the directory (README 3.4) and when it is on neither hidden list below - a
-// hidden alias is not shown and does not find its owner, whole or by a fragment. At most 20 aliases
+// the address rule of the directory (docs/CONFIGURATION.md 3.4) and when it is on neither hidden
+// list below - a hidden alias is not shown and does not find its owner, whole or by a fragment. At most 20 aliases
 // are shown per person (the first in address order) - for every person of a page. They are read
 // with a window function: MariaDB 10.2 / MySQL 8.0 or later (diag FAILs on an older server).
 // The viewer's OWN aliases (up to 200, of deliverable domains) are always used internally to decide
@@ -581,8 +581,8 @@ $config['galbridge_hide_expired'] = true;
 // per-user aliases (galbridge_user_aliases) - e.g. ['ceo@example.com', 'backup-robot@example.com'].
 // Deny-list: a malformed list disables ALL books (fail closed, diag FAIL). The lists act on the
 // entries the books offer: only addresses that follow the address rule (lower-case ASCII letters,
-// digits and . _ + = - in the local part, an ASCII host name; README 3.4) are offered at all, so an
-// entry written in another spelling cannot escape them (diag lists the entries not offered).
+// digits and . _ + = - in the local part, an ASCII host name; docs/CONFIGURATION.md 3.4) are
+// offered at all, so an entry written in another spelling cannot escape them (diag lists the entries not offered).
 $config['galbridge_hidden_addresses'] = [];
 
 // Local parts hidden in EVERY domain, e.g. ['postmaster', 'abuse', 'root', 'noreply'] (iRedMail
@@ -630,8 +630,8 @@ $config['galbridge_visibility_column'] = '';
 // deletes such pairs from a name composed with a template, which would join the split text again),
 // nor with '=', '?' or '%'. A name - also a department, a phone, a group or organization label -
 // that looks like an address is cut at the '@'; an entry without a name is shown with the local part
-// of its address, treated the same way. Addresses themselves follow the address rule (README 3.4):
-// an entry outside it is not offered at all.
+// of its address, treated the same way. Addresses themselves follow the address rule
+// (docs/CONFIGURATION.md 3.4): an entry outside it is not offered at all.
 $config['galbridge_mark_foreign_domains'] = true;
 
 // ---------------------------------------------------------------------------------------------

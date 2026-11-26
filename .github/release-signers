@@ -6,7 +6,7 @@
 #   -> Good "git" signature for galbridge-release with RSA key SHA256:Dh488r7YcvACwpsZov0/TASb3v3FRjz4//bwoQCyPwU
 #
 # The fingerprint of every key listed here is published in SECURITY.md ("Release signing key"),
-# README.md section 2.1 and docs/RELEASING.md section 3: compare it from there and with the
+# README.md section 2.1, docs/INSTALLATION.md section 2.1 and docs/RELEASING.md section 3: compare it from there and with the
 # maintainer's GitHub signing keys (https://api.github.com/users/takenek/ssh_signing_keys). This
 # file alone, taken from the same clone as the tag, proves nothing.
 #

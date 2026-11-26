@@ -44,7 +44,7 @@
 #   run proves that the documented grants are sufficient. The fixture is loaded with the client
 #   inside each container (docker exec): client and server versions always match;
 # - job "databases": the PHPUnit suite (PHP 8.4, the newest Roundcube 1.7.x) against the other
-#   supported server versions of README section 1 - MariaDB 10.6, 10.11, 11.4 and 12.3, MySQL 8.0,
+#   supported server versions of docs/INSTALLATION.md section 1 - MariaDB 10.6, 10.11, 11.4 and 12.3, MySQL 8.0,
 #   8.4 and 9.7, PostgreSQL 13 - 19 -, one MariaDB or MySQL server and one PostgreSQL server per
 #   leg, so that every database test has its server and --fail-on-skipped holds as in job "tests".
 #   A step checks that the servers report the flavour and the versions the leg names. On MySQL 8.4
@@ -75,7 +75,7 @@
 #   the allow-listed paths (tests/release/verify-tag.sh, tests/release/check-archive.php - the
 #   maintainer runs both before pushing the tag). The workflow comes from the tagged commit, so the
 #   job catches mistakes; the independent check is the administrator's comparison of the key
-#   fingerprint (README 2.1, SECURITY.md "Release signing key") [checked].
+#   fingerprint (README 2.1 and docs/INSTALLATION.md 2.1, SECURITY.md "Release signing key") [checked].
 name: CI
 
 on:
@@ -301,7 +301,7 @@ jobs:
           done < <(find lib tests -type f -name '*.php' -print0; find localization -type f -name '*.inc' -print0; printf '%s\0' galbridge.php bin/galbridge.sh config.inc.php.dist)
           exit "$status"
 
-  # The PHPUnit suite against the other supported database servers (README section 1): each leg
+  # The PHPUnit suite against the other supported database servers (docs/INSTALLATION.md section 1): each leg
   # pairs a MariaDB or MySQL server with a PostgreSQL server, so every database test has its server
   # and a skipped test fails the leg as in job "tests". PHP 8.4 and the newest Roundcube 1.7.x, as
   # in job "phpstan". The images are pinned by digest (docs/RELEASING.md step 3); "leg" names the

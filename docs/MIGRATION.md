@@ -30,11 +30,11 @@ bound.
 
 | | `sql_global_addressbooks` | GAL Bridge |
 |---|---|---|
-| Data source | a VIEW `global_addressbook` in the **Roundcube** database, read through Roundcube's own connection; MySQL: `DEFINER = root` / `SQL SECURITY DEFINER` over `vmail.mailbox`; PostgreSQL: a `dblink` view whose definition contains `user=vmail password=...` | the `vmail` database directly, through `galbridge_db_dsn` and a dedicated read-only role with column-level grants (README 2.2). No `dblink` and no stored credentials; the only object GAL Bridge adds is one view **inside `vmail`**, `galbridge_forwardings`, which narrows what the role can read (alias and list rows of `forwardings`, never the private forwarding targets) – the opposite of the old view, which widened what Roundcube's role could read |
+| Data source | a VIEW `global_addressbook` in the **Roundcube** database, read through Roundcube's own connection; MySQL: `DEFINER = root` / `SQL SECURITY DEFINER` over `vmail.mailbox`; PostgreSQL: a `dblink` view whose definition contains `user=vmail password=...` | the `vmail` database directly, through `galbridge_db_dsn` and a dedicated read-only role with column-level grants (INSTALLATION.md 2.2). No `dblink` and no stored credentials; the only object GAL Bridge adds is one view **inside `vmail`**, `galbridge_forwardings`, which narrows what the role can read (alias and list rows of `forwardings`, never the private forwarding targets) – the opposite of the old view, which widened what Roundcube's role could read |
 | Roundcube 1.7 | does not load: its backend declares `reset()` and `set_search_set()` without the `: void` that Roundcube 1.7 requires (fatal error) | every Roundcube 1.7.x release |
 | Source IDs | `domain`, `global`, and the name of each support book | `galbridge_domain`, `galbridge_global` |
 | Scope of the domain book | the domain part of the login string | `mailbox.domain` of the login's vmail row (which must be the login's own domain), or every domain of its organization (`galbridge_organizations`) |
-| Who is listed | MySQL views: every row of `vmail.mailbox` (no `WHERE`, disabled accounts included); PostgreSQL view: `active = 1` | deliverable entries only (README 3.7), alias accounts and mlmmj lists filtered by `accesspolicy` (README 3.6) |
+| Who is listed | MySQL views: every row of `vmail.mailbox` (no `WHERE`, disabled accounts included); PostgreSQL view: `active = 1` | deliverable entries only (CONFIGURATION.md 3.7), alias accounts and mlmmj lists filtered by `accesspolicy` (CONFIGURATION.md 3.6) |
 | Request parameters | `_source`, `_gid` and `_cid` were trusted (any book, any domain as a group, any ID) | the scope comes from the login and the configuration only (docs/THREAT_MODEL.md) |
 
 ## 2. Steps
@@ -42,15 +42,15 @@ bound.
 **Order with the Roundcube 1.7 upgrade.** GAL Bridge needs Roundcube 1.7: on 1.6 the Composer
 installer refuses it (`Version check failed!`) and `diag` fails (`not supported`). On 1.7 the old
 plugin stops every request, the login page included (section 0). On a server that still runs
-Roundcube 1.6 (iRedMail 1.8.0 and older) do steps 1 and 2 with the release archive (README 2.1, not
+Roundcube 1.6 (iRedMail 1.8.0 and older) do steps 1 and 2 with the release archive (INSTALLATION.md 2.1, not
 Composer); then, in one maintenance window, remove `'sql_global_addressbooks'` from
-`$config['plugins']`, upgrade Roundcube to the newest 1.7.x (README section 5, "Roundcube on
+`$config['plugins']`, upgrade Roundcube to the newest 1.7.x (OPERATIONS.md section 5, "Roundcube on
 iRedMail") and do step 3. If Roundcube already runs 1.7 with the old plugin still listed, the webmail
 is down: take it out of the list at once, then continue with step 2.
 
 1. **Inventory.** Keep a copy of `plugins/sql_global_addressbooks/config.inc.php` and note which
    books were in use and for which domains.
-2. **Install GAL Bridge without enabling it yet**: README sections 2.1 (files; with Composer answer
+2. **Install GAL Bridge without enabling it yet**: INSTALLATION.md sections 2.1 (files; with Composer answer
    `n` when the installer asks whether to activate the plugin), 2.2 (database role), 2.3
    (configuration file and permissions), the ownership of `config/config.inc.php` from 2.4 (iRedMail
    installs it as the PHP user, mode 0600), 2.5 (`addressbook_sort_col`) and 2.6 (web server rule).
@@ -64,7 +64,7 @@ is down: take it out of the list at once, then continue with step 2.
    `runuser -u www-data -- plugins/galbridge/bin/galbridge.sh diag`), `diag --user=<login>` for one
    user of each kind of book, and `diag --url=https://mail.example.com/mail/` for the web server rule
    (with iRedMail's self-signed certificate add `--cafile=/etc/ssl/certs/iRedMail.crt` and use the
-   host name of the certificate, README 2.6). `diag` warns while `sql_global_addressbooks` is still enabled
+   host name of the certificate, INSTALLATION.md 2.6). `diag` warns while `sql_global_addressbooks` is still enabled
    and while the old `_sql_*` book options are still set in the main configuration.
 5. **Remove the old database objects** (section 4) and, on PostgreSQL, rotate the `vmail` password.
 6. **Remove the old plugin**: `rm -r plugins/sql_global_addressbooks` (its `config.inc.php` goes with
@@ -88,9 +88,9 @@ plugin does not load on 1.7), so do not keep the old view "just in case".
 | `_sql_gb_data_hidden` | `[]` | `galbridge_global_data_domains_exclude` | deny-list |
 | (the old global book also listed the viewer's own domain) | | `galbridge_global_include_home = true` | GAL Bridge subtracts the viewer's domain-book scope by default, so nobody appears twice |
 | `_sql_supportbook_list` (and `_sql_supportbook`, which the old code also read) | `[]` | the global book, see section 6 | GAL Bridge 1.0 has one cross-domain book |
-| the VIEW `global_addressbook` | | `galbridge_db_dsn` | README 2.2, 2.3 |
+| the VIEW `global_addressbook` | | `galbridge_db_dsn` | INSTALLATION.md 2.2, 2.3 |
 
-New options without an old equivalent are documented in `config.inc.php.dist` and README section 3
+New options without an old equivalent are documented in `config.inc.php.dist` and CONFIGURATION.md section 3
 (fields, organizations, lists and `accesspolicy`, hidden entries, limits, IMAP host binding).
 
 ## 4. Removing the old database objects
@@ -146,10 +146,10 @@ Then **treat the `vmail` password as disclosed and rotate it**:
   `enabledeliver = 0`, expired accounts and the accounts of inactive, expired or backup-MX domains
   disappear (the old MySQL views listed every mailbox).
 * **Alias accounts and mlmmj lists appear** as entries, but only for users who may post to them
-  (README 3.6). Per-user alias addresses are no longer shown unless `galbridge_user_aliases = true`.
+  (CONFIGURATION.md 3.6). Per-user alias addresses are no longer shown unless `galbridge_user_aliases = true`.
 * **More fields**: first name, last name and department are shown when they are filled in vmail
   (open-source iRedAdmin fills only the display name); phone, mobile, organization and birthday are
-  opt-in (phone, mobile and birthday also need the commented-out grant of README 2.2).
+  opt-in (phone, mobile and birthday also need the commented-out grant of INSTALLATION.md 2.2).
 * **Department groups** in the domain book (or domain groups for organizations with several
   domains); group expansion is complete or refused above the cap, never cut.
 * **Search starts at two characters** (`galbridge_min_search_length`); compose autocomplete follows.
@@ -159,9 +159,9 @@ Then **treat the `vmail` password as disclosed and rotate it**:
 * **Organizations**: users of any domain of an organization see the colleagues of all its domains in
   their domain book.
 * **Exports** of the whole domain book are limited to `galbridge_max_export` (2000) entries. A
-  refused export downloads nothing; as a file download it cannot show a message (README 4).
+  refused export downloads nothing; as a file download it cannot show a message (CONFIGURATION.md 4).
 * **Directory outages** show "The directory is temporarily unavailable." instead of an empty book
-  (README 3.9).
+  (CONFIGURATION.md 3.9).
 
 ## 6. Recipe: a "support book" with the global book
 
